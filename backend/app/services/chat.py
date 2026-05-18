@@ -29,7 +29,7 @@ from app.schemas.chat import SendMessageRequest
 from app.security.crypto import decrypt_api_key
 from app.services.api_keys import get_active_api_key
 from app.services.compaction import compact_conversation
-from app.services.context import build_context_bundle, context_window_tokens_for_model
+from app.services.context import build_context_bundle, build_message_branch, context_window_tokens_for_model
 from app.services.dead_letters import push_dead_letter
 from app.services.usage import record_usage
 
@@ -59,6 +59,21 @@ def preferred_model(models: list[str], configured: str | None) -> str:
         if DEFAULT_CHAT_MODEL.lower() in model.lower():
             return model
     return models[0] if models else DEFAULT_CHAT_MODEL
+
+
+async def _latest_completed_message_id(db, user_id: str, conversation_id: str) -> str | None:
+    return (
+        await db.execute(
+            select(Message.id)
+            .where(
+                Message.user_id == user_id,
+                Message.conversation_id == conversation_id,
+                Message.status.in_(["completed", "interrupted"]),
+            )
+            .order_by(Message.created_at.desc())
+            .limit(1)
+        )
+    ).scalar_one_or_none()
 
 
 async def stream_chat(user_id: str, payload: SendMessageRequest, conversation_id: str | None = None) -> AsyncIterator[bytes]:
@@ -128,9 +143,24 @@ async def stream_chat(user_id: str, payload: SendMessageRequest, conversation_id
                     return
             attachments = rows
 
+        parent_message_id = await _latest_completed_message_id(db, user_id, conversation_id)
+        if payload.retry_of_message_id:
+            retry_target = await db.get(Message, payload.retry_of_message_id)
+            if retry_target and retry_target.user_id == user_id and retry_target.conversation_id == conversation_id:
+                parent_message_id = retry_target.parent_message_id
+                if retry_target.role == "assistant" and retry_target.parent_message_id:
+                    retry_parent = await db.get(Message, retry_target.parent_message_id)
+                    if (
+                        retry_parent
+                        and retry_parent.user_id == user_id
+                        and retry_parent.conversation_id == conversation_id
+                    ):
+                        parent_message_id = retry_parent.parent_message_id
+
         user_message = Message(
             user_id=user_id,
             conversation_id=conversation_id,
+            parent_message_id=parent_message_id,
             role="user",
             content=payload.content,
             status="completed",
@@ -440,7 +470,14 @@ async def stream_chat(user_id: str, payload: SendMessageRequest, conversation_id
                 "finished_at": datetime.utcnow().isoformat(),
             },
         )
-        asyncio.create_task(maybe_auto_compact(user_id, conversation_id))
+        asyncio.create_task(
+            maybe_auto_compact(
+                user_id,
+                conversation_id,
+                context_bundle.event_data(),
+                head_message_id=assistant_message_id,
+            )
+        )
     except asyncio.CancelledError:
         async with SessionLocal() as db:
             assistant = await db.get(Message, assistant_message_id)
@@ -483,7 +520,12 @@ async def stream_chat(user_id: str, payload: SendMessageRequest, conversation_id
         yield json_line("error", {"code": "UPSTREAM_ERROR", "message": str(exc)[:500], "retryable": True})
 
 
-async def maybe_auto_compact(user_id: str, conversation_id: str | None) -> None:
+async def maybe_auto_compact(
+    user_id: str,
+    conversation_id: str | None,
+    context_event: dict | None = None,
+    head_message_id: str | None = None,
+) -> None:
     """Triggered after each assistant reply finishes.
 
     Strategy: every Nth user message (N = settings.compaction_user_message_interval)
@@ -513,7 +555,7 @@ async def maybe_auto_compact(user_id: str, conversation_id: str | None) -> None:
                 # Another compaction is already in flight (watchdog will
                 # reset stale flags after compaction_watchdog_minutes).
                 return
-            active_compaction = (
+            active_compactions = (
                 await db.execute(
                     select(ConversationCompaction)
                     .where(
@@ -522,7 +564,7 @@ async def maybe_auto_compact(user_id: str, conversation_id: str | None) -> None:
                     )
                     .order_by(ConversationCompaction.created_at.desc())
                 )
-            ).scalars().first()
+            ).scalars().all()
             rows = (
                 await db.execute(
                     select(Message)
@@ -534,6 +576,13 @@ async def maybe_auto_compact(user_id: str, conversation_id: str | None) -> None:
                     .order_by(Message.created_at.asc())
                 )
             ).scalars().all()
+            if head_message_id:
+                branch_rows = build_message_branch(rows, head_message_id)
+                if branch_rows:
+                    rows = branch_rows
+            row_ids = {row.id for row in rows}
+            active_compaction = next((item for item in active_compactions if item.compaction_point_msg_id in row_ids), None)
+
             if active_compaction:
                 seen = False
                 rows_after_compaction: list[Message] = []
@@ -547,23 +596,34 @@ async def maybe_auto_compact(user_id: str, conversation_id: str | None) -> None:
                 rows_to_count = rows
 
             user_count_since = sum(1 for row in rows_to_count if row.role == "user")
-            if user_count_since < interval or user_count_since % interval != 0:
+            prompt_tokens = int((context_event or {}).get("prompt_tokens_estimated") or 0)
+            prompt_budget = int((context_event or {}).get("prompt_budget_tokens") or 0)
+            remaining_tokens = int((context_event or {}).get("remaining_context_tokens") or 0)
+            messages_to_refine = int((context_event or {}).get("messages_to_refine_count") or 0)
+            trigger_by_interval = user_count_since >= interval and user_count_since % interval == 0
+            trigger_by_trim = messages_to_refine > 0
+            trigger_by_ratio = prompt_budget > 0 and prompt_tokens >= int(prompt_budget * settings.compaction_trigger_ratio)
+            trigger_by_remaining = prompt_budget > 0 and remaining_tokens <= int(prompt_budget * (1 - settings.compaction_force_ratio))
+            if not (trigger_by_interval or trigger_by_trim or trigger_by_ratio or trigger_by_remaining):
                 return
 
             conversation.compaction_pending = True
             conversation.compaction_pending_since = datetime.utcnow()
             await db.commit()
             logger.info(
-                "auto_compact trigger user=%s conv=%s user_msgs_since_last=%d interval=%d",
+                "auto_compact trigger user=%s conv=%s user_msgs_since_last=%d interval=%d trim=%d ratio=%s remaining=%d",
                 user_id,
                 conversation_id,
                 user_count_since,
                 interval,
+                messages_to_refine,
+                trigger_by_ratio,
+                remaining_tokens,
             )
 
         async with SessionLocal() as db:
             try:
-                await compact_conversation(db, user_id, conversation_id)
+                await compact_conversation(db, user_id, conversation_id, head_message_id=head_message_id)
                 await db.commit()
             except Exception as exc:
                 logger.exception("auto_compact compact_conversation failed conv=%s", conversation_id)

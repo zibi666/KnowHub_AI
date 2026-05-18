@@ -46,6 +46,10 @@ class ContextStatsOut(ApiModel):
     included_history_messages: int
     included_attachment_count: int
     was_trimmed: bool
+    messages_to_refine_count: int = 0
+    remaining_context_tokens: int = 0
+    summary_used: bool = False
+    branch_message_count: int = 0
 
 
 class SendMessageRequest(ApiModel):

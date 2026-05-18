@@ -71,6 +71,10 @@ const contextStats = ref({
   includedHistoryMessages: 0,
   includedAttachmentCount: 0,
   wasTrimmed: false,
+  messagesToRefineCount: 0,
+  remainingContextTokens: DEFAULT_CONTEXT_WINDOW_TOKENS,
+  summaryUsed: false,
+  branchMessageCount: 0,
   tokensSource: 'estimated' as 'estimated' | 'actual'
 })
 const messageScroller = ref<HTMLElement | null>(null)
@@ -179,6 +183,10 @@ function updateContextStats(data: any, source: 'estimated' | 'actual' = 'estimat
     includedHistoryMessages: Number(data.included_history_messages ?? data.includedHistoryMessages ?? 0),
     includedAttachmentCount: Number(data.included_attachment_count ?? data.includedAttachmentCount ?? 0),
     wasTrimmed: Boolean(data.was_trimmed ?? data.wasTrimmed ?? false),
+    messagesToRefineCount: Number(data.messages_to_refine_count ?? data.messagesToRefineCount ?? 0),
+    remainingContextTokens: Number(data.remaining_context_tokens ?? data.remainingContextTokens ?? 0),
+    summaryUsed: Boolean(data.summary_used ?? data.summaryUsed ?? false),
+    branchMessageCount: Number(data.branch_message_count ?? data.branchMessageCount ?? 0),
     tokensSource: source
   }
 }
@@ -1060,7 +1068,9 @@ onMounted(async () => {
                 <span class="context-label">上下文</span>
                 <span class="context-ring" :style="contextRingStyle"><span class="context-ring-inner">{{ contextPercentLabel }}</span></span>
                 <span class="context-text">已用 {{ formatTokenCount(contextUsedTokens) }} 标记，共 {{ formatTokenCount(contextTotalTokens) }}</span>
-                <span v-if="contextStats.hasActiveCompaction" class="context-text">· 已压缩</span>
+                <span v-if="contextStats.summaryUsed" class="context-text">· 已用摘要</span>
+                <span v-else-if="contextStats.hasActiveCompaction" class="context-text">· 有摘要</span>
+                <span v-if="contextStats.wasTrimmed" class="context-text">· 已裁剪</span>
               </div>
               <button class="send-button" type="submit" :disabled="streaming || !input.trim()" title="发送" aria-label="发送">
                 <Send :size="18" />

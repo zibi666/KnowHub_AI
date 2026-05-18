@@ -18,10 +18,14 @@ export interface Conversation {
 export interface Message {
   id: string
   conversationId: string
+  parentMessageId?: string | null
+  retryOfMessageId?: string | null
   role: 'user' | 'assistant' | 'system'
   content: string
   status: string
   model?: string
+  promptTokens?: number
+  completionTokens?: number
   totalTokens: number
   tokensSource?: string
   createdAt: string
