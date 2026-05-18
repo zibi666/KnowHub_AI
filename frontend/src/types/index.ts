@@ -1,0 +1,60 @@
+export interface User {
+  id: string
+  username: string
+  role: 'admin' | 'user'
+  status: string
+  mustChangePassword: boolean
+  hasApiKey: boolean
+}
+
+export interface Conversation {
+  id: string
+  title: string
+  autoCompactionEnabled: boolean
+  createdAt: string
+  updatedAt: string
+}
+
+export interface Message {
+  id: string
+  conversationId: string
+  role: 'user' | 'assistant' | 'system'
+  content: string
+  status: string
+  model?: string
+  totalTokens: number
+  tokensSource?: string
+  createdAt: string
+}
+
+export interface Attachment {
+  id: string
+  filename: string
+  mimeSniffed: string
+  sizeBytes: number
+  parseStatus: string
+  parseError?: string
+  contextTextTokens: number
+}
+
+export interface ApiKeyGroup {
+  id: string
+  name: string
+  description?: string
+}
+
+export interface ApiKeyEntry {
+  id: string
+  userId?: string | null
+  username?: string | null
+  name: string
+  groupId?: string | null
+  groupName?: string | null
+  fingerprint: string
+  last4: string
+  maskedKey: string
+  status: string
+  isActive: boolean
+  availableModels: string[]
+  probedAt?: string | null
+}
