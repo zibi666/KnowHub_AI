@@ -65,6 +65,7 @@ const reasoningEffort = ref<ReasoningEffort>('medium')
 const streaming = ref(false)
 const pendingAttachments = ref<Attachment[]>([])
 const uploadingAttachmentNames = ref<string[]>([])
+const composerDragActive = ref(false)
 const attachmentPreviewOpen = ref(false)
 const attachmentPreview = ref<Attachment | null>(null)
 const attachmentPreviewText = ref('')
@@ -175,6 +176,28 @@ function formatBytes(value: number) {
     index += 1
   }
   return `${size >= 10 || index === 0 ? size.toFixed(0) : size.toFixed(1)} ${units[index]}`
+}
+
+function timestampForUploadName(date = new Date()) {
+  const pad = (value: number) => String(value).padStart(2, '0')
+  return `${date.getFullYear()}${pad(date.getMonth() + 1)}${pad(date.getDate())}-${pad(date.getHours())}${pad(date.getMinutes())}${pad(date.getSeconds())}`
+}
+
+function extensionFromMime(mime: string | undefined) {
+  if (mime === 'image/jpeg') return 'jpg'
+  if (mime === 'image/webp') return 'webp'
+  if (mime === 'image/gif') return 'gif'
+  if (mime === 'image/png') return 'png'
+  return 'png'
+}
+
+function renamePastedImage(file: File) {
+  if (!file.type.startsWith('image/')) return file
+  const extension = extensionFromMime(file.type)
+  return new File([file], `pasted-image-${timestampForUploadName()}.${extension}`, {
+    type: file.type || 'image/png',
+    lastModified: Date.now()
+  })
 }
 
 function removePendingAttachment(id: string) {
@@ -961,10 +984,7 @@ async function loadContextStats() {
   }
 }
 
-async function uploadFile(event: Event) {
-  const inputEl = event.target as HTMLInputElement
-  const file = inputEl.files?.[0]
-  if (!file) return
+async function uploadAttachmentFile(file: File) {
   uploadingAttachmentNames.value.push(file.name)
   try {
     const presign = await apiFetch<{ uploadId: string; uploadUrl: string; method: string }>('/attachments/presign', {
@@ -990,8 +1010,68 @@ async function uploadFile(event: Event) {
     error.value = err instanceof Error ? err.message : '附件上传失败'
   } finally {
     uploadingAttachmentNames.value = uploadingAttachmentNames.value.filter((name) => name !== file.name)
+  }
+}
+
+async function uploadAttachmentFiles(files: File[]) {
+  if (!files.length) return
+  for (const file of files) {
+    await uploadAttachmentFile(file)
+  }
+}
+
+async function uploadFile(event: Event) {
+  const inputEl = event.target as HTMLInputElement
+  const files = Array.from(inputEl.files || [])
+  if (!files.length) return
+  try {
+    await uploadAttachmentFiles(files)
+  } finally {
     inputEl.value = ''
   }
+}
+
+function filesFromClipboard(event: ClipboardEvent) {
+  const items = Array.from(event.clipboardData?.items || [])
+  return items
+    .filter((item) => item.kind === 'file')
+    .map((item) => item.getAsFile())
+    .filter((file): file is File => Boolean(file))
+    .map(renamePastedImage)
+}
+
+function handleComposerPaste(event: ClipboardEvent) {
+  const files = filesFromClipboard(event)
+  if (!files.length) return
+  event.preventDefault()
+  void uploadAttachmentFiles(files)
+}
+
+function handleComposerDragEnter(event: DragEvent) {
+  if (!event.dataTransfer?.types.includes('Files')) return
+  composerDragActive.value = true
+}
+
+function handleComposerDragOver(event: DragEvent) {
+  if (!event.dataTransfer?.types.includes('Files')) return
+  event.preventDefault()
+  composerDragActive.value = true
+  event.dataTransfer.dropEffect = 'copy'
+}
+
+function handleComposerDragLeave(event: DragEvent) {
+  const current = event.currentTarget as Node | null
+  const related = event.relatedTarget as Node | null
+  if (current && related && current.contains(related)) return
+  composerDragActive.value = false
+}
+
+function handleComposerDrop(event: DragEvent) {
+  const files = Array.from(event.dataTransfer?.files || [])
+  if (!files.length) return
+  event.preventDefault()
+  composerDragActive.value = false
+  void uploadAttachmentFiles(files)
 }
 
 async function send() {
@@ -1331,7 +1411,16 @@ onMounted(async () => {
           </span>
         </div>
 
-        <form class="composer-card" :class="{ 'is-expanded': composerExpanded }" @submit.prevent="send">
+        <form
+          class="composer-card"
+          :class="{ 'is-expanded': composerExpanded, 'is-drag-active': composerDragActive }"
+          @submit.prevent="send"
+          @paste="handleComposerPaste"
+          @dragenter.prevent="handleComposerDragEnter"
+          @dragover="handleComposerDragOver"
+          @dragleave="handleComposerDragLeave"
+          @drop="handleComposerDrop"
+        >
           <button
             class="composer-expand-button"
             type="button"
@@ -1353,7 +1442,7 @@ onMounted(async () => {
             <div class="composer-left-tools">
               <label class="composer-icon-button" title="添加附件" aria-label="添加附件">
                 <Paperclip :size="18" />
-                <input class="hidden" type="file" @change="uploadFile" />
+                <input class="hidden" type="file" multiple @change="uploadFile" />
               </label>
 
             </div>
