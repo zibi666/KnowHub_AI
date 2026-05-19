@@ -1017,6 +1017,7 @@ body,
 
 .chat-main {
   position: relative;
+  isolation: isolate;
 }
 
 .chat-muted {
@@ -1028,6 +1029,14 @@ body,
   padding-top: 5.2rem !important;
   padding-bottom: 2.4rem !important;
   scrollbar-color: var(--scroll-thumb) transparent;
+}
+
+.chat-main.has-messages .chat-surface {
+  padding-bottom: 10.75rem !important;
+}
+
+.chat-main.has-messages.composer-open .chat-surface {
+  padding-bottom: clamp(15rem, 42vh, 25rem) !important;
 }
 
 .chat-flow,
@@ -1233,15 +1242,24 @@ body,
 
 .chat-footer {
   pointer-events: auto;
-  position: sticky;
-  bottom: 0;
+  position: absolute;
+  top: 50%;
+  left: 50%;
   z-index: 18;
   display: flex;
   flex-direction: column;
   align-items: center;
-  margin: clamp(3.5rem, 10vh, 7rem) auto 0;
+  margin: 0;
   border-top: 0;
   background: transparent;
+  transform: translate(-50%, -50%);
+  transition: top 180ms ease, bottom 180ms ease, transform 180ms ease;
+}
+
+.chat-main.has-messages .chat-footer {
+  top: auto;
+  bottom: 0;
+  transform: translateX(-50%);
 }
 
 .scroll-bottom-button {
@@ -1579,47 +1597,6 @@ body,
   color: var(--muted);
 }
 
-.context-meter {
-  display: inline-flex;
-  align-items: center;
-  flex: 0 0 auto;
-  min-width: 0;
-  gap: 0.25rem;
-  color: var(--muted);
-  font-size: 0.78rem;
-}
-
-.context-label {
-  display: none;
-}
-
-.context-ring {
-  --context-progress: 0%;
-  display: grid;
-  width: 30px;
-  height: 30px;
-  place-items: center;
-  border-radius: 999px;
-  background:
-    radial-gradient(circle at center, var(--input-bg) 56%, transparent 58%),
-    conic-gradient(var(--bubble-bg) var(--context-progress), var(--line) 0);
-}
-
-.context-ring-inner {
-  color: var(--text);
-  font-size: 0.64rem;
-  font-weight: 700;
-}
-
-.context-text {
-  display: none;
-  min-width: 0;
-  color: var(--text);
-  overflow: hidden;
-  text-overflow: ellipsis;
-  white-space: nowrap;
-}
-
 .send-button {
   display: inline-flex;
   height: 30px;
@@ -1952,17 +1929,6 @@ body,
 
   .model-picker-button {
     max-width: 8rem;
-  }
-
-  .context-meter {
-    flex: 0 0 auto;
-    min-width: 0;
-    justify-content: flex-end;
-  }
-
-  .context-text,
-  .context-label {
-    display: none;
   }
 
   .message-bubble,

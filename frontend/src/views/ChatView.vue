@@ -118,22 +118,6 @@ const conversationUsage = computed(() => {
 })
 const shellClass = computed(() => (themeMode.value === 'dark' ? 'theme-dark' : 'theme-light'))
 const selectedBubble = computed(() => bubbleOptions.find((item) => item.value === bubbleColor.value) || bubbleOptions[0])
-const contextTotalTokens = computed(() => contextStats.value.contextWindowTokens || DEFAULT_CONTEXT_WINDOW_TOKENS)
-const contextUsedTokens = computed(() => {
-  const pendingInputTokens = estimateDisplayTokens(input.value)
-  return Math.min(contextTotalTokens.value, contextStats.value.promptTokensEstimated + pendingInputTokens)
-})
-const contextPercent = computed(() => Math.min(100, Math.round((contextUsedTokens.value / contextTotalTokens.value) * 100)))
-const contextPercentLabel = computed(() => {
-  if (contextUsedTokens.value > 0 && contextPercent.value < 1) return '<1%'
-  return `${contextPercent.value}%`
-})
-const contextRingStyle = computed(
-  () =>
-    ({
-      '--context-progress': `${contextPercent.value}%`
-    }) as CSSProperties
-)
 const shellStyle = computed(
   () =>
     ({
@@ -151,20 +135,6 @@ const parseStatusText: Record<string, string> = {
   parsing: '解析中',
   success: '解析完成',
   failed: '解析失败'
-}
-
-function estimateDisplayTokens(text: string) {
-  let score = 0
-  for (const char of text) {
-    if (/\s/.test(char)) continue
-    score += char.charCodeAt(0) > 127 ? 1 : 0.25
-  }
-  return Math.ceil(score)
-}
-
-function formatTokenCount(value: number) {
-  if (value >= 1000) return `${Math.round(value / 1000)}k`
-  return value.toLocaleString()
 }
 
 const MESSAGE_ROLE_ORDER: Record<Message['role'], number> = {
@@ -877,12 +847,6 @@ function handleComposerKeydown(event: KeyboardEvent) {
   void send()
 }
 
-async function compact() {
-  if (!currentId.value) return
-  await apiFetch(`/conversations/${currentId.value}/compact`, { method: 'POST' })
-  await openConversation(currentId.value)
-}
-
 function closeFloatingMenus() {
   modelMenuOpen.value = false
   settingsMenuOpen.value = false
@@ -953,7 +917,10 @@ onMounted(async () => {
       </div>
     </aside>
 
-    <main class="chat-main flex flex-col min-w-0 min-h-0 overflow-hidden">
+    <main
+      class="chat-main flex flex-col min-w-0 min-h-0 overflow-hidden"
+      :class="{ 'has-messages': messages.length > 0, 'composer-open': composerExpanded }"
+    >
       <header class="chat-header">
         <div class="top-model-controls" @click.stop>
           <div class="model-picker model-picker-model" @click.stop>
@@ -1003,34 +970,33 @@ onMounted(async () => {
           <span>{{ conversationUsage.tokens.toLocaleString() }} Tokens · {{ conversationUsage.requests }} requests</span>
           <span>{{ currentConversation?.title || '新对话' }}</span>
         </div>
-        <button v-if="currentId" class="chat-glass-button" @click="compact">压缩上下文</button>
       </header>
 
       <section ref="messageScroller" class="chat-surface flex-1 min-h-0 overflow-y-auto overscroll-contain px-6 py-8" @scroll="handleScrollerScroll">
         <div class="chat-flow mx-auto">
-          <div v-if="!messages.length" class="empty-chat-state flex items-center justify-center chat-muted">开始一个新问题吧</div>
           <ChatMessage v-for="message in messages" :key="message.id" :message="message" />
         </div>
+      </section>
 
-        <footer class="chat-footer p-4">
-          <button
-            v-if="showScrollToBottom"
-            class="scroll-bottom-button"
-            type="button"
-            title="返回底部"
-            aria-label="返回底部"
-            @click="returnToBottom"
-          >
-            <ArrowDown :size="20" />
-          </button>
+      <footer class="chat-footer p-4">
+        <button
+          v-if="showScrollToBottom"
+          class="scroll-bottom-button"
+          type="button"
+          title="返回底部"
+          aria-label="返回底部"
+          @click="returnToBottom"
+        >
+          <ArrowDown :size="20" />
+        </button>
 
-          <div v-if="pendingAttachments.length" class="composer-attachments mb-2 flex flex-wrap gap-2">
-            <span v-for="item in pendingAttachments" :key="item.id" class="attachment-pill">
-              {{ item.filename }} - {{ parseStatusText[item.parseStatus] || item.parseStatus }}
-            </span>
-          </div>
+        <div v-if="pendingAttachments.length" class="composer-attachments mb-2 flex flex-wrap gap-2">
+          <span v-for="item in pendingAttachments" :key="item.id" class="attachment-pill">
+            {{ item.filename }} - {{ parseStatusText[item.parseStatus] || item.parseStatus }}
+          </span>
+        </div>
 
-          <form class="composer-card" :class="{ 'is-expanded': composerExpanded }" @submit.prevent="send">
+        <form class="composer-card" :class="{ 'is-expanded': composerExpanded }" @submit.prevent="send">
           <button
             class="composer-expand-button"
             type="button"
@@ -1058,22 +1024,13 @@ onMounted(async () => {
             </div>
 
             <div class="composer-right-tools">
-              <div class="context-meter">
-                <span class="context-label">上下文</span>
-                <span class="context-ring" :style="contextRingStyle"><span class="context-ring-inner">{{ contextPercentLabel }}</span></span>
-                <span class="context-text">已用 {{ formatTokenCount(contextUsedTokens) }} 标记，共 {{ formatTokenCount(contextTotalTokens) }}</span>
-                <span v-if="contextStats.summaryUsed" class="context-text">· 已用摘要</span>
-                <span v-else-if="contextStats.hasActiveCompaction" class="context-text">· 有摘要</span>
-                <span v-if="contextStats.wasTrimmed" class="context-text">· 已裁剪</span>
-              </div>
               <button class="send-button" type="submit" :disabled="streaming || !input.trim()" title="发送" aria-label="发送">
                 <Send :size="18" />
               </button>
             </div>
           </div>
-          </form>
-        </footer>
-      </section>
+        </form>
+      </footer>
 
 
     </main>
