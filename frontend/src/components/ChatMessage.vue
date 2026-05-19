@@ -1,6 +1,6 @@
 <script setup lang="ts">
 import { computed, ref, watch } from 'vue'
-import { ChevronDown, ChevronUp, FileText, Image as ImageIcon } from 'lucide-vue-next'
+import { ChevronDown, ChevronUp, FileText } from 'lucide-vue-next'
 import MarkdownMessage from './MarkdownMessage.vue'
 import type { Attachment, Message } from '../types'
 
@@ -39,16 +39,8 @@ const collapsibleClasses = computed(() => ({
   'is-user': isUserMessage.value,
   'is-assistant': !isUserMessage.value
 }))
-const hasAttachments = computed(() => Boolean(props.message.attachments?.length))
 const imageAttachments = computed(() => (props.message.attachments || []).filter(isImageAttachment))
 const fileAttachments = computed(() => (props.message.attachments || []).filter((attachment) => !isImageAttachment(attachment)))
-
-const parseStatusText: Record<string, string> = {
-  pending: '等待解析',
-  parsing: '解析中',
-  success: '解析完成',
-  failed: '解析失败'
-}
 
 function isImageAttachment(item: Attachment) {
   return item.mimeSniffed?.startsWith('image/')
@@ -56,6 +48,25 @@ function isImageAttachment(item: Attachment) {
 
 function attachmentPreviewUrl(id: string) {
   return `/api/attachments/${id}/preview`
+}
+
+function attachmentKindLabel(item: Attachment) {
+  const filename = item.filename || ''
+  const mime = item.mimeSniffed || ''
+  const extension = filename.split('.').pop()?.toLowerCase() || ''
+  if (mime.includes('pdf') || extension === 'pdf') return 'PDF'
+  if (mime.includes('wordprocessingml') || ['doc', 'docx'].includes(extension)) return '文档'
+  if (['txt', 'md', 'csv'].includes(extension)) return '文本'
+  return '文件'
+}
+
+function attachmentKindClass(item: Attachment) {
+  const filename = item.filename || ''
+  const mime = item.mimeSniffed || ''
+  const extension = filename.split('.').pop()?.toLowerCase() || ''
+  if (mime.includes('pdf') || extension === 'pdf') return 'kind-pdf'
+  if (mime.includes('wordprocessingml') || ['doc', 'docx'].includes(extension)) return 'kind-doc'
+  return 'kind-file'
 }
 
 watch(
@@ -104,13 +115,15 @@ watch(
             <button
               v-for="attachment in fileAttachments"
               :key="attachment.id"
-              class="message-attachment-pill"
+              class="message-file-card"
               type="button"
               @click="emit('previewAttachment', attachment)"
             >
-              <FileText :size="14" />
-              <span>{{ attachment.filename }}</span>
-              <em>{{ parseStatusText[attachment.parseStatus] || attachment.parseStatus }}</em>
+              <span class="message-file-icon" :class="attachmentKindClass(attachment)"><FileText :size="21" /></span>
+              <span class="message-file-meta">
+                <strong>{{ attachment.filename }}</strong>
+                <em>{{ attachmentKindLabel(attachment) }}</em>
+              </span>
             </button>
           </div>
         </template>

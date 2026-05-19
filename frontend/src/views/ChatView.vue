@@ -162,6 +162,26 @@ function attachmentPreviewUrl(id: string) {
   return `/api/attachments/${id}/preview`
 }
 
+function attachmentKindLabel(item: Attachment | { filename: string; mimeSniffed?: string }) {
+  const filename = item.filename || ''
+  const mime = item.mimeSniffed || ''
+  const extension = filename.split('.').pop()?.toLowerCase() || ''
+  if (mime.includes('pdf') || extension === 'pdf') return 'PDF'
+  if (mime.includes('wordprocessingml') || ['doc', 'docx'].includes(extension)) return '文档'
+  if (['txt', 'md', 'csv'].includes(extension)) return '文本'
+  if (['js', 'ts', 'tsx', 'vue', 'py', 'java', 'go', 'rs', 'toml', 'json', 'yaml', 'yml', 'sql', 'html', 'css'].includes(extension)) return '文件'
+  return '文件'
+}
+
+function attachmentKindClass(item: Attachment | { filename: string; mimeSniffed?: string }) {
+  const filename = item.filename || ''
+  const mime = item.mimeSniffed || ''
+  const extension = filename.split('.').pop()?.toLowerCase() || ''
+  if (mime.includes('pdf') || extension === 'pdf') return 'kind-pdf'
+  if (mime.includes('wordprocessingml') || ['doc', 'docx'].includes(extension)) return 'kind-doc'
+  return 'kind-file'
+}
+
 function attachmentDownloadUrl(id: string) {
   return `/api/attachments/${id}/download`
 }
@@ -1413,23 +1433,31 @@ onMounted(async () => {
           <div v-if="uploadingAttachmentNames.length || pendingAttachments.length" class="composer-attachments">
             <div v-for="name in uploadingAttachmentNames" :key="`uploading-${name}`" class="composer-attachment-card is-uploading">
               <div class="composer-attachment-loading" aria-hidden="true" />
-              <span>{{ name }}</span>
+              <div class="composer-attachment-meta">
+                <strong>{{ name }}</strong>
+                <span>上传中</span>
+              </div>
             </div>
             <div
               v-for="item in pendingAttachments"
               :key="item.id"
               class="composer-attachment-card"
-              :class="{ 'is-image': isImageAttachment(item) }"
+              :class="{ 'is-image': isImageAttachment(item), 'is-file': !isImageAttachment(item) }"
             >
               <button class="composer-attachment-preview" type="button" @click="openAttachmentPreview(item)">
                 <img v-if="isImageAttachment(item)" :src="attachmentPreviewUrl(item.id)" :alt="item.filename" />
-                <FileText v-else :size="24" />
-                <span v-if="!isImageAttachment(item)">{{ item.filename }}</span>
+                <template v-else>
+                  <span class="composer-file-icon" :class="attachmentKindClass(item)"><FileText :size="21" /></span>
+                  <span class="composer-attachment-meta">
+                    <strong>{{ item.filename }}</strong>
+                    <em>{{ attachmentKindLabel(item) }}</em>
+                  </span>
+                </template>
               </button>
               <button class="composer-attachment-remove" type="button" title="移除本次附件" aria-label="移除本次附件" @click.stop="removePendingAttachment(item.id)">
                 <X :size="14" />
               </button>
-              <span class="composer-attachment-status">{{ parseStatusText[item.parseStatus] || item.parseStatus }}</span>
+              <span v-if="isImageAttachment(item)" class="composer-attachment-status">{{ parseStatusText[item.parseStatus] || item.parseStatus }}</span>
             </div>
           </div>
           <button
