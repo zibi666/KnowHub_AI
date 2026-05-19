@@ -1,6 +1,6 @@
 <script setup lang="ts">
 import { computed, nextTick, onMounted, ref, type CSSProperties } from 'vue'
-import { ArrowDown, ChevronDown, LogOut, Maximize2, Minimize2, Paperclip, Plus, Send, Settings, X } from 'lucide-vue-next'
+import { ArrowDown, ChevronDown, Maximize2, Minimize2, Paperclip, Pencil, Plus, Send, Settings, X } from 'lucide-vue-next'
 import { useRouter } from 'vue-router'
 import { ApiError, apiFetch, localizeApiMessage, readCookie, streamJsonLines } from '../api/client'
 import ChatMessage from '../components/ChatMessage.vue'
@@ -83,6 +83,8 @@ const textSize = ref(15)
 const codeSize = ref(12)
 const settingsMenuOpen = ref(false)
 const settingsOpen = ref(false)
+const logoutConfirmOpen = ref(false)
+const logoutLoading = ref(false)
 const settingsTab = ref<SettingsTab>('appearance')
 const settingsNotice = ref('')
 const settingsError = ref('')
@@ -93,6 +95,11 @@ const selectedGroupId = ref('ungrouped')
 const selectedGroupKeys = ref<ApiKeyEntry[]>([])
 const groupKeysLoading = ref(false)
 const deletingConversationId = ref<string | null>(null)
+const renamingConversationId = ref<string | null>(null)
+const renameSaving = ref(false)
+const renameDialogOpen = ref(false)
+const renameDraft = ref('')
+const renameError = ref('')
 const selectedApiKeyGroup = computed(() => apiKeyGroups.value.find((group) => group.id === selectedGroupId.value) || null)
 const keyDrafts = ref<Record<string, { name: string; groupId: string }>>({})
 const groupDrafts = ref<Record<string, { name: string; description: string }>>({})
@@ -334,6 +341,28 @@ function toggleSettingsMenu() {
 function openAdminMonitor() {
   settingsMenuOpen.value = false
   void router.push('/admin')
+}
+
+function requestLogout() {
+  settingsMenuOpen.value = false
+  logoutConfirmOpen.value = true
+}
+
+function closeLogoutConfirm() {
+  if (logoutLoading.value) return
+  logoutConfirmOpen.value = false
+}
+
+async function confirmLogout() {
+  if (logoutLoading.value) return
+  logoutLoading.value = true
+  try {
+    await auth.logout()
+    logoutConfirmOpen.value = false
+    await router.push('/login')
+  } finally {
+    logoutLoading.value = false
+  }
 }
 
 async function selectSettingsTab(tab: SettingsTab) {
@@ -695,6 +724,48 @@ async function openConversation(id: string) {
   await scrollMessagesToBottom('auto')
 }
 
+function openRenameConversation(conversation: Conversation) {
+  if (streaming.value) return
+  renamingConversationId.value = conversation.id
+  renameDraft.value = conversation.title
+  renameError.value = ''
+  renameDialogOpen.value = true
+}
+
+function closeRenameDialog() {
+  if (renameSaving.value) return
+  renameDialogOpen.value = false
+  renamingConversationId.value = null
+  renameDraft.value = ''
+  renameError.value = ''
+}
+
+async function saveConversationTitle() {
+  const conversationId = renamingConversationId.value
+  if (!conversationId) return
+  const title = renameDraft.value.trim()
+  if (!title) {
+    renameError.value = '对话名称不能为空'
+    return
+  }
+  renameSaving.value = true
+  try {
+    const updated = await apiFetch<Conversation>(`/conversations/${conversationId}`, {
+      method: 'PATCH',
+      body: JSON.stringify({ title })
+    })
+    conversations.value = conversations.value.map((item) => (item.id === updated.id ? { ...item, ...updated } : item))
+    renameDialogOpen.value = false
+    renamingConversationId.value = null
+    renameDraft.value = ''
+    renameError.value = ''
+  } catch (err) {
+    renameError.value = err instanceof Error ? err.message : '修改对话名称失败'
+  } finally {
+    renameSaving.value = false
+  }
+}
+
 async function deleteConversation(conversation: Conversation) {
   if (deletingConversationId.value || streaming.value) return
   deletingConversationId.value = conversation.id
@@ -875,11 +946,6 @@ function closeFloatingMenus() {
   reasoningMenuOpen.value = false
 }
 
-async function logout() {
-  await auth.logout()
-  await router.push('/login')
-}
-
 onMounted(async () => {
   loadAppearance()
   await Promise.all([loadModels(), loadConversations()])
@@ -889,7 +955,14 @@ onMounted(async () => {
 <template>
   <div class="chat-shell h-screen overflow-hidden grid grid-cols-[280px_1fr]" :class="shellClass" :style="shellStyle" @click="closeFloatingMenus">
     <aside class="chat-sidebar flex flex-col min-h-0">
-      <div class="conversation-list flex-1 min-h-0 overflow-auto px-2 py-3 space-y-1">
+      <div class="chat-sidebar-top">
+        <button class="sidebar-new-chat-button" type="button" @click="newChat">
+          <Plus :size="18" />
+          <span>新对话</span>
+        </button>
+      </div>
+
+      <div class="conversation-list flex-1 min-h-0 overflow-auto px-2 py-2 space-y-1">
         <div
           v-for="conversation in conversations"
           :key="conversation.id"
@@ -899,25 +972,33 @@ onMounted(async () => {
           <button class="conversation-item" type="button" @click="openConversation(conversation.id)">
             {{ conversation.title }}
           </button>
-          <button
-            class="conversation-delete-button"
-            type="button"
-            title="删除对话"
-            aria-label="删除对话"
-            :disabled="deletingConversationId === conversation.id || streaming"
-            @click.stop="deleteConversation(conversation)"
-          >
-            <X :size="15" />
-          </button>
+          <div class="conversation-actions">
+            <button
+              class="conversation-action-button"
+              type="button"
+              title="修改名称"
+              aria-label="修改名称"
+              :disabled="streaming"
+              @click.stop="openRenameConversation(conversation)"
+            >
+              <Pencil :size="14" />
+            </button>
+            <button
+              class="conversation-action-button"
+              type="button"
+              title="删除对话"
+              aria-label="删除对话"
+              :disabled="deletingConversationId === conversation.id || streaming"
+              @click.stop="deleteConversation(conversation)"
+            >
+              <X :size="15" />
+            </button>
+          </div>
         </div>
       </div>
 
       <div class="chat-sidebar-footer">
         <div class="sidebar-action-panel">
-          <button class="sidebar-new-chat-button" type="button" @click="newChat">
-            <Plus :size="16" />
-            <span>新对话</span>
-          </button>
           <div class="sidebar-settings-menu" :class="{ open: settingsMenuOpen }" @pointerdown.stop @mousedown.stop @click.stop>
             <button class="sidebar-round-button" title="设置" aria-label="设置" type="button" @click.stop="toggleSettingsMenu">
               <Settings :size="17" />
@@ -925,6 +1006,7 @@ onMounted(async () => {
             <div v-if="settingsMenuOpen" class="sidebar-settings-popover" @pointerdown.stop @mousedown.stop @click.stop>
               <button type="button" @click="openSettings('appearance')">设置</button>
               <button v-if="auth.user?.role === 'admin'" type="button" @click="openAdminMonitor">管理员监控</button>
+              <button class="sidebar-settings-danger" type="button" @click="requestLogout">退出登录</button>
             </div>
           </div>
         </div>
@@ -934,7 +1016,6 @@ onMounted(async () => {
             <span class="sidebar-username">{{ auth.user?.username }}</span>
             <span class="sidebar-account-role">{{ auth.user?.role === 'admin' ? '管理员' : '用户' }}</span>
           </div>
-          <button class="sidebar-round-button" title="退出登录" aria-label="退出登录" @click="logout"><LogOut :size="17" /></button>
         </div>
       </div>
     </aside>
@@ -1262,6 +1343,45 @@ onMounted(async () => {
               <button class="settings-primary" type="submit">保存密码</button>
             </form>
           </section>
+        </div>
+      </section>
+    </div>
+
+    <div v-if="renameDialogOpen" class="rename-modal-backdrop" @click.self="closeRenameDialog">
+      <form class="rename-modal" role="dialog" aria-modal="true" aria-label="修改对话名称" @submit.prevent="saveConversationTitle">
+        <div class="rename-modal-header">
+          <h2>修改对话名称</h2>
+          <button type="button" class="rename-modal-close" title="关闭" aria-label="关闭" @click="closeRenameDialog">
+            <X :size="18" />
+          </button>
+        </div>
+        <input
+          v-model="renameDraft"
+          class="rename-modal-input"
+          maxlength="100"
+          placeholder="输入新的对话名称"
+          autofocus
+        />
+        <p v-if="renameError" class="rename-modal-error">{{ renameError }}</p>
+        <div class="rename-modal-actions">
+          <button type="button" class="rename-secondary-button" :disabled="renameSaving" @click="closeRenameDialog">取消</button>
+          <button type="submit" class="rename-primary-button" :disabled="renameSaving || !renameDraft.trim()">保存</button>
+        </div>
+      </form>
+    </div>
+
+    <div v-if="logoutConfirmOpen" class="confirm-modal-backdrop" @click.self="closeLogoutConfirm">
+      <section class="confirm-modal" role="dialog" aria-modal="true" aria-label="确认退出登录">
+        <div class="confirm-modal-header">
+          <h2>退出登录？</h2>
+          <button type="button" class="confirm-modal-close" title="关闭" aria-label="关闭" @click="closeLogoutConfirm">
+            <X :size="18" />
+          </button>
+        </div>
+        <p>退出后需要重新登录才能继续使用。</p>
+        <div class="confirm-modal-actions">
+          <button type="button" class="confirm-secondary-button" :disabled="logoutLoading" @click="closeLogoutConfirm">取消</button>
+          <button type="button" class="confirm-danger-button" :disabled="logoutLoading" @click="confirmLogout">确认退出</button>
         </div>
       </section>
     </div>
