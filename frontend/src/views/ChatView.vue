@@ -1006,7 +1006,12 @@ onMounted(async () => {
       </div>
 
       <div class="chat-sidebar-footer">
-        <div class="sidebar-action-panel">
+        <div class="sidebar-account-card">
+          <div class="sidebar-avatar" aria-hidden="true">{{ auth.user?.username?.slice(0, 1).toUpperCase() || 'U' }}</div>
+          <div class="sidebar-account-main">
+            <span class="sidebar-username">{{ auth.user?.username }}</span>
+            <span class="sidebar-account-role">{{ auth.user?.role === 'admin' ? '管理员' : '用户' }}</span>
+          </div>
           <div class="sidebar-settings-menu" :class="{ open: settingsMenuOpen }" @pointerdown.stop @mousedown.stop @click.stop>
             <button class="sidebar-round-button" title="设置" aria-label="设置" type="button" @click.stop="toggleSettingsMenu">
               <Settings :size="17" />
@@ -1016,13 +1021,6 @@ onMounted(async () => {
               <button v-if="auth.user?.role === 'admin'" type="button" @click="openAdminMonitor">管理员监控</button>
               <button class="sidebar-settings-danger" type="button" @click="requestLogout">退出登录</button>
             </div>
-          </div>
-        </div>
-        <div class="sidebar-account-card">
-          <div class="sidebar-avatar" aria-hidden="true">{{ auth.user?.username?.slice(0, 1).toUpperCase() || 'U' }}</div>
-          <div class="sidebar-account-main">
-            <span class="sidebar-username">{{ auth.user?.username }}</span>
-            <span class="sidebar-account-role">{{ auth.user?.role === 'admin' ? '管理员' : '用户' }}</span>
           </div>
         </div>
       </div>
