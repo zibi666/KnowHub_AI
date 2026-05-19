@@ -29,6 +29,7 @@ export interface Message {
   totalTokens: number
   tokensSource?: string
   createdAt: string
+  attachments?: Attachment[]
 }
 
 export interface ConversationSearchResult {

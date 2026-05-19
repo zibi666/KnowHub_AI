@@ -1,10 +1,11 @@
 <script setup lang="ts">
 import { computed, ref, watch } from 'vue'
-import { ChevronDown, ChevronUp } from 'lucide-vue-next'
+import { ChevronDown, ChevronUp, FileText, Image as ImageIcon } from 'lucide-vue-next'
 import MarkdownMessage from './MarkdownMessage.vue'
-import type { Message } from '../types'
+import type { Attachment, Message } from '../types'
 
 const props = defineProps<{ message: Message }>()
+const emit = defineEmits<{ previewAttachment: [attachment: Attachment] }>()
 
 const USER_COLLAPSE_CHARACTER_LIMIT = 120
 const USER_COLLAPSE_LINE_LIMIT = 3
@@ -38,6 +39,18 @@ const collapsibleClasses = computed(() => ({
   'is-user': isUserMessage.value,
   'is-assistant': !isUserMessage.value
 }))
+const hasAttachments = computed(() => Boolean(props.message.attachments?.length))
+
+const parseStatusText: Record<string, string> = {
+  pending: '等待解析',
+  parsing: '解析中',
+  success: '解析完成',
+  failed: '解析失败'
+}
+
+function isImageAttachment(item: Attachment) {
+  return item.mimeSniffed?.startsWith('image/')
+}
 
 watch(
   () => props.message.id,
@@ -67,6 +80,20 @@ watch(
             <div class="message-collapsible-content">
               <div class="plain-user-message">{{ message.content }}</div>
             </div>
+          </div>
+          <div v-if="hasAttachments" class="message-attachments">
+            <button
+              v-for="attachment in message.attachments"
+              :key="attachment.id"
+              class="message-attachment-pill"
+              type="button"
+              @click="emit('previewAttachment', attachment)"
+            >
+              <ImageIcon v-if="isImageAttachment(attachment)" :size="14" />
+              <FileText v-else :size="14" />
+              <span>{{ attachment.filename }}</span>
+              <em>{{ parseStatusText[attachment.parseStatus] || attachment.parseStatus }}</em>
+            </button>
           </div>
         </template>
         <div v-else-if="isLiveDraft && !message.content" class="thinking-panel">

@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from datetime import datetime
 
+from app.schemas.attachments import AttachmentOut
 from app.schemas.base import ApiModel
 
 
@@ -36,6 +37,7 @@ class MessageOut(ApiModel):
     total_tokens: int = 0
     tokens_source: str | None = None
     created_at: datetime
+    attachments: list[AttachmentOut] = []
 
 
 class ConversationSearchResult(ApiModel):

@@ -101,6 +101,18 @@ class OpenAICompatibleProvider:
     ) -> AsyncIterator[StreamEvent]:
         settings = get_settings()
         effective_reasoning = (reasoning_effort or settings.model_reasoning_effort).strip().lower() or settings.model_reasoning_effort
+        has_multimodal_content = any(isinstance(message.get("content"), list) for message in messages)
+        if has_multimodal_content:
+            async for event in self.chat_completions_stream(
+                api_key=api_key,
+                model=model,
+                messages=messages,
+                include_usage=include_usage,
+                max_completion_tokens=max_completion_tokens,
+                reasoning_effort=effective_reasoning,
+            ):
+                yield event
+            return
         if settings.model_api_mode == "responses":
             had_content = False
             try:

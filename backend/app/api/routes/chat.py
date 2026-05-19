@@ -10,7 +10,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from app.core.db import get_session
 from app.core.deps import get_current_user
 from app.core.errors import api_error
-from app.models.entities import Conversation, ConversationCompaction, CosTrafficDaily, Message, UsageDaily, User
+from app.models.entities import Attachment, Conversation, ConversationCompaction, CosTrafficDaily, Message, MessageAttachment, UsageDaily, User
 from app.schemas.chat import (
     ConversationOut,
     ConversationSearchResult,
@@ -41,6 +41,32 @@ def make_search_snippet(content: str, query: str, radius: int = 72) -> str:
     prefix = "..." if start > 0 else ""
     suffix = "..." if end < len(compact) else ""
     return f"{prefix}{compact[start:end].strip()}{suffix}"
+
+
+async def hydrate_message_attachments(db: AsyncSession, messages: list[Message], user_id: str) -> list[MessageOut]:
+    if not messages:
+        return []
+    message_ids = [message.id for message in messages]
+    rows = (
+        await db.execute(
+            select(MessageAttachment.message_id, Attachment)
+            .join(Attachment, Attachment.id == MessageAttachment.attachment_id)
+            .where(
+                MessageAttachment.message_id.in_(message_ids),
+                Attachment.user_id == user_id,
+                Attachment.deleted_at.is_(None),
+            )
+        )
+    ).all()
+    attachments_by_message_id: dict[str, list[Attachment]] = {}
+    for message_id, attachment in rows:
+        attachments_by_message_id.setdefault(message_id, []).append(attachment)
+    return [
+        MessageOut.model_validate(message).model_copy(
+            update={"attachments": attachments_by_message_id.get(message.id, [])}
+        )
+        for message in messages
+    ]
 
 
 @router.get("/conversations", response_model=list[ConversationOut])
@@ -190,9 +216,9 @@ async def list_messages(
             start = max(0, target_index - half_window)
             end = min(len(search_rows), start + limit)
             start = max(0, end - limit)
-            return search_rows[start:end]
+            return await hydrate_message_attachments(db, search_rows[start:end], user.id)
     visible_rows = branch_rows[-limit:] if len(branch_rows) > limit else branch_rows
-    return visible_rows
+    return await hydrate_message_attachments(db, visible_rows, user.id)
 
 
 @router.get("/conversations/{conversation_id}/messages/{message_id}", response_model=MessageOut)
@@ -205,7 +231,8 @@ async def get_message(
     message = await db.get(Message, message_id)
     if not message or message.user_id != user.id or message.conversation_id != conversation_id:
         raise api_error("FORBIDDEN", "消息不存在")
-    return message
+    rows = await hydrate_message_attachments(db, [message], user.id)
+    return rows[0]
 
 
 @router.get("/conversations/{conversation_id}/context", response_model=ContextStatsOut)

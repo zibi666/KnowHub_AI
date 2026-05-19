@@ -1085,6 +1085,7 @@ async function send() {
   error.value = ''
   streaming.value = true
   const userText = input.value
+  const outgoingAttachments = [...pendingAttachments.value]
   const attachmentIds = pendingAttachments.value.map((item) => item.id)
   input.value = ''
   pendingAttachments.value = []
@@ -1095,6 +1096,7 @@ async function send() {
     content: userText,
     status: 'completed',
     totalTokens: 0,
+    attachments: outgoingAttachments,
     createdAt: new Date().toISOString()
   })
   const assistantDraft: Message = {
@@ -1376,7 +1378,13 @@ onMounted(async () => {
               </div>
             </div>
           </div>
-          <ChatMessage v-else v-for="message in messages" :key="message.id" :message="message" />
+          <ChatMessage
+            v-else
+            v-for="message in messages"
+            :key="message.id"
+            :message="message"
+            @preview-attachment="openAttachmentPreview"
+          />
         </div>
       </section>
 

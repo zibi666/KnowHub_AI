@@ -2520,6 +2520,50 @@ body,
   padding: 0.55rem 1.55rem 0.55rem 1rem;
 }
 
+.message-attachments {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.35rem;
+  margin-top: 0.55rem;
+}
+
+.message-attachment-pill {
+  display: inline-flex;
+  max-width: 100%;
+  min-width: 0;
+  align-items: center;
+  gap: 0.35rem;
+  border: 1px solid rgba(255, 255, 255, 0.22);
+  border-radius: 999px;
+  background: rgba(255, 255, 255, 0.1);
+  color: rgba(255, 255, 255, 0.94);
+  font-size: 0.73rem;
+  line-height: 1;
+  padding: 0.33rem 0.52rem;
+  transition: background var(--motion-fast) ease, border-color var(--motion-fast) ease, transform var(--motion-fast) ease;
+}
+
+.message-attachment-pill:hover {
+  border-color: rgba(255, 255, 255, 0.42);
+  background: rgba(255, 255, 255, 0.16);
+  transform: translateY(-1px);
+}
+
+.message-attachment-pill span {
+  min-width: 0;
+  max-width: 12rem;
+  overflow: hidden;
+  font-weight: 700;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.message-attachment-pill em {
+  color: rgba(255, 255, 255, 0.68);
+  font-style: normal;
+  white-space: nowrap;
+}
+
 .plain-user-message {
   white-space: pre-wrap;
   overflow-wrap: anywhere;
