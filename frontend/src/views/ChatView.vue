@@ -104,9 +104,13 @@ const currentPassword = ref('')
 const replacementPassword = ref('')
 
 let scrollFrame: number | null = null
-let streamFlushFrame: number | null = null
+let streamFlushTimer: number | null = null
 let streamTextBuffer = ''
 let streamTargetMessage: Message | null = null
+const TYPEWRITER_BASE_DELAY_MS = 16
+const TYPEWRITER_SENTENCE_PAUSE_MS = 86
+const TYPEWRITER_COMMA_PAUSE_MS = 44
+const TYPEWRITER_LINE_PAUSE_MS = 58
 
 const currentConversation = computed(() => conversations.value.find((item) => item.id === currentId.value))
 const conversationUsage = computed(() => {
@@ -533,45 +537,63 @@ function scheduleScrollToBottom() {
 
 function appendStreamText(message: Message, text: string) {
   if (!text) return
+  if (streamTargetMessage && streamTargetMessage !== message && streamTextBuffer) {
+    streamTargetMessage.content += streamTextBuffer
+    streamTextBuffer = ''
+  }
   streamTargetMessage = message
   streamTextBuffer += text
   scheduleStreamFlush()
 }
 
+function typewriterChunkSize(buffer: string) {
+  const length = Array.from(buffer).length
+  if (length > 12000) return 18
+  if (length > 6000) return 12
+  if (length > 2500) return 8
+  if (length > 800) return 5
+  return 2
+}
+
+function takeTypewriterChunk(buffer: string, size: number) {
+  return Array.from(buffer).slice(0, size).join('')
+}
+
+function typewriterDelay(chunk: string, remaining: string) {
+  if (remaining.length > 8000) return 8
+  if (remaining.length > 2500) return 12
+  if (/\n$/.test(chunk)) return TYPEWRITER_LINE_PAUSE_MS
+  if (/[\u3002\uff01\uff1f.!?]$/.test(chunk)) return TYPEWRITER_SENTENCE_PAUSE_MS
+  if (/[\uff0c,\uff1b;\uff1a:]$/.test(chunk)) return TYPEWRITER_COMMA_PAUSE_MS
+  return TYPEWRITER_BASE_DELAY_MS
+}
+
 function flushStreamText() {
-  streamFlushFrame = null
+  streamFlushTimer = null
   if (!streamTargetMessage || !streamTextBuffer) return
 
-  // --- typewriter effect ---
-  // Drain characters per animation frame (~60 fps). Adaptive rate:
-  //   small buffer → slow & visible typing
-  //   large buffer → faster, but capped at ~28 chars/frame (~1680 chars/sec)
-  //   so a 6000-char "completed_text" payload still animates over ~3-4s
-  //   instead of flashing on screen.
-  const len = streamTextBuffer.length
-  const charsThisFrame = Math.max(2, Math.min(28, Math.ceil(len / 60)))
-  const chunk = streamTextBuffer.slice(0, charsThisFrame)
-  streamTextBuffer = streamTextBuffer.slice(charsThisFrame)
+  // Drain the queue in small timed chunks so streamed text feels continuous.
+  const chunk = takeTypewriterChunk(streamTextBuffer, typewriterChunkSize(streamTextBuffer))
+  streamTextBuffer = streamTextBuffer.slice(chunk.length)
   streamTargetMessage.content += chunk
   scheduleScrollToBottom()
 
-  // If there is still text waiting, schedule another frame immediately.
   if (streamTextBuffer) {
-    streamFlushFrame = window.requestAnimationFrame(flushStreamText)
+    scheduleStreamFlush(typewriterDelay(chunk, streamTextBuffer))
   } else {
     streamTargetMessage = null
   }
 }
 
-function scheduleStreamFlush() {
-  if (streamFlushFrame !== null) return
-  streamFlushFrame = window.requestAnimationFrame(flushStreamText)
+function scheduleStreamFlush(delay = 0) {
+  if (streamFlushTimer !== null) return
+  streamFlushTimer = window.setTimeout(flushStreamText, delay)
 }
 
 function cancelPendingStreamFlush() {
-  if (streamFlushFrame !== null) {
-    window.cancelAnimationFrame(streamFlushFrame)
-    streamFlushFrame = null
+  if (streamFlushTimer !== null) {
+    window.clearTimeout(streamFlushTimer)
+    streamFlushTimer = null
   }
   if (streamTargetMessage && streamTextBuffer) {
     streamTargetMessage.content += streamTextBuffer
@@ -581,21 +603,21 @@ function cancelPendingStreamFlush() {
 }
 
 function waitForStreamFlush(): Promise<void> {
-  if (!streamTextBuffer && streamFlushFrame === null) {
+  if (!streamTextBuffer && streamFlushTimer === null) {
     streamTargetMessage = null
     return Promise.resolve()
   }
-  if (streamFlushFrame === null) scheduleStreamFlush()
+  if (streamFlushTimer === null) scheduleStreamFlush()
   return new Promise((resolve) => {
     const tick = () => {
-      if (!streamTextBuffer && streamFlushFrame === null) {
+      if (!streamTextBuffer && streamFlushTimer === null) {
         streamTargetMessage = null
         resolve()
         return
       }
-      window.requestAnimationFrame(tick)
+      window.setTimeout(tick, 24)
     }
-    window.requestAnimationFrame(tick)
+    window.setTimeout(tick, 24)
   })
 }
 
@@ -804,7 +826,7 @@ async function send() {
             const canonical = await apiFetch<Message>(`/conversations/${currentId.value}/messages/${assistant.id}`)
             const typedContent = assistant.content
             const canonicalContent = canonical.content || ''
-            Object.assign(assistant, { ...canonical, content: canonicalContent.trim() ? canonicalContent : typedContent })
+            Object.assign(assistant, { ...canonical, content: typedContent.trim() ? typedContent : canonicalContent })
           }
           if (!assistant.content.trim() && typeof data.content === 'string') assistant.content = data.content
           assistant.status = data.status || 'completed'
