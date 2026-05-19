@@ -14,6 +14,7 @@ const lineCount = computed(() => props.message.content.split(/\r\n|\n|\r/).lengt
 const isStreaming = computed(() => props.message.status === 'streaming')
 const isUserMessage = computed(() => props.message.role === 'user')
 const isLiveDraft = computed(() => isStreaming.value && props.message.id.startsWith('stream-'))
+const shouldRenderStreamingPlainText = computed(() => props.message.role === 'assistant' && isStreaming.value && props.message.content.trim())
 const emptyAssistantFailureText = computed(() => {
   if (props.message.content.trim()) return ''
   if (props.message.status === 'failed_no_output') return '回复生成失败，请重试'
@@ -93,7 +94,8 @@ watch(
               <ChevronUp v-else :size="16" />
             </button>
             <div class="message-collapsible-content">
-              <MarkdownMessage :content="message.content" />
+              <div v-if="shouldRenderStreamingPlainText" class="streaming-plain-message">{{ message.content }}</div>
+              <MarkdownMessage v-else :content="message.content" />
               <span v-if="message.status === 'streaming'" class="typing-cursor" />
             </div>
           </div>

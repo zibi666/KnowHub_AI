@@ -1227,6 +1227,12 @@ body,
   overflow-wrap: anywhere;
 }
 
+.streaming-plain-message {
+  display: inline;
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+}
+
 .message-collapsible {
   position: relative;
 }

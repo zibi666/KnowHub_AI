@@ -111,14 +111,9 @@ const currentPassword = ref('')
 const replacementPassword = ref('')
 
 let scrollFrame: number | null = null
-let streamFlushTimer: number | null = null
+let streamFlushFrame: number | null = null
 let streamTextBuffer = ''
 let streamTargetMessage: Message | null = null
-const TYPEWRITER_BASE_DELAY_MS = 6
-const TYPEWRITER_FAST_DELAY_MS = 3
-const TYPEWRITER_SENTENCE_PAUSE_MS = 22
-const TYPEWRITER_COMMA_PAUSE_MS = 12
-const TYPEWRITER_LINE_PAUSE_MS = 14
 
 const currentConversation = computed(() => conversations.value.find((item) => item.id === currentId.value))
 const conversationUsage = computed(() => {
@@ -573,64 +568,46 @@ function appendStreamText(message: Message, text: string) {
   }
   streamTargetMessage = message
   streamTextBuffer += text
-  restartStreamFlush()
+  scheduleStreamFlush()
 }
 
 function typewriterChunkSize(buffer: string) {
-  const length = Array.from(buffer).length
-  if (length > 6000) return 4
-  if (length > 2400) return 3
-  if (length > 260) return 2
+  const length = buffer.length
+  if (length > 4000) return 5
+  if (length > 1200) return 4
+  if (length > 280) return 3
+  if (length > 80) return 2
   return 1
 }
 
-function takeTypewriterChunk(buffer: string, size: number) {
-  return Array.from(buffer).slice(0, size).join('')
-}
-
-function typewriterDelay(chunk: string, remaining: string) {
-  if (remaining.length > 120) return TYPEWRITER_FAST_DELAY_MS
-  if (remaining.length > 40) return TYPEWRITER_BASE_DELAY_MS
-  if (/\n$/.test(chunk)) return TYPEWRITER_LINE_PAUSE_MS
-  if (/[\u3002\uff01\uff1f.!?]$/.test(chunk)) return TYPEWRITER_SENTENCE_PAUSE_MS
-  if (/[\uff0c,\uff1b;\uff1a:]$/.test(chunk)) return TYPEWRITER_COMMA_PAUSE_MS
-  return TYPEWRITER_BASE_DELAY_MS
-}
-
 function flushStreamText() {
-  streamFlushTimer = null
+  streamFlushFrame = null
   if (!streamTargetMessage || !streamTextBuffer) return
 
-  // Drain the queue in small timed chunks so streamed text feels continuous.
-  const chunk = takeTypewriterChunk(streamTextBuffer, typewriterChunkSize(streamTextBuffer))
+  // Update at most once per browser frame; smaller chunks keep the motion smooth
+  // while avoiding a Markdown/Vue re-render storm.
+  const chunkSize = typewriterChunkSize(streamTextBuffer)
+  const chunk = streamTextBuffer.slice(0, chunkSize)
   streamTextBuffer = streamTextBuffer.slice(chunk.length)
   streamTargetMessage.content += chunk
   scheduleScrollToBottom()
 
   if (streamTextBuffer) {
-    scheduleStreamFlush(typewriterDelay(chunk, streamTextBuffer))
+    scheduleStreamFlush()
   } else {
     streamTargetMessage = null
   }
 }
 
-function scheduleStreamFlush(delay = 0) {
-  if (streamFlushTimer !== null) return
-  streamFlushTimer = window.setTimeout(flushStreamText, delay)
-}
-
-function restartStreamFlush(delay = 0) {
-  if (streamFlushTimer !== null) {
-    window.clearTimeout(streamFlushTimer)
-    streamFlushTimer = null
-  }
-  scheduleStreamFlush(delay)
+function scheduleStreamFlush() {
+  if (streamFlushFrame !== null) return
+  streamFlushFrame = window.requestAnimationFrame(flushStreamText)
 }
 
 function cancelPendingStreamFlush() {
-  if (streamFlushTimer !== null) {
-    window.clearTimeout(streamFlushTimer)
-    streamFlushTimer = null
+  if (streamFlushFrame !== null) {
+    window.cancelAnimationFrame(streamFlushFrame)
+    streamFlushFrame = null
   }
   if (streamTargetMessage && streamTextBuffer) {
     streamTargetMessage.content += streamTextBuffer
@@ -640,21 +617,21 @@ function cancelPendingStreamFlush() {
 }
 
 function waitForStreamFlush(): Promise<void> {
-  if (!streamTextBuffer && streamFlushTimer === null) {
+  if (!streamTextBuffer && streamFlushFrame === null) {
     streamTargetMessage = null
     return Promise.resolve()
   }
-  if (streamFlushTimer === null) scheduleStreamFlush()
+  if (streamFlushFrame === null) scheduleStreamFlush()
   return new Promise((resolve) => {
     const tick = () => {
-      if (!streamTextBuffer && streamFlushTimer === null) {
+      if (!streamTextBuffer && streamFlushFrame === null) {
         streamTargetMessage = null
         resolve()
         return
       }
-      window.setTimeout(tick, 10)
+      window.requestAnimationFrame(tick)
     }
-    window.setTimeout(tick, 10)
+    window.requestAnimationFrame(tick)
   })
 }
 
