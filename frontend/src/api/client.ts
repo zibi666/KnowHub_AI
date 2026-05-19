@@ -54,10 +54,56 @@ export async function apiFetch<T>(path: string, init: RequestInit = {}): Promise
   return response.json() as Promise<T>
 }
 
+type StreamJsonLineOptions = {
+  splitLargeDeltas?: boolean
+}
+
+const STREAM_SPLIT_MIN_CHARS = 5
+const STREAM_SPLIT_DELAY_MS = 5
+
+const sleep = (ms: number) => new Promise((resolve) => window.setTimeout(resolve, ms))
+
+function randomChunkSize(remainingChars: number): number {
+  if (remainingChars > 1200) return Math.min(Math.floor(Math.random() * 6) + 5, remainingChars)
+  if (remainingChars > 240) return Math.min(Math.floor(Math.random() * 4) + 3, remainingChars)
+  return Math.min(Math.floor(Math.random() * 3) + 1, remainingChars)
+}
+
+async function emitStreamEvent(
+  event: string,
+  data: any,
+  onEvent: (event: string, data: any) => void | Promise<void>,
+  options: StreamJsonLineOptions
+) {
+  const text = data?.text
+  if (!options.splitLargeDeltas || event !== 'token' || typeof text !== 'string') {
+    await onEvent(event, data)
+    return
+  }
+
+  const chars = Array.from(text)
+  if (chars.length < STREAM_SPLIT_MIN_CHARS) {
+    await onEvent(event, data)
+    return
+  }
+
+  let offset = 0
+  while (offset < chars.length) {
+    const size = randomChunkSize(chars.length - offset)
+    const chunk = chars.slice(offset, offset + size).join('')
+    offset += size
+    await onEvent(event, { ...data, text: chunk })
+    if (offset < chars.length && document.visibilityState !== 'hidden') {
+      await sleep(STREAM_SPLIT_DELAY_MS)
+    }
+  }
+}
+
 export async function streamJsonLines(
   path: string,
   body: unknown,
-  onEvent: (event: string, data: any) => void | Promise<void>
+  onEvent: (event: string, data: any) => void | Promise<void>,
+  options: StreamJsonLineOptions = { splitLargeDeltas: true }
 ): Promise<void> {
   const csrf = readCookie('csrf_token')
   const headers = new Headers({ 'Content-Type': 'application/json' })
@@ -85,7 +131,7 @@ export async function streamJsonLines(
     for (const line of lines) {
       if (!line.trim()) continue
       const payload = JSON.parse(line)
-      await onEvent(payload.event, payload.data)
+      await emitStreamEvent(payload.event, payload.data, onEvent, options)
     }
   }
 }

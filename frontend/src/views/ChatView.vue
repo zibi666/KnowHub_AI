@@ -111,12 +111,6 @@ const currentPassword = ref('')
 const replacementPassword = ref('')
 
 let scrollFrame: number | null = null
-let streamFlushTimer: number | null = null
-let streamTextBuffer = ''
-let streamTargetMessage: Message | null = null
-
-
-const STREAM_FLUSH_INTERVAL_MS = 8
 const currentConversation = computed(() => conversations.value.find((item) => item.id === currentId.value))
 const conversationUsage = computed(() => {
   const assistantMessages = messages.value.filter((message) => message.role === 'assistant')
@@ -564,80 +558,16 @@ function scheduleScrollToBottom() {
 
 function appendStreamText(message: Message, text: string) {
   if (!text) return
-  if (streamTargetMessage && streamTargetMessage !== message && streamTextBuffer) {
-    streamTargetMessage.content += streamTextBuffer
-    streamTextBuffer = ''
-  }
-  streamTargetMessage = message
-  streamTextBuffer += text
-  scheduleStreamFlush()
-}
-
-function typewriterChunkSize(buffer: string) {
-  const length = buffer.length
-  if (length > 6000) return 48
-  if (length > 3000) return 36
-  if (length > 1200) return 24
-  if (length > 500) return 16
-  if (length > 160) return 8
-  if (length > 48) return 4
-  if (length > 12) return 2
-  return 1
-}
-
-function flushStreamText() {
-  streamFlushTimer = null
-  if (!streamTargetMessage || !streamTextBuffer) return
-
-  // Drain larger upstream bursts quickly enough to avoid a final snap, while
-  // keeping small replies visibly tied to the incoming stream.
-  const chunkSize = typewriterChunkSize(streamTextBuffer)
-  const chunk = streamTextBuffer.slice(0, chunkSize)
-  streamTextBuffer = streamTextBuffer.slice(chunk.length)
-  streamTargetMessage.content += chunk
+  message.content += text
   scheduleScrollToBottom()
-
-  if (streamTextBuffer) {
-    scheduleStreamFlush()
-  } else {
-    streamTargetMessage = null
-  }
-}
-
-function scheduleStreamFlush() {
-  if (streamFlushTimer !== null) return
-  streamFlushTimer = window.setTimeout(flushStreamText, STREAM_FLUSH_INTERVAL_MS)
 }
 
 function cancelPendingStreamFlush() {
-  if (streamFlushTimer !== null) {
-    window.clearTimeout(streamFlushTimer)
-    streamFlushTimer = null
-  }
-  if (streamTargetMessage && streamTextBuffer) {
-    streamTargetMessage.content += streamTextBuffer
-  }
-  streamTargetMessage = null
-  streamTextBuffer = ''
+  // Stream chunks are applied directly as they arrive; nothing is buffered.
 }
 
 function waitForStreamFlush(): Promise<void> {
-  if (!streamTextBuffer && streamFlushTimer === null) {
-    streamTargetMessage = null
-    return Promise.resolve()
-  }
-  if (streamFlushTimer === null) scheduleStreamFlush()
-  return new Promise((resolve) => {
-    const tick = () => {
-      if (!streamTextBuffer && streamFlushTimer === null) {
-        streamTargetMessage = null
-        resolve()
-        return
-      }
-      window.requestAnimationFrame(tick)
-    }
-    window.requestAnimationFrame(tick)
-  })
+  return Promise.resolve()
 }
 
 function cancelPendingScroll() {
@@ -919,7 +849,6 @@ async function send() {
     await scrollMessagesToBottom('smooth')
     if (apiErr?.code === 'INVALID_CREDENTIALS') await auth.loadMe().catch(() => router.push('/login'))
   } finally {
-    await waitForStreamFlush()
     streaming.value = false
   }
 }
