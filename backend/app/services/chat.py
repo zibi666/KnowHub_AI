@@ -50,6 +50,22 @@ def json_line(event: str, data: dict) -> bytes:
     return (json.dumps({"event": event, "data": data}, ensure_ascii=False) + "\n\n").encode("utf-8")
 
 
+def remaining_completed_text(completed_text: str, streamed_text: str) -> str:
+    if not completed_text:
+        return ""
+    if not streamed_text:
+        return completed_text
+    if streamed_text == completed_text or streamed_text.endswith(completed_text):
+        return ""
+    if completed_text.startswith(streamed_text):
+        return completed_text[len(streamed_text) :]
+    max_overlap = min(len(completed_text), len(streamed_text))
+    for overlap in range(max_overlap, 0, -1):
+        if streamed_text[-overlap:] == completed_text[:overlap]:
+            return completed_text[overlap:]
+    return completed_text
+
+
 def preferred_model(models: list[str], configured: str | None) -> str:
     if configured:
         return configured
@@ -323,14 +339,13 @@ async def stream_chat(user_id: str, payload: SendMessageRequest, conversation_id
                 elif event.event == "completed_text":
                     text = event.data.get("text") or ""
                     current = "".join(buffer)
-                    if text and not current:
-                        # Upstream didn't stream deltas, only the final blob.
-                        # Slice it into ~16-char chunks so the frontend
-                        # typewriter still animates instead of dumping a wall
-                        # of text. We sleep a tiny bit between chunks to give
-                        # the UI a chance to render — total added latency is
-                        # bounded by len(text)/16 * 0.008s.
-                        buffer.append(text)
+                    remaining = remaining_completed_text(text, current)
+                    if remaining:
+                        # Some upstreams stream a tiny prefix, then send the
+                        # full completed text. Forward only the unseen suffix
+                        # so the frontend never waits on one character and then
+                        # snaps to the saved full answer.
+                        buffer.append(remaining)
                         if not first_token_logged:
                             first_token_logged = True
                             perf_logger.info(
@@ -342,13 +357,13 @@ async def stream_chat(user_id: str, payload: SendMessageRequest, conversation_id
                             )
                         CHUNK = 16
                         SLEEP = 0.008
-                        for offset in range(0, len(text), CHUNK):
-                            piece = text[offset : offset + CHUNK]
+                        for offset in range(0, len(remaining), CHUNK):
+                            piece = remaining[offset : offset + CHUNK]
                             yield json_line("token", {"text": piece})
                             # Only sleep if there's more to come, and don't sleep
                             # for tiny tails. Total added wall time:
                             # ceil(len/16) * 8ms, e.g. 6000 chars about 3s.
-                            if offset + CHUNK < len(text):
+                            if offset + CHUNK < len(remaining):
                                 await asyncio.sleep(SLEEP)
                 elif event.event == "usage":
                     usage = event.data

@@ -1,6 +1,7 @@
 from datetime import datetime, timedelta
 
 from app.models.entities import Attachment, ConversationCompaction, Message
+from app.services.chat import remaining_completed_text
 from app.services.context import (
     build_attachment_context_blocks,
     build_current_message_branch,
@@ -122,3 +123,10 @@ def test_attachment_context_blocks_are_budgeted_and_wrapped():
     assert blocks
     assert all('<untrusted_data type="user_uploaded_file">' in block for block in blocks)
     assert sum(len(block) for block in blocks) < 20_000
+
+
+def test_remaining_completed_text_keeps_suffix_after_partial_delta():
+    assert remaining_completed_text("有没有机械的开源操作系统", "有") == "没有机械的开源操作系统"
+    assert remaining_completed_text("abcdef", "abc") == "def"
+    assert remaining_completed_text("abcdef", "abcdef") == ""
+    assert remaining_completed_text("cdefgh", "abcd") == "efgh"
