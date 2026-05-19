@@ -1,6 +1,8 @@
 from datetime import datetime, timedelta
 
 from app.models.entities import Attachment, ConversationCompaction, Message
+from app.schemas.attachments import AttachmentOut
+from app.schemas.chat import MessageOut
 from app.services.chat import attach_images_to_current_user_message, model_supports_vision, remaining_completed_text
 from app.services.attachments import cosine_similarity, split_attachment_text
 from app.services.context import (
@@ -200,3 +202,40 @@ def test_attach_images_creates_current_user_message_when_only_image_uploaded(mon
     assert context[-1]["role"] == "user"
     assert context[-1]["content"][0]["type"] == "text"
     assert context[-1]["content"][1]["image_url"]["url"] == "data:image/jpeg;base64,abc"
+
+
+def test_message_out_can_be_built_without_reading_orm_attachments_relationship():
+    class MessageLike:
+        id = "a1"
+        conversation_id = "c1"
+        parent_message_id = None
+        retry_of_message_id = None
+        role = "assistant"
+        content = "done"
+        status = "completed"
+        model = None
+        prompt_tokens = 0
+        completion_tokens = 0
+        total_tokens = 0
+        tokens_source = None
+        created_at = datetime(2026, 1, 1)
+
+        @property
+        def attachments(self):
+            raise RuntimeError("attachments relationship should not be read")
+
+    message = MessageLike()
+    attachment = AttachmentOut(
+        id="att1",
+        filename="note.txt",
+        mime_sniffed="text/plain",
+        size_bytes=10,
+        parse_status="success",
+        context_text_tokens=2,
+        created_at=datetime(2026, 1, 1),
+    )
+
+    result = MessageOut.from_message(message, attachments=[attachment])
+
+    assert result.id == "a1"
+    assert result.attachments == [attachment]

@@ -62,9 +62,7 @@ async def hydrate_message_attachments(db: AsyncSession, messages: list[Message],
     for message_id, attachment in rows:
         attachments_by_message_id.setdefault(message_id, []).append(attachment)
     return [
-        MessageOut.model_validate(message).model_copy(
-            update={"attachments": attachments_by_message_id.get(message.id, [])}
-        )
+        MessageOut.from_message(message, attachments=attachments_by_message_id.get(message.id, []))
         for message in messages
     ]
 

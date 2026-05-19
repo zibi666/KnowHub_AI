@@ -39,6 +39,25 @@ class MessageOut(ApiModel):
     created_at: datetime
     attachments: list[AttachmentOut] = []
 
+    @classmethod
+    def from_message(cls, message: object, attachments: list[AttachmentOut] | None = None) -> "MessageOut":
+        return cls(
+            id=getattr(message, "id"),
+            conversation_id=getattr(message, "conversation_id"),
+            parent_message_id=getattr(message, "parent_message_id", None),
+            retry_of_message_id=getattr(message, "retry_of_message_id", None),
+            role=getattr(message, "role"),
+            content=getattr(message, "content"),
+            status=getattr(message, "status"),
+            model=getattr(message, "model", None),
+            prompt_tokens=getattr(message, "prompt_tokens", 0) or 0,
+            completion_tokens=getattr(message, "completion_tokens", 0) or 0,
+            total_tokens=getattr(message, "total_tokens", 0) or 0,
+            tokens_source=getattr(message, "tokens_source", None),
+            created_at=getattr(message, "created_at"),
+            attachments=attachments or [],
+        )
+
 
 class ConversationSearchResult(ApiModel):
     conversation_id: str
