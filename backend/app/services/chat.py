@@ -27,6 +27,7 @@ from app.models.entities import (
 from app.providers.openai_compatible import OpenAICompatibleProvider, estimate_tokens_text
 from app.schemas.chat import SendMessageRequest
 from app.security.crypto import decrypt_api_key
+from app.services.attachments import image_attachment_to_data_url, is_image_attachment
 from app.services.api_keys import get_active_api_key
 from app.services.compaction import compact_conversation
 from app.services.context import build_context_bundle, build_current_message_branch, build_message_branch
@@ -75,6 +76,33 @@ def preferred_model(models: list[str], configured: str | None) -> str:
         if DEFAULT_CHAT_MODEL.lower() in model.lower():
             return model
     return models[0] if models else DEFAULT_CHAT_MODEL
+
+
+def model_supports_vision(model: str | None) -> bool:
+    settings = get_settings()
+    model_name = (model or "").lower()
+    return any(pattern in model_name for pattern in settings.vision_model_pattern_list)
+
+
+def attach_images_to_current_user_message(context: list[dict], image_attachments: list[Attachment]) -> None:
+    if not image_attachments:
+        return
+    if context and context[-1].get("role") == "user":
+        message = context[-1]
+    else:
+        message = {"role": "user", "content": "请根据上传的图片回答。"}
+        context.append(message)
+    text_content = str(message.get("content") or "请根据上传的图片回答。")
+    parts: list[dict] = [{"type": "text", "text": text_content}]
+    for attachment in image_attachments:
+        parts.append({
+            "type": "image_url",
+            "image_url": {
+                "url": image_attachment_to_data_url(attachment),
+                "detail": "auto",
+            },
+        })
+    message["content"] = parts
 
 
 async def _latest_completed_message_id(db, user_id: str, conversation_id: str) -> str | None:
@@ -151,6 +179,27 @@ async def stream_chat(user_id: str, payload: SendMessageRequest, conversation_id
                     )
                 )
             ).scalars().all()
+            image_count = sum(1 for attachment in rows if is_image_attachment(attachment))
+            if image_count and not model_supports_vision(model):
+                yield json_line(
+                    "error",
+                    {
+                        "code": "VISION_MODEL_REQUIRED",
+                        "message": "当前模型不支持图片理解，请切换到支持视觉的模型后再发送图片。",
+                        "retryable": False,
+                    },
+                )
+                return
+            if image_count > settings.vision_image_max_count:
+                yield json_line(
+                    "error",
+                    {
+                        "code": "QUOTA_EXCEEDED",
+                        "message": f"每次最多发送 {settings.vision_image_max_count} 张图片",
+                        "retryable": False,
+                    },
+                )
+                return
             for attachment in rows:
                 if attachment.parse_status != "success":
                     yield json_line(
@@ -226,6 +275,26 @@ async def stream_chat(user_id: str, payload: SendMessageRequest, conversation_id
                 model=model,
             )
             context = context_bundle.messages
+            image_attachments: list[Attachment] = []
+            if payload.referenced_attachment_ids or payload.attachment_ids:
+                referenced_ids = payload.referenced_attachment_ids or payload.attachment_ids
+                rows = (
+                    await db.execute(
+                        select(Attachment).where(
+                            Attachment.user_id == user_id,
+                            Attachment.id.in_(referenced_ids),
+                            Attachment.deleted_at.is_(None),
+                        )
+                    )
+                ).scalars().all()
+                rows_by_id = {attachment.id: attachment for attachment in rows}
+                ordered_rows = [rows_by_id[attachment_id] for attachment_id in referenced_ids if attachment_id in rows_by_id]
+                image_attachments = [
+                    attachment
+                    for attachment in ordered_rows
+                    if attachment.parse_status == "success" and is_image_attachment(attachment)
+                ][: settings.vision_image_max_count]
+            attach_images_to_current_user_message(context, image_attachments)
             api_key_row = await get_active_api_key(db, user_id)
             if not api_key_row:
                 yield json_line("error", {"code": "KEY_REQUIRED", "message": "请先绑定模型 API Key", "retryable": False})

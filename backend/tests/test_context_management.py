@@ -1,7 +1,7 @@
 from datetime import datetime, timedelta
 
 from app.models.entities import Attachment, ConversationCompaction, Message
-from app.services.chat import remaining_completed_text
+from app.services.chat import attach_images_to_current_user_message, model_supports_vision, remaining_completed_text
 from app.services.context import (
     build_attachment_context_blocks,
     build_current_message_branch,
@@ -130,3 +130,58 @@ def test_remaining_completed_text_keeps_suffix_after_partial_delta():
     assert remaining_completed_text("abcdef", "abc") == "def"
     assert remaining_completed_text("abcdef", "abcdef") == ""
     assert remaining_completed_text("cdefgh", "abcd") == "efgh"
+
+
+def test_model_supports_vision_by_configured_patterns():
+    assert model_supports_vision("gpt-5.5")
+    assert model_supports_vision("my-vl-model")
+    assert not model_supports_vision("text-only-model")
+
+
+def test_attach_images_to_current_user_message_uses_multimodal_parts(monkeypatch):
+    context = [
+        {"role": "system", "content": "rules"},
+        {"role": "user", "content": "请看这张图"},
+    ]
+    image = Attachment(
+        id="img1",
+        user_id="u1",
+        filename="image.png",
+        sha256="x",
+        sha256_active_key="x",
+        mime_sniffed="image/png",
+        size_bytes=100,
+        cos_key="image.png",
+        parse_status="success",
+    )
+
+    monkeypatch.setattr("app.services.chat.image_attachment_to_data_url", lambda attachment: "data:image/jpeg;base64,abc")
+
+    attach_images_to_current_user_message(context, [image])
+
+    assert context[-1]["content"][0] == {"type": "text", "text": "请看这张图"}
+    assert context[-1]["content"][1]["type"] == "image_url"
+    assert context[-1]["content"][1]["image_url"]["url"] == "data:image/jpeg;base64,abc"
+
+
+def test_attach_images_creates_current_user_message_when_only_image_uploaded(monkeypatch):
+    context = [{"role": "system", "content": "rules"}]
+    image = Attachment(
+        id="img1",
+        user_id="u1",
+        filename="image.png",
+        sha256="x",
+        sha256_active_key="x",
+        mime_sniffed="image/png",
+        size_bytes=100,
+        cos_key="image.png",
+        parse_status="success",
+    )
+
+    monkeypatch.setattr("app.services.chat.image_attachment_to_data_url", lambda attachment: "data:image/jpeg;base64,abc")
+
+    attach_images_to_current_user_message(context, [image])
+
+    assert context[-1]["role"] == "user"
+    assert context[-1]["content"][0]["type"] == "text"
+    assert context[-1]["content"][1]["image_url"]["url"] == "data:image/jpeg;base64,abc"

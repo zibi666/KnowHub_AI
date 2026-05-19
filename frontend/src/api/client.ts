@@ -21,6 +21,7 @@ const ERROR_MESSAGES: Record<string, string> = {
   API_KEY_INVALID: '模型 API Key 无效，请在设置中更新',
   MODEL_NOT_AVAILABLE: '当前模型不可用，请切换模型或联系管理员',
   ATTACHMENT_NOT_READY: '附件仍在解析中，请稍后再试',
+  VISION_MODEL_REQUIRED: '当前模型不支持图片理解，请切换到支持视觉的模型',
   QUOTA_EXCEEDED: '已达到额度上限',
   RATE_LIMITED: '操作太频繁，请稍后再试',
   CONTEXT_TOO_LARGE: '上下文过长，请精简消息或拆分附件',

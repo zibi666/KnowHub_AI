@@ -1,6 +1,8 @@
 from __future__ import annotations
 
+import base64
 import hashlib
+import io
 import os
 import shutil
 from pathlib import Path
@@ -161,3 +163,20 @@ def make_thumbnail(attachment: Attachment) -> Path | None:
         image.thumbnail((512, 512))
         image.convert("RGB").save(thumb, format="JPEG", quality=82)
     return thumb
+
+
+def is_image_attachment(attachment: Attachment) -> bool:
+    return attachment.mime_sniffed.startswith("image/")
+
+
+def image_attachment_to_data_url(attachment: Attachment) -> str:
+    settings = get_settings()
+    source = Path(attachment.cos_key)
+    max_edge = max(256, settings.vision_image_max_edge)
+    quality = max(40, min(95, settings.vision_image_jpeg_quality))
+    with Image.open(source) as image:
+        image.thumbnail((max_edge, max_edge))
+        output = io.BytesIO()
+        image.convert("RGB").save(output, format="JPEG", quality=quality, optimize=True)
+    encoded = base64.b64encode(output.getvalue()).decode("ascii")
+    return f"data:image/jpeg;base64,{encoded}"

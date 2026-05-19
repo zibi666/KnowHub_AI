@@ -334,16 +334,40 @@ class OpenAICompatibleProvider:
             sorted(seen_event_types),
         )
 
+    def normalize_responses_content(self, content: Any) -> str | list[dict[str, Any]]:
+        if not isinstance(content, list):
+            return str(content or "")
+        parts: list[dict[str, Any]] = []
+        for part in content:
+            if not isinstance(part, dict):
+                continue
+            part_type = part.get("type")
+            if part_type == "text":
+                text = part.get("text")
+                if isinstance(text, str) and text:
+                    parts.append({"type": "input_text", "text": text})
+            elif part_type == "image_url":
+                image_url = part.get("image_url")
+                url = image_url.get("url") if isinstance(image_url, dict) else image_url
+                if isinstance(url, str) and url:
+                    parts.append({"type": "input_image", "image_url": url})
+            elif part_type in {"input_text", "input_image"}:
+                parts.append(part)
+        return parts or ""
+
     def to_responses_input(self, messages: list[dict[str, Any]]) -> tuple[str, list[dict[str, Any]]]:
         instructions: list[str] = []
         input_items: list[dict[str, Any]] = []
         for message in messages:
             role = str(message.get("role") or "user")
-            content = str(message.get("content") or "")
+            content = message.get("content")
             if role == "system":
-                instructions.append(content)
+                instructions.append(str(content or ""))
                 continue
-            input_items.append({"role": "assistant" if role == "assistant" else "user", "content": content})
+            input_items.append({
+                "role": "assistant" if role == "assistant" else "user",
+                "content": self.normalize_responses_content(content),
+            })
         return "\n\n".join(instructions), input_items
 
     def normalize_responses_usage(self, usage: dict[str, Any]) -> dict[str, int]:

@@ -23,6 +23,7 @@ type BubbleColor = (typeof bubbleOptions)[number]['value']
 
 const DEFAULT_MODEL = 'gpt-5.5'
 const DEFAULT_CONTEXT_WINDOW_TOKENS = 258_000
+const VISION_MODEL_HINTS = ['gpt-4o', 'gpt-4.1', 'gpt-5', 'o3', 'o4', 'vision', 'vl', 'gemini', 'claude']
 const THEME_STORAGE_KEY = 'private-gpt-theme'
 const BUBBLE_STORAGE_KEY = 'private-gpt-bubble'
 const TEXT_SIZE_STORAGE_KEY = 'private-gpt-text-size'
@@ -138,6 +139,15 @@ const conversationUsage = computed(() => {
     requests: assistantMessages.length
   }
 })
+
+function isImageAttachment(item: Attachment) {
+  return item.mimeSniffed?.startsWith('image/')
+}
+
+function selectedModelSupportsVision() {
+  const model = (selectedModel.value || '').toLowerCase()
+  return VISION_MODEL_HINTS.some((hint) => model.includes(hint))
+}
 const shellClass = computed(() => (themeMode.value === 'dark' ? 'theme-dark' : 'theme-light'))
 const selectedBubble = computed(() => bubbleOptions.find((item) => item.value === bubbleColor.value) || bubbleOptions[0])
 const shellStyle = computed(
@@ -892,7 +902,11 @@ async function uploadFile(event: Event) {
 }
 
 async function send() {
-  if (!input.value.trim() || streaming.value) return
+  if ((!input.value.trim() && !pendingAttachments.value.length) || streaming.value) return
+  if (pendingAttachments.value.some(isImageAttachment) && !selectedModelSupportsVision()) {
+    error.value = '当前模型不支持图片理解，请切换到支持视觉的模型后再发送图片。'
+    return
+  }
   cancelPendingScroll()
   userHasScrolledUp = false
   error.value = ''
@@ -1239,7 +1253,7 @@ onMounted(async () => {
             </div>
 
             <div class="composer-right-tools">
-              <button class="send-button" type="submit" :disabled="streaming || !input.trim()" title="发送" aria-label="发送">
+              <button class="send-button" type="submit" :disabled="streaming || (!input.trim() && !pendingAttachments.length)" title="发送" aria-label="发送">
                 <Send :size="18" />
               </button>
             </div>
