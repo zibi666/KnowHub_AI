@@ -88,6 +88,8 @@ watch(
               :key="attachment.id"
               class="message-image-card"
               type="button"
+              :title="`查看图片：${attachment.filename}`"
+              :aria-label="`查看图片：${attachment.filename}`"
               @click="emit('previewAttachment', attachment)"
             >
               <img :src="attachmentPreviewUrl(attachment.id)" :alt="attachment.filename" />

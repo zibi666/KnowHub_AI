@@ -2531,25 +2531,26 @@ body,
   display: grid;
   justify-items: end;
   gap: 0.5rem;
-  width: min(385px, 70vw);
+  width: auto;
+  max-width: min(100%, 70vw);
 }
 
 .message-image-card {
   display: grid;
-  width: 100%;
-  aspect-ratio: 2.15 / 1;
+  width: clamp(116px, 18vw, 168px);
+  height: clamp(86px, 13vw, 124px);
   place-items: center;
   overflow: hidden;
-  border: 1px solid color-mix(in srgb, var(--text) 8%, transparent);
-  border-radius: 26px;
+  border: 1px solid color-mix(in srgb, var(--text) 10%, transparent);
+  border-radius: 14px;
   background: color-mix(in srgb, var(--control-bg) 82%, #000 18%);
-  box-shadow: 0 18px 44px rgba(0, 0, 0, 0.24);
+  box-shadow: 0 10px 24px rgba(0, 0, 0, 0.2);
   transition: border-color var(--motion-fast) ease, transform var(--motion-fast) ease, box-shadow var(--motion-fast) ease;
 }
 
 .message-image-card:hover {
   border-color: color-mix(in srgb, var(--bubble-bg) 48%, var(--input-border));
-  box-shadow: 0 22px 54px rgba(0, 0, 0, 0.32);
+  box-shadow: 0 14px 30px rgba(0, 0, 0, 0.26);
   transform: translateY(-1px);
 }
 
