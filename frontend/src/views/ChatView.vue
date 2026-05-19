@@ -114,10 +114,11 @@ let scrollFrame: number | null = null
 let streamFlushTimer: number | null = null
 let streamTextBuffer = ''
 let streamTargetMessage: Message | null = null
-const TYPEWRITER_BASE_DELAY_MS = 16
-const TYPEWRITER_SENTENCE_PAUSE_MS = 86
-const TYPEWRITER_COMMA_PAUSE_MS = 44
-const TYPEWRITER_LINE_PAUSE_MS = 58
+const TYPEWRITER_BASE_DELAY_MS = 6
+const TYPEWRITER_FAST_DELAY_MS = 3
+const TYPEWRITER_SENTENCE_PAUSE_MS = 22
+const TYPEWRITER_COMMA_PAUSE_MS = 12
+const TYPEWRITER_LINE_PAUSE_MS = 14
 
 const currentConversation = computed(() => conversations.value.find((item) => item.id === currentId.value))
 const conversationUsage = computed(() => {
@@ -572,16 +573,15 @@ function appendStreamText(message: Message, text: string) {
   }
   streamTargetMessage = message
   streamTextBuffer += text
-  scheduleStreamFlush()
+  restartStreamFlush()
 }
 
 function typewriterChunkSize(buffer: string) {
   const length = Array.from(buffer).length
-  if (length > 12000) return 18
-  if (length > 6000) return 12
-  if (length > 2500) return 8
-  if (length > 800) return 5
-  return 2
+  if (length > 6000) return 4
+  if (length > 2400) return 3
+  if (length > 260) return 2
+  return 1
 }
 
 function takeTypewriterChunk(buffer: string, size: number) {
@@ -589,8 +589,8 @@ function takeTypewriterChunk(buffer: string, size: number) {
 }
 
 function typewriterDelay(chunk: string, remaining: string) {
-  if (remaining.length > 8000) return 8
-  if (remaining.length > 2500) return 12
+  if (remaining.length > 120) return TYPEWRITER_FAST_DELAY_MS
+  if (remaining.length > 40) return TYPEWRITER_BASE_DELAY_MS
   if (/\n$/.test(chunk)) return TYPEWRITER_LINE_PAUSE_MS
   if (/[\u3002\uff01\uff1f.!?]$/.test(chunk)) return TYPEWRITER_SENTENCE_PAUSE_MS
   if (/[\uff0c,\uff1b;\uff1a:]$/.test(chunk)) return TYPEWRITER_COMMA_PAUSE_MS
@@ -619,6 +619,14 @@ function scheduleStreamFlush(delay = 0) {
   streamFlushTimer = window.setTimeout(flushStreamText, delay)
 }
 
+function restartStreamFlush(delay = 0) {
+  if (streamFlushTimer !== null) {
+    window.clearTimeout(streamFlushTimer)
+    streamFlushTimer = null
+  }
+  scheduleStreamFlush(delay)
+}
+
 function cancelPendingStreamFlush() {
   if (streamFlushTimer !== null) {
     window.clearTimeout(streamFlushTimer)
@@ -644,9 +652,9 @@ function waitForStreamFlush(): Promise<void> {
         resolve()
         return
       }
-      window.setTimeout(tick, 24)
+      window.setTimeout(tick, 10)
     }
-    window.setTimeout(tick, 24)
+    window.setTimeout(tick, 10)
   })
 }
 

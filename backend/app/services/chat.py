@@ -325,11 +325,11 @@ async def stream_chat(user_id: str, payload: SendMessageRequest, conversation_id
                     current = "".join(buffer)
                     if text and not current:
                         # Upstream didn't stream deltas, only the final blob.
-                        # Slice it into ~64-char chunks so the frontend
+                        # Slice it into ~16-char chunks so the frontend
                         # typewriter still animates instead of dumping a wall
                         # of text. We sleep a tiny bit between chunks to give
                         # the UI a chance to render — total added latency is
-                        # bounded by len(text)/64 * 0.025s.
+                        # bounded by len(text)/16 * 0.008s.
                         buffer.append(text)
                         if not first_token_logged:
                             first_token_logged = True
@@ -340,14 +340,14 @@ async def stream_chat(user_id: str, payload: SendMessageRequest, conversation_id
                                 int((time.perf_counter() - request_started) * 1000),
                                 len(text),
                             )
-                        CHUNK = 64
-                        SLEEP = 0.025
+                        CHUNK = 16
+                        SLEEP = 0.008
                         for offset in range(0, len(text), CHUNK):
                             piece = text[offset : offset + CHUNK]
                             yield json_line("token", {"text": piece})
                             # Only sleep if there's more to come, and don't sleep
                             # for tiny tails. Total added wall time:
-                            # ceil(len/64) * 25ms, e.g. 6000 chars ≈ 2.4s.
+                            # ceil(len/16) * 8ms, e.g. 6000 chars about 3s.
                             if offset + CHUNK < len(text):
                                 await asyncio.sleep(SLEEP)
                 elif event.event == "usage":
