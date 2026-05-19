@@ -14,6 +14,19 @@ const router = useRouter()
 
 const versions: VersionEntry[] = [
   {
+    version: 'v1.5',
+    title: '搜索聊天与云数据库',
+    date: '2026-05-19',
+    summary: '补齐历史会话搜索、折叠侧边栏和云 MySQL 数据库存储能力。',
+    changes: [
+      '新增左侧“搜索聊天”入口，支持关键词检索历史消息，点击结果后自动跳转并高亮命中的对话消息。',
+      '新增折叠侧边栏能力，折叠后保留新对话、搜索聊天和展开侧栏按钮，对话页面自适应宽度。',
+      '优化全局下拉框选中态间距，思考深度选项里的“低 / 中 / 高 / 极致”和说明文字区分更清楚。',
+      '支持通过 .env 切换云 MySQL 数据库，Docker Compose 不再硬编码 SQLite；新增无密码的 MySQL 初始化 SQL 脚本。',
+      'MySQL 下长消息、上下文摘要和附件解析文本使用 MEDIUMTEXT / LONGTEXT，存储配额和流量字段改为 BigInteger。'
+    ]
+  },
+  {
     version: 'v1.4',
     title: '统一下拉与设计分支',
     date: '2026-05-19',
