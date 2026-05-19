@@ -2196,8 +2196,8 @@ body,
 }
 
 .model-picker-reasoning .model-picker-button {
-  min-width: 2.65rem;
-  max-width: 3.4rem;
+  min-width: 4.2rem;
+  max-width: 5rem;
 }
 
 .model-picker-button.app-select-button {
