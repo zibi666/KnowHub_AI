@@ -1,6 +1,6 @@
 <script setup lang="ts">
 import { computed, nextTick, onMounted, ref, type CSSProperties } from 'vue'
-import { ArrowDown, Maximize2, Minimize2, Paperclip, Pencil, Plus, Send, Settings, X } from 'lucide-vue-next'
+import { ArrowDown, Maximize2, Minimize2, PanelLeftClose, PanelLeftOpen, Paperclip, Pencil, Plus, Send, Settings, X } from 'lucide-vue-next'
 import { useRouter } from 'vue-router'
 import { ApiError, apiFetch, localizeApiMessage, readCookie, streamJsonLines } from '../api/client'
 import AppSelect from '../components/AppSelect.vue'
@@ -28,6 +28,7 @@ const BUBBLE_STORAGE_KEY = 'private-gpt-bubble'
 const TEXT_SIZE_STORAGE_KEY = 'private-gpt-text-size'
 const CODE_SIZE_STORAGE_KEY = 'private-gpt-code-size'
 const REASONING_STORAGE_KEY = 'private-gpt-reasoning-effort'
+const SIDEBAR_STORAGE_KEY = 'private-gpt-sidebar-collapsed'
 
 type ReasoningEffort = 'low' | 'medium' | 'high' | 'xhigh'
 const reasoningOptions: Array<{ value: ReasoningEffort; label: string; hint: string }> = [
@@ -87,6 +88,7 @@ const textSize = ref(15)
 const codeSize = ref(12)
 const settingsMenuOpen = ref(false)
 const settingsOpen = ref(false)
+const sidebarCollapsed = ref(false)
 const logoutConfirmOpen = ref(false)
 const logoutLoading = ref(false)
 const settingsTab = ref<SettingsTab>('appearance')
@@ -230,6 +232,7 @@ function loadAppearance() {
     reasoningEffort.value = storedReasoning as ReasoningEffort
   }
 
+  sidebarCollapsed.value = window.localStorage.getItem(SIDEBAR_STORAGE_KEY) === 'true'
 }
 
 function setReasoningEffort(effort: ReasoningEffort) {
@@ -342,6 +345,12 @@ async function openSettings(tab: SettingsTab = 'appearance') {
 
 function toggleSettingsMenu() {
   settingsMenuOpen.value = !settingsMenuOpen.value
+}
+
+function toggleSidebarCollapsed() {
+  sidebarCollapsed.value = !sidebarCollapsed.value
+  settingsMenuOpen.value = false
+  window.localStorage.setItem(SIDEBAR_STORAGE_KEY, String(sidebarCollapsed.value))
 }
 
 function openAdminMonitor() {
@@ -903,13 +912,37 @@ onMounted(async () => {
 </script>
 
 <template>
-  <div class="chat-shell h-screen overflow-hidden grid grid-cols-[280px_1fr]" :class="shellClass" :style="shellStyle" @click="closeFloatingMenus">
+  <div
+    class="chat-shell h-screen overflow-hidden grid grid-cols-[280px_1fr]"
+    :class="[shellClass, { 'sidebar-collapsed': sidebarCollapsed }]"
+    :style="shellStyle"
+    @click="closeFloatingMenus"
+  >
     <aside class="chat-sidebar flex flex-col min-h-0">
       <div class="chat-sidebar-top">
-        <button class="sidebar-new-chat-button" type="button" @click="newChat">
-          <Plus :size="18" />
-          <span>新对话</span>
-        </button>
+        <div class="sidebar-top-actions">
+          <button
+            class="sidebar-new-chat-button"
+            type="button"
+            title="新对话"
+            aria-label="新对话"
+            @click="newChat"
+          >
+            <Plus :size="18" />
+            <span>新对话</span>
+          </button>
+          <button
+            class="sidebar-collapse-button"
+            type="button"
+            :title="sidebarCollapsed ? '展开侧边栏' : '折叠侧边栏'"
+            :aria-label="sidebarCollapsed ? '展开侧边栏' : '折叠侧边栏'"
+            :aria-pressed="sidebarCollapsed"
+            @click.stop="toggleSidebarCollapsed"
+          >
+            <PanelLeftOpen v-if="sidebarCollapsed" :size="18" />
+            <PanelLeftClose v-else :size="18" />
+          </button>
+        </div>
       </div>
 
       <div class="conversation-list flex-1 min-h-0 overflow-auto px-2 py-2 space-y-1">
