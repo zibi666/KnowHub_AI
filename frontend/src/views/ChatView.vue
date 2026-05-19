@@ -47,8 +47,10 @@ const auth = useAuthStore()
 const router = useRouter()
 
 const conversations = ref<Conversation[]>([])
+const conversationsLoading = ref(true)
 const currentId = ref<string | null>(null)
 const messages = ref<Message[]>([])
+const messagesLoading = ref(false)
 const input = ref('')
 const composerExpanded = ref(false)
 const models = ref<string[]>([])
@@ -111,6 +113,8 @@ const currentPassword = ref('')
 const replacementPassword = ref('')
 
 let scrollFrame: number | null = null
+let activeConversationLoad = 0
+
 const currentConversation = computed(() => conversations.value.find((item) => item.id === currentId.value))
 const conversationUsage = computed(() => {
   const assistantMessages = messages.value.filter((message) => message.role === 'assistant')
@@ -577,16 +581,19 @@ function cancelPendingScroll() {
 }
 
 function newChat() {
+  activeConversationLoad++
   cancelPendingScroll()
   cancelPendingStreamFlush()
   currentId.value = null
   messages.value = []
+  messagesLoading.value = false
   showScrollToBottom.value = false
   userHasScrolledUp = false
   error.value = ''
 }
 
 async function loadConversations() {
+  conversationsLoading.value = conversations.value.length === 0
   try {
     conversations.value = await apiFetch<Conversation[]>('/conversations')
     if (!currentId.value && conversations.value[0]) await openConversation(conversations.value[0].id)
@@ -596,6 +603,8 @@ async function loadConversations() {
     } else if (err instanceof ApiError) {
       error.value = err.message
     }
+  } finally {
+    conversationsLoading.value = false
   }
 }
 
@@ -636,12 +645,23 @@ async function chooseModel(model: string) {
 
 async function openConversation(id: string) {
   if (deletingConversationId.value === id) return
+  const loadId = ++activeConversationLoad
   cancelPendingScroll()
   cancelPendingStreamFlush()
   currentId.value = id
-  messages.value = sortMessagesForDisplay(await apiFetch<Message[]>(`/conversations/${id}/messages`))
-  await loadContextStats()
-  await scrollMessagesToBottom('auto')
+  messages.value = []
+  messagesLoading.value = true
+  try {
+    const loadedMessages = sortMessagesForDisplay(await apiFetch<Message[]>(`/conversations/${id}/messages`))
+    if (loadId !== activeConversationLoad) return
+    messages.value = loadedMessages
+    await loadContextStats()
+    await scrollMessagesToBottom('auto')
+  } catch (err) {
+    if (loadId === activeConversationLoad && err instanceof ApiError) error.value = err.message
+  } finally {
+    if (loadId === activeConversationLoad) messagesLoading.value = false
+  }
 }
 
 function openRenameConversation(conversation: Conversation) {
@@ -882,7 +902,13 @@ onMounted(async () => {
       </div>
 
       <div class="conversation-list flex-1 min-h-0 overflow-auto px-2 py-2 space-y-1">
+        <div v-if="conversationsLoading" class="sidebar-skeleton-list" aria-label="正在加载对话">
+          <div v-for="item in 6" :key="item" class="sidebar-skeleton-row">
+            <span class="skeleton-line" :class="`w-${item % 3}`" />
+          </div>
+        </div>
         <div
+          v-else
           v-for="conversation in conversations"
           :key="conversation.id"
           class="conversation-row"
@@ -927,11 +953,13 @@ onMounted(async () => {
             <button class="sidebar-round-button" title="设置" aria-label="设置" type="button" @click.stop="toggleSettingsMenu">
               <Settings :size="17" />
             </button>
-            <div v-if="settingsMenuOpen" class="sidebar-settings-popover" @pointerdown.stop @mousedown.stop @click.stop>
-              <button type="button" @click="openSettings('appearance')">设置</button>
-              <button v-if="auth.user?.role === 'admin'" type="button" @click="openAdminMonitor">管理员监控</button>
-              <button class="sidebar-settings-danger" type="button" @click="requestLogout">退出登录</button>
-            </div>
+            <Transition name="menu-rise">
+              <div v-if="settingsMenuOpen" class="sidebar-settings-popover" @pointerdown.stop @mousedown.stop @click.stop>
+                <button type="button" @click="openSettings('appearance')">设置</button>
+                <button v-if="auth.user?.role === 'admin'" type="button" @click="openAdminMonitor">管理员监控</button>
+                <button class="sidebar-settings-danger" type="button" @click="requestLogout">退出登录</button>
+              </div>
+            </Transition>
           </div>
         </div>
       </div>
@@ -948,18 +976,20 @@ onMounted(async () => {
               <strong>{{ selectedModel || DEFAULT_MODEL }}</strong>
             </button>
             <ChevronDown class="model-picker-chevron" :size="16" />
-            <div v-if="modelMenuOpen" class="model-picker-menu">
-              <button
-                v-for="model in models"
-                :key="model"
-                type="button"
-                class="model-picker-option"
-                :class="{ active: model === selectedModel }"
-                @click="chooseModel(model)"
-              >
-                {{ model }}
-              </button>
-            </div>
+            <Transition name="menu-pop">
+              <div v-if="modelMenuOpen" class="model-picker-menu">
+                <button
+                  v-for="model in models"
+                  :key="model"
+                  type="button"
+                  class="model-picker-option"
+                  :class="{ active: model === selectedModel }"
+                  @click="chooseModel(model)"
+                >
+                  {{ model }}
+                </button>
+              </div>
+            </Transition>
           </div>
 
           <div class="model-picker model-picker-reasoning" @click.stop>
@@ -967,19 +997,21 @@ onMounted(async () => {
               <strong>{{ reasoningLabel }}</strong>
             </button>
             <ChevronDown class="model-picker-chevron" :size="16" />
-            <div v-if="reasoningMenuOpen" class="model-picker-menu">
-              <button
-                v-for="option in reasoningOptions"
-                :key="option.value"
-                type="button"
-                class="model-picker-option"
-                :class="{ active: option.value === reasoningEffort }"
-                :title="option.hint"
-                @click="setReasoningEffort(option.value)"
-              >
-                {{ option.label }} <span style="opacity:0.55;font-size:12px;margin-left:6px">{{ option.hint }}</span>
-              </button>
-            </div>
+            <Transition name="menu-pop">
+              <div v-if="reasoningMenuOpen" class="model-picker-menu">
+                <button
+                  v-for="option in reasoningOptions"
+                  :key="option.value"
+                  type="button"
+                  class="model-picker-option"
+                  :class="{ active: option.value === reasoningEffort }"
+                  :title="option.hint"
+                  @click="setReasoningEffort(option.value)"
+                >
+                  {{ option.label }} <span style="opacity:0.55;font-size:12px;margin-left:6px">{{ option.hint }}</span>
+                </button>
+              </div>
+            </Transition>
           </div>
 
           <button class="top-icon-button" type="button" title="新对话" aria-label="新对话" @click="newChat">
@@ -994,7 +1026,28 @@ onMounted(async () => {
 
       <section ref="messageScroller" class="chat-surface flex-1 min-h-0 overflow-y-auto overscroll-contain px-6 py-8" @scroll="handleScrollerScroll">
         <div class="chat-flow mx-auto">
-          <ChatMessage v-for="message in messages" :key="message.id" :message="message" />
+          <div v-if="messagesLoading" class="message-skeleton-stack" aria-label="正在加载消息">
+            <div class="message-skeleton-row assistant">
+              <div class="message-skeleton-block">
+                <span class="skeleton-line wide" />
+                <span class="skeleton-line medium" />
+                <span class="skeleton-line narrow" />
+              </div>
+            </div>
+            <div class="message-skeleton-row user">
+              <div class="message-skeleton-bubble">
+                <span class="skeleton-line medium" />
+              </div>
+            </div>
+            <div class="message-skeleton-row assistant">
+              <div class="message-skeleton-block">
+                <span class="skeleton-line wide" />
+                <span class="skeleton-line wide" />
+                <span class="skeleton-line short" />
+              </div>
+            </div>
+          </div>
+          <ChatMessage v-else v-for="message in messages" :key="message.id" :message="message" />
         </div>
       </section>
 
@@ -1055,252 +1108,285 @@ onMounted(async () => {
 
     </main>
 
-    <div v-if="settingsOpen" class="settings-modal-backdrop" @click.self="settingsOpen = false">
-      <section class="settings-modal" role="dialog" aria-modal="true" aria-label="设置">
-        <nav class="settings-modal-nav">
-          <div>
-            <div class="settings-modal-title">设置</div>
-            <div class="settings-modal-user">{{ auth.user?.username }}</div>
-          </div>
-          <button class="settings-tab-button" :class="{ active: settingsTab === 'appearance' }" @click="selectSettingsTab('appearance')">个性化</button>
-          <button class="settings-tab-button" :class="{ active: settingsTab === 'api' }" @click="selectSettingsTab('api')">API 管理</button>
-          <button v-if="auth.user?.role === 'admin'" class="settings-tab-button" :class="{ active: settingsTab === 'groups' }" @click="selectSettingsTab('groups')">分组管理</button>
-          <button class="settings-tab-button" :class="{ active: settingsTab === 'account' }" @click="selectSettingsTab('account')">账号安全</button>
-          <button class="settings-close-button mt-auto" @click="settingsOpen = false">关闭</button>
-        </nav>
-
-        <div class="settings-modal-content">
-          <div v-if="settingsNotice" class="settings-alert success">{{ settingsNotice }}</div>
-          <div v-if="settingsError" class="settings-alert error">{{ settingsError }}</div>
-
-          <section v-if="settingsTab === 'appearance'" class="settings-pane">
-            <div class="settings-pane-heading">
-              <h2>个性化设置</h2>
-              <p>调整主题、气泡颜色、正文和代码字号。</p>
+    <Transition name="modal-fade">
+      <div v-if="settingsOpen" class="settings-modal-backdrop" @click.self="settingsOpen = false">
+        <section class="settings-modal" role="dialog" aria-modal="true" aria-label="设置">
+          <nav class="settings-modal-nav">
+            <div>
+              <div class="settings-modal-title">设置</div>
+              <div class="settings-modal-user">{{ auth.user?.username }}</div>
             </div>
-            <div class="settings-grid">
-              <label class="settings-field">
-                <span>主题</span>
-                <select v-model="themeMode" class="settings-input" @change="setTheme(themeMode)">
-                  <option v-for="option in themeOptions" :key="option.value" :value="option.value">{{ option.label }}</option>
-                </select>
-              </label>
-              <label class="settings-field">
-                <span>气泡颜色</span>
-                <select v-model="bubbleColor" class="settings-input" @change="setBubbleColor(bubbleColor)">
-                  <option v-for="option in bubbleOptions" :key="option.value" :value="option.value">{{ option.label }}</option>
-                </select>
-              </label>
-              <label class="settings-field">
-                <span>正文字号</span>
-                <select v-model.number="textSize" class="settings-input" @change="saveTextSize">
-                  <option v-for="size in textSizeOptions" :key="size" :value="size">{{ size }} px</option>
-                </select>
-              </label>
-              <label class="settings-field">
-                <span>代码字号</span>
-                <select v-model.number="codeSize" class="settings-input" @change="saveCodeSize">
-                  <option v-for="size in codeSizeOptions" :key="size" :value="size">{{ size }} px</option>
-                </select>
-              </label>
-            </div>
-          </section>
+            <button class="settings-tab-button" :class="{ active: settingsTab === 'appearance' }" @click="selectSettingsTab('appearance')">个性化</button>
+            <button class="settings-tab-button" :class="{ active: settingsTab === 'api' }" @click="selectSettingsTab('api')">API 管理</button>
+            <button v-if="auth.user?.role === 'admin'" class="settings-tab-button" :class="{ active: settingsTab === 'groups' }" @click="selectSettingsTab('groups')">分组管理</button>
+            <button class="settings-tab-button" :class="{ active: settingsTab === 'account' }" @click="selectSettingsTab('account')">账号安全</button>
+            <button class="settings-close-button mt-auto" @click="settingsOpen = false">关闭</button>
+          </nav>
 
-          <section v-else-if="settingsTab === 'api'" class="settings-pane">
-            <div class="settings-pane-heading">
-              <h2>API 管理</h2>
-              <p>用户可以管理自己的密钥，并把密钥切换到管理员创建的分组。一个密钥只能属于一个分组。</p>
-            </div>
+          <div class="settings-modal-content">
+            <Transition name="soft-slide">
+              <div v-if="settingsNotice" class="settings-alert success">{{ settingsNotice }}</div>
+            </Transition>
+            <Transition name="soft-slide">
+              <div v-if="settingsError" class="settings-alert error">{{ settingsError }}</div>
+            </Transition>
 
-            <form class="settings-card" @submit.prevent="createApiKey">
-              <h3>添加新密钥</h3>
-              <div class="settings-grid">
-                <input v-model="newApiKey.name" class="settings-input" placeholder="密钥名称，例如：工作 / 备用" />
-                <select v-model="newApiKey.groupId" class="settings-input">
-                  <option value="">未分组</option>
-                  <option v-for="group in apiKeyGroups" :key="group.id" :value="group.id">{{ group.name }}</option>
-                </select>
-                <input v-model="newApiKey.apiKey" class="settings-input" type="password" placeholder="API Key 明文只提交一次" />
-              </div>
-              <label class="settings-check">
-                <input v-model="newApiKey.makeActive" type="checkbox" />
-                添加后立即设为当前使用密钥
-              </label>
-              <button class="settings-primary" type="submit">添加密钥</button>
-            </form>
-
-            <div class="settings-card">
-              <div class="settings-card-header">
-                <h3>我的密钥</h3>
-                <button class="settings-secondary" :disabled="settingsLoading" @click="loadApiSettings">刷新</button>
-              </div>
-              <div v-if="!apiKeys.length" class="settings-empty">暂无密钥</div>
-              <div v-for="key in apiKeys" :key="key.id" class="settings-key-row">
-                <div class="settings-key-main">
-                  <input v-model="keyDraftFor(key).name" class="settings-input" />
-                  <select v-model="keyDraftFor(key).groupId" class="settings-input">
-                    <option value="">未分组</option>
-                    <option v-for="group in apiKeyGroups" :key="group.id" :value="group.id">{{ group.name }}</option>
-                  </select>
-                  <div class="settings-key-meta">
-                    <span>{{ key.groupName || '未分组' }}</span>
-                    <span class="key-mask">{{ key.maskedKey }}</span>
-                    <strong v-if="key.isActive">当前使用</strong>
-                  </div>
+            <Transition name="pane-swap" mode="out-in">
+              <section v-if="settingsTab === 'appearance'" key="appearance" class="settings-pane">
+                <div class="settings-pane-heading">
+                  <h2>个性化设置</h2>
+                  <p>调整主题、气泡颜色、正文和代码字号。</p>
                 </div>
-                <div class="settings-key-actions">
-                  <button class="settings-secondary" @click="copyApiKeySecret(key)">复制</button>
-                  <button class="settings-secondary" @click="saveApiKey(key)">保存</button>
-                  <button class="settings-primary" :disabled="key.isActive" @click="activateApiKey(key)">切换</button>
-                  <button class="settings-danger" @click="deleteApiKey(key)">删除</button>
-                </div>
-              </div>
-            </div>
-
-          </section>
-
-          <section v-else-if="settingsTab === 'groups' && auth.user?.role === 'admin'" class="settings-pane">
-            <div class="settings-pane-heading">
-              <h2>分组管理</h2>
-              <p>维护密钥分组，并查看每个分组下所有用户的密钥。</p>
-            </div>
-
-            <div class="settings-group-layout">
-              <aside class="settings-group-sidebar">
-                <form class="settings-group-create-panel" @submit.prevent="createApiKeyGroup">
-                  <h3>新建分组</h3>
-                  <input v-model="newGroup.name" class="settings-input" placeholder="分组名称" />
-                  <input v-model="newGroup.description" class="settings-input" placeholder="备注，可选" />
-                  <button class="settings-primary" type="submit">创建分组</button>
-                </form>
-
-                <div class="settings-group-list">
-                  <button
-                    class="settings-group-list-item"
-                    :class="{ active: selectedGroupId === 'ungrouped' }"
-                    type="button"
-                    @click="loadGroupKeys('ungrouped')"
-                  >
-                    <span>未分组</span>
-                    <small>系统默认</small>
-                  </button>
-                  <button
-                    v-for="group in apiKeyGroups"
-                    :key="group.id"
-                    class="settings-group-list-item"
-                    :class="{ active: selectedGroupId === group.id }"
-                    type="button"
-                    @click="loadGroupKeys(group.id)"
-                  >
-                    <span>{{ group.name }}</span>
-                    <small>{{ group.description || '无备注' }}</small>
-                  </button>
-                </div>
-              </aside>
-
-              <section class="settings-group-detail">
-                <div class="settings-card-header">
-                  <div>
-                    <h3>{{ selectedGroupId === 'ungrouped' ? '未分组' : selectedApiKeyGroup?.name || '分组详情' }}</h3>
-                    <p>当前分组下的密钥和所属用户。</p>
-                  </div>
-                  <button class="settings-secondary" :disabled="groupKeysLoading" @click="loadGroupKeys(selectedGroupId)">刷新密钥</button>
-                </div>
-
-                <div v-if="selectedApiKeyGroup" class="settings-group-editor">
-                  <input
-                    v-model="groupDraftFor(selectedApiKeyGroup).name"
-                    class="settings-input"
-                    placeholder="分组名称"
-                  />
-                  <input
-                    v-model="groupDraftFor(selectedApiKeyGroup).description"
-                    class="settings-input"
-                    placeholder="备注"
-                  />
-                  <button class="settings-secondary" @click="saveApiKeyGroup(selectedApiKeyGroup)">保存</button>
-                  <button class="settings-danger" @click="deleteApiKeyGroup(selectedApiKeyGroup)">删除</button>
-                </div>
-
-                <div class="settings-group-key-list">
-                  <div v-if="groupKeysLoading" class="settings-empty">正在加载该分组密钥...</div>
-                  <div v-else-if="!selectedGroupKeys.length" class="settings-empty">当前分组暂无密钥</div>
-                  <div v-for="key in selectedGroupKeys" v-else :key="key.id" class="settings-admin-key-row">
-                    <div class="settings-admin-key-top">
-                      <strong>{{ key.name }}</strong>
-                      <span>{{ key.username || key.userId || '未知用户' }}</span>
-                    </div>
-                    <div class="settings-admin-key-meta">
-                      <span>{{ key.groupName || '未分组' }}</span>
-                      <span class="key-mask">{{ key.maskedKey }}</span>
-                      <strong v-if="key.isActive">用户当前使用</strong>
-                      <button class="settings-inline-action" @click="copyApiKeySecret(key, key.userId)">复制</button>
-                    </div>
-                  </div>
+                <div class="settings-grid">
+                  <label class="settings-field">
+                    <span>主题</span>
+                    <select v-model="themeMode" class="settings-input" @change="setTheme(themeMode)">
+                      <option v-for="option in themeOptions" :key="option.value" :value="option.value">{{ option.label }}</option>
+                    </select>
+                  </label>
+                  <label class="settings-field">
+                    <span>气泡颜色</span>
+                    <select v-model="bubbleColor" class="settings-input" @change="setBubbleColor(bubbleColor)">
+                      <option v-for="option in bubbleOptions" :key="option.value" :value="option.value">{{ option.label }}</option>
+                    </select>
+                  </label>
+                  <label class="settings-field">
+                    <span>正文字号</span>
+                    <select v-model.number="textSize" class="settings-input" @change="saveTextSize">
+                      <option v-for="size in textSizeOptions" :key="size" :value="size">{{ size }} px</option>
+                    </select>
+                  </label>
+                  <label class="settings-field">
+                    <span>代码字号</span>
+                    <select v-model.number="codeSize" class="settings-input" @change="saveCodeSize">
+                      <option v-for="size in codeSizeOptions" :key="size" :value="size">{{ size }} px</option>
+                    </select>
+                  </label>
                 </div>
               </section>
-            </div>
-          </section>
 
-          <section v-else class="settings-pane">
-            <div class="settings-pane-heading">
-              <h2>账号安全</h2>
-              <p>修改用户名和密码。修改用户名只需要输入当前密码确认。</p>
-            </div>
-            <form class="settings-card" @submit.prevent="saveProfile">
-              <h3>修改用户名</h3>
-              <input v-model="profileUsername" class="settings-input" placeholder="新用户名" />
-              <input v-model="profilePassword" class="settings-input" type="password" placeholder="当前密码" />
-              <button class="settings-primary" type="submit">保存用户名</button>
-            </form>
-            <form class="settings-card" @submit.prevent="savePassword">
-              <h3>修改密码</h3>
-              <input v-model="currentPassword" class="settings-input" type="password" placeholder="当前密码" />
-              <input v-model="replacementPassword" class="settings-input" type="password" placeholder="新密码" />
-              <button class="settings-primary" type="submit">保存密码</button>
-            </form>
-          </section>
-        </div>
-      </section>
-    </div>
+              <section v-else-if="settingsTab === 'api'" key="api" class="settings-pane">
+                <div class="settings-pane-heading">
+                  <h2>API 管理</h2>
+                  <p>用户可以管理自己的密钥，并把密钥切换到管理员创建的分组。一个密钥只能属于一个分组。</p>
+                </div>
 
-    <div v-if="renameDialogOpen" class="rename-modal-backdrop" @click.self="closeRenameDialog">
-      <form class="rename-modal" role="dialog" aria-modal="true" aria-label="修改对话名称" @submit.prevent="saveConversationTitle">
-        <div class="rename-modal-header">
-          <h2>修改对话名称</h2>
-          <button type="button" class="rename-modal-close" title="关闭" aria-label="关闭" @click="closeRenameDialog">
-            <X :size="18" />
-          </button>
-        </div>
-        <input
-          v-model="renameDraft"
-          class="rename-modal-input"
-          maxlength="100"
-          placeholder="输入新的对话名称"
-          autofocus
-        />
-        <p v-if="renameError" class="rename-modal-error">{{ renameError }}</p>
-        <div class="rename-modal-actions">
-          <button type="button" class="rename-secondary-button" :disabled="renameSaving" @click="closeRenameDialog">取消</button>
-          <button type="submit" class="rename-primary-button" :disabled="renameSaving || !renameDraft.trim()">保存</button>
-        </div>
-      </form>
-    </div>
+                <form class="settings-card" @submit.prevent="createApiKey">
+                  <h3>添加新密钥</h3>
+                  <div class="settings-grid">
+                    <input v-model="newApiKey.name" class="settings-input" placeholder="密钥名称，例如：工作 / 备用" />
+                    <select v-model="newApiKey.groupId" class="settings-input">
+                      <option value="">未分组</option>
+                      <option v-for="group in apiKeyGroups" :key="group.id" :value="group.id">{{ group.name }}</option>
+                    </select>
+                    <input v-model="newApiKey.apiKey" class="settings-input" type="password" placeholder="API Key 明文只提交一次" />
+                  </div>
+                  <label class="settings-check">
+                    <input v-model="newApiKey.makeActive" type="checkbox" />
+                    添加后立即设为当前使用密钥
+                  </label>
+                  <button class="settings-primary" type="submit">添加密钥</button>
+                </form>
 
-    <div v-if="logoutConfirmOpen" class="confirm-modal-backdrop" @click.self="closeLogoutConfirm">
-      <section class="confirm-modal" role="dialog" aria-modal="true" aria-label="确认退出登录">
-        <div class="confirm-modal-header">
-          <h2>退出登录？</h2>
-          <button type="button" class="confirm-modal-close" title="关闭" aria-label="关闭" @click="closeLogoutConfirm">
-            <X :size="18" />
-          </button>
-        </div>
-        <p>退出后需要重新登录才能继续使用。</p>
-        <div class="confirm-modal-actions">
-          <button type="button" class="confirm-secondary-button" :disabled="logoutLoading" @click="closeLogoutConfirm">取消</button>
-          <button type="button" class="confirm-danger-button" :disabled="logoutLoading" @click="confirmLogout">确认退出</button>
-        </div>
-      </section>
-    </div>
+                <div class="settings-card">
+                  <div class="settings-card-header">
+                    <h3>我的密钥</h3>
+                    <button class="settings-secondary" :disabled="settingsLoading" @click="loadApiSettings">刷新</button>
+                  </div>
+                  <div v-if="settingsLoading" class="settings-skeleton-list" aria-label="正在加载密钥">
+                    <div v-for="item in 3" :key="item" class="settings-key-skeleton">
+                      <div class="settings-key-main">
+                        <span class="skeleton-line wide" />
+                        <span class="skeleton-line medium" />
+                        <span class="skeleton-line short" />
+                      </div>
+                      <div class="settings-key-actions">
+                        <span class="skeleton-pill" />
+                        <span class="skeleton-pill" />
+                      </div>
+                    </div>
+                  </div>
+                  <div v-else-if="!apiKeys.length" class="settings-empty">暂无密钥</div>
+                  <div v-for="key in apiKeys" v-else :key="key.id" class="settings-key-row">
+                    <div class="settings-key-main">
+                      <input v-model="keyDraftFor(key).name" class="settings-input" />
+                      <select v-model="keyDraftFor(key).groupId" class="settings-input">
+                        <option value="">未分组</option>
+                        <option v-for="group in apiKeyGroups" :key="group.id" :value="group.id">{{ group.name }}</option>
+                      </select>
+                      <div class="settings-key-meta">
+                        <span>{{ key.groupName || '未分组' }}</span>
+                        <span class="key-mask">{{ key.maskedKey }}</span>
+                        <strong v-if="key.isActive">当前使用</strong>
+                      </div>
+                    </div>
+                    <div class="settings-key-actions">
+                      <button class="settings-secondary" @click="copyApiKeySecret(key)">复制</button>
+                      <button class="settings-secondary" @click="saveApiKey(key)">保存</button>
+                      <button class="settings-primary" :disabled="key.isActive" @click="activateApiKey(key)">切换</button>
+                      <button class="settings-danger" @click="deleteApiKey(key)">删除</button>
+                    </div>
+                  </div>
+                </div>
+
+              </section>
+
+              <section v-else-if="settingsTab === 'groups' && auth.user?.role === 'admin'" key="groups" class="settings-pane">
+                <div class="settings-pane-heading">
+                  <h2>分组管理</h2>
+                  <p>维护密钥分组，并查看每个分组下所有用户的密钥。</p>
+                </div>
+
+                <div class="settings-group-layout">
+                  <aside class="settings-group-sidebar">
+                    <form class="settings-group-create-panel" @submit.prevent="createApiKeyGroup">
+                      <h3>新建分组</h3>
+                      <input v-model="newGroup.name" class="settings-input" placeholder="分组名称" />
+                      <input v-model="newGroup.description" class="settings-input" placeholder="备注，可选" />
+                      <button class="settings-primary" type="submit">创建分组</button>
+                    </form>
+
+                    <div class="settings-group-list">
+                      <button
+                        class="settings-group-list-item"
+                        :class="{ active: selectedGroupId === 'ungrouped' }"
+                        type="button"
+                        @click="loadGroupKeys('ungrouped')"
+                      >
+                        <span>未分组</span>
+                        <small>系统默认</small>
+                      </button>
+                      <button
+                        v-for="group in apiKeyGroups"
+                        :key="group.id"
+                        class="settings-group-list-item"
+                        :class="{ active: selectedGroupId === group.id }"
+                        type="button"
+                        @click="loadGroupKeys(group.id)"
+                      >
+                        <span>{{ group.name }}</span>
+                        <small>{{ group.description || '无备注' }}</small>
+                      </button>
+                    </div>
+                  </aside>
+
+                  <section class="settings-group-detail">
+                    <div class="settings-card-header">
+                      <div>
+                        <h3>{{ selectedGroupId === 'ungrouped' ? '未分组' : selectedApiKeyGroup?.name || '分组详情' }}</h3>
+                        <p>当前分组下的密钥和所属用户。</p>
+                      </div>
+                      <button class="settings-secondary" :disabled="groupKeysLoading" @click="loadGroupKeys(selectedGroupId)">刷新密钥</button>
+                    </div>
+
+                    <div v-if="selectedApiKeyGroup" class="settings-group-editor">
+                      <input
+                        v-model="groupDraftFor(selectedApiKeyGroup).name"
+                        class="settings-input"
+                        placeholder="分组名称"
+                      />
+                      <input
+                        v-model="groupDraftFor(selectedApiKeyGroup).description"
+                        class="settings-input"
+                        placeholder="备注"
+                      />
+                      <button class="settings-secondary" @click="saveApiKeyGroup(selectedApiKeyGroup)">保存</button>
+                      <button class="settings-danger" @click="deleteApiKeyGroup(selectedApiKeyGroup)">删除</button>
+                    </div>
+
+                    <div class="settings-group-key-list">
+                      <div v-if="groupKeysLoading" class="settings-skeleton-list compact" aria-label="正在加载分组密钥">
+                        <div v-for="item in 4" :key="item" class="settings-admin-key-skeleton">
+                          <span class="skeleton-line medium" />
+                          <span class="skeleton-line wide" />
+                          <span class="skeleton-line short" />
+                        </div>
+                      </div>
+                      <div v-else-if="!selectedGroupKeys.length" class="settings-empty">当前分组暂无密钥</div>
+                      <div v-for="key in selectedGroupKeys" v-else :key="key.id" class="settings-admin-key-row">
+                        <div class="settings-admin-key-top">
+                          <strong>{{ key.name }}</strong>
+                          <span>{{ key.username || key.userId || '未知用户' }}</span>
+                        </div>
+                        <div class="settings-admin-key-meta">
+                          <span>{{ key.groupName || '未分组' }}</span>
+                          <span class="key-mask">{{ key.maskedKey }}</span>
+                          <strong v-if="key.isActive">用户当前使用</strong>
+                          <button class="settings-inline-action" @click="copyApiKeySecret(key, key.userId)">复制</button>
+                        </div>
+                      </div>
+                    </div>
+                  </section>
+                </div>
+              </section>
+
+              <section v-else key="account" class="settings-pane">
+                <div class="settings-pane-heading">
+                  <h2>账号安全</h2>
+                  <p>修改用户名和密码。修改用户名只需要输入当前密码确认。</p>
+                </div>
+                <form class="settings-card" @submit.prevent="saveProfile">
+                  <h3>修改用户名</h3>
+                  <input v-model="profileUsername" class="settings-input" placeholder="新用户名" />
+                  <input v-model="profilePassword" class="settings-input" type="password" placeholder="当前密码" />
+                  <button class="settings-primary" type="submit">保存用户名</button>
+                </form>
+                <form class="settings-card" @submit.prevent="savePassword">
+                  <h3>修改密码</h3>
+                  <input v-model="currentPassword" class="settings-input" type="password" placeholder="当前密码" />
+                  <input v-model="replacementPassword" class="settings-input" type="password" placeholder="新密码" />
+                  <button class="settings-primary" type="submit">保存密码</button>
+                </form>
+              </section>
+            </Transition>
+          </div>
+        </section>
+      </div>
+    </Transition>
+
+    <Transition name="dialog-pop">
+      <div v-if="renameDialogOpen" class="rename-modal-backdrop" @click.self="closeRenameDialog">
+        <form class="rename-modal" role="dialog" aria-modal="true" aria-label="修改对话名称" @submit.prevent="saveConversationTitle">
+          <div class="rename-modal-header">
+            <h2>修改对话名称</h2>
+            <button type="button" class="rename-modal-close" title="关闭" aria-label="关闭" @click="closeRenameDialog">
+              <X :size="18" />
+            </button>
+          </div>
+          <input
+            v-model="renameDraft"
+            class="rename-modal-input"
+            maxlength="100"
+            placeholder="输入新的对话名称"
+            autofocus
+          />
+          <Transition name="soft-slide">
+            <p v-if="renameError" class="rename-modal-error">{{ renameError }}</p>
+          </Transition>
+          <div class="rename-modal-actions">
+            <button type="button" class="rename-secondary-button" :disabled="renameSaving" @click="closeRenameDialog">取消</button>
+            <button type="submit" class="rename-primary-button" :disabled="renameSaving || !renameDraft.trim()">保存</button>
+          </div>
+        </form>
+      </div>
+    </Transition>
+
+    <Transition name="dialog-pop">
+      <div v-if="logoutConfirmOpen" class="confirm-modal-backdrop" @click.self="closeLogoutConfirm">
+        <section class="confirm-modal" role="dialog" aria-modal="true" aria-label="确认退出登录">
+          <div class="confirm-modal-header">
+            <h2>退出登录？</h2>
+            <button type="button" class="confirm-modal-close" title="关闭" aria-label="关闭" @click="closeLogoutConfirm">
+              <X :size="18" />
+            </button>
+          </div>
+          <p>退出后需要重新登录才能继续使用。</p>
+          <div class="confirm-modal-actions">
+            <button type="button" class="confirm-secondary-button" :disabled="logoutLoading" @click="closeLogoutConfirm">取消</button>
+            <button type="button" class="confirm-danger-button" :disabled="logoutLoading" @click="confirmLogout">确认退出</button>
+          </div>
+        </section>
+      </div>
+    </Transition>
   </div>
 </template>

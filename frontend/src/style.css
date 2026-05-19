@@ -30,6 +30,13 @@
   --user-message-font-size: 14.5px;
   --code-font-size: 12px;
   --chat-content-width: min(920px, calc(100vw - 4rem));
+  --ease-out-soft: cubic-bezier(0.22, 1, 0.36, 1);
+  --ease-pop: cubic-bezier(0.2, 1.18, 0.36, 1);
+  --ease-menu: cubic-bezier(0.18, 0.86, 0.24, 1);
+  --ease-in-soft: cubic-bezier(0.55, 0, 1, 0.45);
+  --motion-fast: 220ms;
+  --motion-medium: 380ms;
+  --motion-slow: 520ms;
   color: #f4f4f5;
   background: #050505;
   font-family: Inter, ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
@@ -204,6 +211,8 @@ body,
   background: var(--panel-bg);
   box-shadow: 0 16px 44px rgba(0, 0, 0, 0.34);
   padding: 0.45rem;
+  transform-origin: bottom right;
+  will-change: opacity, transform;
 }
 
 .sidebar-settings-menu.open::before {
@@ -221,11 +230,12 @@ body,
   font-size: 0.9rem;
   padding: 0.55rem 0.65rem;
   text-align: left;
-  transition: background 150ms ease, color 150ms ease;
+  transition: background var(--motion-fast) ease, color var(--motion-fast) ease, transform var(--motion-fast) ease;
 }
 
 .sidebar-settings-popover button:hover {
   background: var(--control-hover);
+  transform: translateX(2px);
 }
 
 .sidebar-settings-popover .sidebar-settings-danger {
@@ -322,6 +332,66 @@ body,
 
 .conversation-list {
   scrollbar-color: var(--scroll-thumb) transparent;
+}
+
+.sidebar-skeleton-list {
+  display: grid;
+  gap: 0.45rem;
+  padding: 0.15rem 0;
+}
+
+.sidebar-skeleton-row {
+  display: flex;
+  height: 2.15rem;
+  align-items: center;
+  border-radius: 9px;
+  background: color-mix(in srgb, var(--control-bg) 56%, transparent);
+  padding: 0 0.7rem;
+}
+
+.skeleton-line,
+.skeleton-pill {
+  position: relative;
+  display: block;
+  overflow: hidden;
+  border-radius: 999px;
+  background: color-mix(in srgb, var(--text) 10%, var(--control-bg));
+}
+
+.skeleton-line {
+  width: 100%;
+  height: 0.72rem;
+}
+
+.skeleton-pill {
+  width: 3.7rem;
+  height: 2rem;
+  border-radius: 10px;
+}
+
+.skeleton-line::after,
+.skeleton-pill::after {
+  position: absolute;
+  inset: 0;
+  content: "";
+  transform: translateX(-100%);
+  background: linear-gradient(90deg, transparent, color-mix(in srgb, var(--text) 20%, transparent), transparent);
+  animation: skeleton-sweep 1.35s infinite;
+}
+
+.skeleton-line.w-0,
+.skeleton-line.short {
+  width: 42%;
+}
+
+.skeleton-line.w-1,
+.skeleton-line.medium {
+  width: 64%;
+}
+
+.skeleton-line.w-2,
+.skeleton-line.wide {
+  width: 86%;
 }
 
 .chat-sidebar-top {
@@ -498,10 +568,12 @@ body,
   display: grid;
   place-items: center;
   background:
-    radial-gradient(circle at 18% 78%, color-mix(in srgb, var(--bubble-bg) 14%, transparent), transparent 28rem),
-    rgba(0, 0, 0, 0.36);
+    radial-gradient(circle at 18% 78%, color-mix(in srgb, var(--bubble-bg) 16%, transparent), transparent 28rem),
+    rgba(0, 0, 0, 0.46);
   padding: 1.25rem;
   backdrop-filter: blur(9px);
+  -webkit-backdrop-filter: blur(9px);
+  will-change: opacity;
 }
 
 .settings-modal {
@@ -515,6 +587,9 @@ body,
   background: var(--panel-bg);
   color: var(--text);
   box-shadow: 0 24px 90px rgba(0, 0, 0, 0.46);
+  opacity: 1;
+  transform-origin: center;
+  will-change: opacity, transform;
 }
 
 .settings-modal-nav {
@@ -549,7 +624,12 @@ body,
   border-radius: 10px;
   padding: 0.55rem 0.75rem;
   font-size: 0.9rem;
-  transition: background 150ms ease, border-color 150ms ease, color 150ms ease, opacity 150ms ease;
+  transition:
+    background var(--motion-fast) ease,
+    border-color var(--motion-fast) ease,
+    color var(--motion-fast) ease,
+    opacity var(--motion-fast) ease,
+    transform var(--motion-fast) ease;
 }
 
 .settings-tab-button {
@@ -565,6 +645,10 @@ body,
   color: var(--text);
 }
 
+.settings-tab-button:hover {
+  transform: translateX(2px);
+}
+
 .settings-close-button,
 .settings-secondary {
   background: var(--control-bg);
@@ -574,6 +658,7 @@ body,
 .settings-close-button:hover,
 .settings-secondary:hover {
   background: var(--control-hover);
+  transform: translateY(-1px);
 }
 
 .settings-primary {
@@ -583,6 +668,7 @@ body,
 
 .settings-primary:hover:not(:disabled) {
   background: var(--bubble-hover);
+  transform: translateY(-1px);
 }
 
 .settings-danger {
@@ -592,6 +678,7 @@ body,
 
 .settings-danger:hover {
   background: color-mix(in srgb, #dc2626 24%, transparent);
+  transform: translateY(-1px);
 }
 
 .settings-primary:disabled,
@@ -610,6 +697,7 @@ body,
 .settings-pane {
   display: grid;
   gap: 1rem;
+  will-change: opacity, transform;
 }
 
 .settings-pane-heading h2 {
@@ -701,6 +789,33 @@ body,
   align-items: start;
   border-top: 1px solid var(--line);
   padding-top: 0.85rem;
+}
+
+.settings-skeleton-list {
+  display: grid;
+  gap: 0.85rem;
+}
+
+.settings-skeleton-list.compact {
+  gap: 0.65rem;
+}
+
+.settings-key-skeleton,
+.settings-admin-key-skeleton {
+  border-top: 1px solid var(--line);
+  padding-top: 0.85rem;
+}
+
+.settings-key-skeleton {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto;
+  gap: 0.9rem;
+  align-items: center;
+}
+
+.settings-admin-key-skeleton {
+  display: grid;
+  gap: 0.48rem;
 }
 
 .settings-key-main {
@@ -945,10 +1060,11 @@ body,
   z-index: 90;
   display: grid;
   place-items: center;
-  background: rgba(0, 0, 0, 0.46);
+  background: rgba(0, 0, 0, 0.56);
   padding: 1rem;
   backdrop-filter: blur(8px);
   -webkit-backdrop-filter: blur(8px);
+  will-change: opacity;
 }
 
 .rename-modal,
@@ -962,6 +1078,9 @@ body,
   color: var(--text);
   box-shadow: 0 24px 90px rgba(0, 0, 0, 0.48);
   padding: 1rem;
+  opacity: 1;
+  transform-origin: center;
+  will-change: opacity, transform;
 }
 
 .rename-modal-header,
@@ -997,13 +1116,14 @@ body,
   justify-content: center;
   border-radius: 999px;
   color: var(--muted);
-  transition: background 150ms ease, color 150ms ease;
+  transition: background var(--motion-fast) ease, color var(--motion-fast) ease, transform var(--motion-fast) ease;
 }
 
 .rename-modal-close:hover,
 .confirm-modal-close:hover {
   background: var(--control-hover);
   color: var(--text);
+  transform: rotate(6deg) scale(1.04);
 }
 
 .rename-modal-input {
@@ -1015,10 +1135,12 @@ body,
   color: var(--text);
   outline: none;
   padding: 0.65rem 0.8rem;
+  transition: border-color var(--motion-fast) ease, box-shadow var(--motion-fast) ease, background var(--motion-fast) ease;
 }
 
 .rename-modal-input:focus {
   border-color: var(--bubble-bg);
+  box-shadow: 0 0 0 3px color-mix(in srgb, var(--bubble-bg) 18%, transparent);
 }
 
 .rename-modal-error {
@@ -1040,7 +1162,7 @@ body,
   border-radius: 10px;
   padding: 0.45rem 0.9rem;
   font-size: 0.92rem;
-  transition: background 150ms ease, opacity 150ms ease;
+  transition: background var(--motion-fast) ease, opacity var(--motion-fast) ease, transform var(--motion-fast) ease;
 }
 
 .rename-secondary-button,
@@ -1053,6 +1175,7 @@ body,
 .rename-secondary-button:hover:not(:disabled),
 .confirm-secondary-button:hover:not(:disabled) {
   background: var(--control-hover);
+  transform: translateY(-1px);
 }
 
 .rename-primary-button {
@@ -1062,6 +1185,7 @@ body,
 
 .rename-primary-button:hover:not(:disabled) {
   background: var(--bubble-hover);
+  transform: translateY(-1px);
 }
 
 .confirm-danger-button {
@@ -1072,6 +1196,7 @@ body,
 .confirm-danger-button:hover:not(:disabled) {
   background: color-mix(in srgb, #dc2626 28%, transparent);
   color: #fecaca;
+  transform: translateY(-1px);
 }
 
 .rename-secondary-button:disabled,
@@ -1080,6 +1205,131 @@ body,
 .confirm-danger-button:disabled {
   cursor: not-allowed;
   opacity: 0.55;
+}
+
+.menu-pop-enter-active,
+.menu-rise-enter-active {
+  transition:
+    opacity 260ms var(--ease-out-soft),
+    transform 300ms var(--ease-menu);
+}
+
+.menu-pop-leave-active,
+.menu-rise-leave-active {
+  transition:
+    opacity 130ms var(--ease-in-soft),
+    transform 130ms var(--ease-in-soft);
+}
+
+.menu-pop-enter-from,
+.menu-pop-leave-to {
+  opacity: 0;
+  transform: translate3d(0, -10px, 0) scale(0.98);
+}
+
+.menu-rise-enter-from,
+.menu-rise-leave-to {
+  opacity: 0;
+  transform: translate3d(0, 10px, 0) scale(0.98);
+}
+
+.menu-pop-enter-to,
+.menu-pop-leave-from,
+.menu-rise-enter-to,
+.menu-rise-leave-from {
+  opacity: 1;
+  transform: translate3d(0, 0, 0) scale(1);
+}
+
+.modal-fade-enter-active,
+.modal-fade-leave-active,
+.dialog-pop-enter-active,
+.dialog-pop-leave-active {
+  transition:
+    opacity 360ms var(--ease-out-soft),
+    backdrop-filter 420ms var(--ease-out-soft);
+}
+
+.modal-fade-enter-active .settings-modal,
+.modal-fade-leave-active .settings-modal,
+.dialog-pop-enter-active .rename-modal,
+.dialog-pop-leave-active .rename-modal,
+.dialog-pop-enter-active .confirm-modal,
+.dialog-pop-leave-active .confirm-modal {
+  transition:
+    opacity 300ms var(--ease-out-soft),
+    transform 340ms var(--ease-menu);
+}
+
+.modal-fade-leave-active,
+.dialog-pop-leave-active {
+  transition-duration: 220ms;
+  transition-timing-function: var(--ease-in-soft);
+}
+
+.modal-fade-leave-active .settings-modal,
+.dialog-pop-leave-active .rename-modal,
+.dialog-pop-leave-active .confirm-modal {
+  transition-duration: 220ms;
+  transition-timing-function: var(--ease-in-soft);
+}
+
+.modal-fade-enter-from,
+.modal-fade-leave-to,
+.dialog-pop-enter-from,
+.dialog-pop-leave-to {
+  opacity: 0;
+  backdrop-filter: blur(0);
+  -webkit-backdrop-filter: blur(0);
+}
+
+.modal-fade-enter-from .settings-modal,
+.modal-fade-leave-to .settings-modal {
+  opacity: 0;
+  transform: translate3d(0, 22px, 0) scale(0.975);
+}
+
+.dialog-pop-enter-from .rename-modal,
+.dialog-pop-leave-to .rename-modal,
+.dialog-pop-enter-from .confirm-modal,
+.dialog-pop-leave-to .confirm-modal {
+  opacity: 0;
+  transform: translate3d(0, 18px, 0) scale(0.965);
+}
+
+.modal-fade-enter-to .settings-modal,
+.modal-fade-leave-from .settings-modal,
+.dialog-pop-enter-to .rename-modal,
+.dialog-pop-leave-from .rename-modal,
+.dialog-pop-enter-to .confirm-modal,
+.dialog-pop-leave-from .confirm-modal {
+  opacity: 1;
+  transform: translate3d(0, 0, 0) scale(1);
+}
+
+.pane-swap-enter-active,
+.pane-swap-leave-active,
+.soft-slide-enter-active,
+.soft-slide-leave-active {
+  transition:
+    opacity 240ms var(--ease-out-soft),
+    transform 280ms var(--ease-out-soft);
+}
+
+.pane-swap-enter-from,
+.pane-swap-leave-to,
+.soft-slide-enter-from,
+.soft-slide-leave-to {
+  opacity: 0;
+  transform: translate3d(0, 8px, 0);
+}
+
+.pane-swap-enter-to,
+.pane-swap-leave-from,
+.soft-slide-enter-to,
+.soft-slide-leave-from {
+  opacity: 1;
+  transform: translate3d(0, 0, 0);
 }
 
 @media (max-width: 860px) {
@@ -1200,6 +1450,44 @@ body,
 
 .chat-message-row {
   max-width: 100%;
+}
+
+.message-skeleton-stack {
+  display: grid;
+  gap: 1.25rem;
+  padding-top: 0.35rem;
+}
+
+.message-skeleton-row {
+  display: flex;
+  width: 100%;
+}
+
+.message-skeleton-row.user {
+  justify-content: flex-end;
+}
+
+.message-skeleton-row.assistant {
+  justify-content: flex-start;
+}
+
+.message-skeleton-block,
+.message-skeleton-bubble {
+  display: grid;
+  gap: 0.7rem;
+  border-radius: 18px;
+}
+
+.message-skeleton-block {
+  width: min(680px, 78%);
+  padding: 0.75rem 0;
+}
+
+.message-skeleton-bubble {
+  width: min(360px, 62%);
+  border: 1px solid color-mix(in srgb, var(--bubble-bg) 54%, #ffffff 12%);
+  background: color-mix(in srgb, var(--bubble-bg) 58%, transparent);
+  padding: 0.85rem 1rem;
 }
 
 .empty-chat-state {
@@ -1396,6 +1684,46 @@ body,
   46%,
   100% {
     opacity: 0;
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  *,
+  *::before,
+  *::after {
+    animation-duration: 1ms;
+    animation-iteration-count: 1;
+    scroll-behavior: auto !important;
+    transition-duration: 1ms;
+  }
+
+  .menu-pop-enter-active,
+  .menu-rise-enter-active {
+    transition-duration: 260ms, 300ms !important;
+  }
+
+  .menu-pop-leave-active,
+  .menu-rise-leave-active {
+    transition-duration: 130ms, 130ms !important;
+  }
+
+  .modal-fade-enter-active,
+  .modal-fade-leave-active,
+  .dialog-pop-enter-active,
+  .dialog-pop-leave-active {
+    transition-duration: 360ms, 420ms !important;
+  }
+
+  .modal-fade-enter-active .settings-modal,
+  .dialog-pop-enter-active .rename-modal,
+  .dialog-pop-enter-active .confirm-modal {
+    transition-duration: 300ms, 340ms !important;
+  }
+
+  .modal-fade-leave-active .settings-modal,
+  .dialog-pop-leave-active .rename-modal,
+  .dialog-pop-leave-active .confirm-modal {
+    transition-duration: 220ms !important;
   }
 }
 
@@ -1716,6 +2044,12 @@ body,
   padding: 0.38rem;
   backdrop-filter: blur(20px) saturate(125%);
   -webkit-backdrop-filter: blur(20px) saturate(125%);
+  transform-origin: top left;
+  will-change: opacity, transform;
+}
+
+.model-picker-reasoning .model-picker-menu {
+  transform-origin: top left;
 }
 
 .model-picker-menu::-webkit-scrollbar {
@@ -1765,11 +2099,16 @@ body,
   text-align: left;
   text-overflow: ellipsis;
   white-space: nowrap;
-  transition: background 130ms ease, color 130ms ease, box-shadow 130ms ease;
+  transition:
+    background var(--motion-fast) ease,
+    color var(--motion-fast) ease,
+    box-shadow var(--motion-fast) ease,
+    transform var(--motion-fast) ease;
 }
 
 .model-picker-option:hover {
   background: color-mix(in srgb, var(--text) 8%, transparent);
+  transform: translateX(2px);
 }
 
 .model-picker-option.active {
