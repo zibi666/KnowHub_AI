@@ -48,7 +48,7 @@ watch(
 </script>
 
 <template>
-  <article class="chat-message py-3">
+  <article class="chat-message py-3" :data-message-id="message.id">
     <div class="message-row chat-message-row mx-auto flex w-full" :class="message.role === 'user' ? 'message-row-user justify-end' : 'justify-start'">
       <div :class="message.role === 'user' ? 'message-bubble message-user' : 'message-assistant'">
         <template v-if="message.role === 'user'">

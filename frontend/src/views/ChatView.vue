@@ -1,12 +1,12 @@
 <script setup lang="ts">
-import { computed, nextTick, onMounted, ref, type CSSProperties } from 'vue'
-import { ArrowDown, Maximize2, Minimize2, PanelLeftClose, PanelLeftOpen, Paperclip, Pencil, Plus, Send, Settings, X } from 'lucide-vue-next'
+import { computed, nextTick, onMounted, ref, watch, type CSSProperties } from 'vue'
+import { ArrowDown, Maximize2, MessageCircle, Minimize2, PanelLeftClose, PanelLeftOpen, Paperclip, Pencil, Plus, Search, Send, Settings, X } from 'lucide-vue-next'
 import { useRouter } from 'vue-router'
 import { ApiError, apiFetch, localizeApiMessage, readCookie, streamJsonLines } from '../api/client'
 import AppSelect from '../components/AppSelect.vue'
 import ChatMessage from '../components/ChatMessage.vue'
 import { useAuthStore } from '../stores/auth'
-import type { ApiKeyEntry, ApiKeyGroup, Attachment, Conversation, Message, User } from '../types'
+import type { ApiKeyEntry, ApiKeyGroup, Attachment, Conversation, ConversationSearchResult, Message, User } from '../types'
 
 type ThemeMode = 'dark' | 'light'
 type SettingsTab = 'appearance' | 'api' | 'groups' | 'account'
@@ -89,6 +89,11 @@ const codeSize = ref(12)
 const settingsMenuOpen = ref(false)
 const settingsOpen = ref(false)
 const sidebarCollapsed = ref(false)
+const searchOpen = ref(false)
+const searchQuery = ref('')
+const searchLoading = ref(false)
+const searchResults = ref<ConversationSearchResult[]>([])
+const searchError = ref('')
 const logoutConfirmOpen = ref(false)
 const logoutLoading = ref(false)
 const settingsTab = ref<SettingsTab>('appearance')
@@ -125,6 +130,7 @@ let scrollFrame: number | null = null
 let activeConversationLoad = 0
 
 const currentConversation = computed(() => conversations.value.find((item) => item.id === currentId.value))
+const recentSearchConversations = computed(() => conversations.value.slice(0, 10))
 const conversationUsage = computed(() => {
   const assistantMessages = messages.value.filter((message) => message.role === 'assistant')
   return {
@@ -276,6 +282,74 @@ function setNewApiKeyGroup(groupId: string | number) {
 
 function setApiKeyDraftGroup(key: ApiKeyEntry, groupId: string | number) {
   keyDraftFor(key).groupId = String(groupId)
+}
+
+function formatSearchDate(value: string) {
+  const date = new Date(value)
+  if (Number.isNaN(date.getTime())) return ''
+  const now = new Date()
+  const startOfToday = new Date(now.getFullYear(), now.getMonth(), now.getDate()).getTime()
+  const startOfDate = new Date(date.getFullYear(), date.getMonth(), date.getDate()).getTime()
+  const dayDelta = Math.round((startOfToday - startOfDate) / 86400000)
+  if (dayDelta === 0) return '今天'
+  if (dayDelta === 1) return '昨天'
+  if (dayDelta < 7) return `${dayDelta} 天前`
+  return date.toLocaleDateString()
+}
+
+function openSearchDialog() {
+  settingsMenuOpen.value = false
+  searchOpen.value = true
+  searchError.value = ''
+  void nextTick(() => {
+    document.querySelector<HTMLInputElement>('.chat-search-input')?.focus()
+  })
+}
+
+function closeSearchDialog() {
+  searchOpen.value = false
+  searchQuery.value = ''
+  searchResults.value = []
+  searchError.value = ''
+  searchLoading.value = false
+  if (searchDebounceTimer !== null) {
+    window.clearTimeout(searchDebounceTimer)
+    searchDebounceTimer = null
+  }
+}
+
+let searchRequestId = 0
+async function runConversationSearch() {
+  const query = searchQuery.value.trim()
+  const requestId = ++searchRequestId
+  searchError.value = ''
+  if (!query) {
+    searchResults.value = []
+    searchLoading.value = false
+    return
+  }
+  searchLoading.value = true
+  try {
+    const params = new URLSearchParams({ q: query, limit: '30' })
+    const results = await apiFetch<ConversationSearchResult[]>(`/conversations/search?${params.toString()}`)
+    if (requestId === searchRequestId) searchResults.value = results
+  } catch (err) {
+    if (requestId === searchRequestId) {
+      searchResults.value = []
+      searchError.value = err instanceof Error ? err.message : '搜索失败'
+    }
+  } finally {
+    if (requestId === searchRequestId) searchLoading.value = false
+  }
+}
+
+let searchDebounceTimer: number | null = null
+function scheduleConversationSearch() {
+  if (searchDebounceTimer !== null) window.clearTimeout(searchDebounceTimer)
+  searchDebounceTimer = window.setTimeout(() => {
+    searchDebounceTimer = null
+    void runConversationSearch()
+  }, 180)
 }
 
 function resetSettingsMessages() {
@@ -666,7 +740,7 @@ async function chooseModel(model: string) {
   await saveSelectedModel()
 }
 
-async function openConversation(id: string) {
+async function openConversation(id: string, focusMessageId?: string | null) {
   if (deletingConversationId.value === id) return
   const loadId = ++activeConversationLoad
   cancelPendingScroll()
@@ -675,16 +749,46 @@ async function openConversation(id: string) {
   messages.value = []
   messagesLoading.value = true
   try {
-    const loadedMessages = sortMessagesForDisplay(await apiFetch<Message[]>(`/conversations/${id}/messages`))
+    const params = focusMessageId ? `?aroundMessageId=${encodeURIComponent(focusMessageId)}&limit=120` : ''
+    const loadedMessages = sortMessagesForDisplay(await apiFetch<Message[]>(`/conversations/${id}/messages${params}`))
     if (loadId !== activeConversationLoad) return
     messages.value = loadedMessages
     await loadContextStats()
-    await scrollMessagesToBottom('auto')
+    if (focusMessageId) {
+      await scrollToMessage(focusMessageId)
+    } else {
+      await scrollMessagesToBottom('auto')
+    }
   } catch (err) {
     if (loadId === activeConversationLoad && err instanceof ApiError) error.value = err.message
   } finally {
     if (loadId === activeConversationLoad) messagesLoading.value = false
   }
+}
+
+async function scrollToMessage(messageId: string) {
+  await nextTick()
+  const target = Array.from(document.querySelectorAll<HTMLElement>('[data-message-id]')).find(
+    (item) => item.dataset.messageId === messageId
+  )
+  if (!target) {
+    await scrollMessagesToBottom('auto')
+    return
+  }
+  userHasScrolledUp = true
+  target.scrollIntoView({ behavior: 'smooth', block: 'center' })
+  target.classList.add('message-search-highlight')
+  window.setTimeout(() => target.classList.remove('message-search-highlight'), 1800)
+}
+
+async function openSearchResult(result: ConversationSearchResult) {
+  closeSearchDialog()
+  await openConversation(result.conversationId, result.messageId)
+}
+
+async function openRecentConversation(conversation: Conversation) {
+  closeSearchDialog()
+  await openConversation(conversation.id)
 }
 
 function openRenameConversation(conversation: Conversation) {
@@ -905,6 +1009,11 @@ function closeFloatingMenus() {
   settingsMenuOpen.value = false
 }
 
+watch(searchQuery, () => {
+  if (!searchOpen.value) return
+  scheduleConversationSearch()
+})
+
 onMounted(async () => {
   loadAppearance()
   await Promise.all([loadModels(), loadConversations()])
@@ -921,27 +1030,36 @@ onMounted(async () => {
     <aside class="chat-sidebar flex flex-col min-h-0">
       <div class="chat-sidebar-top">
         <div class="sidebar-top-actions">
-          <button
-            class="sidebar-new-chat-button"
-            type="button"
-            title="新对话"
-            aria-label="新对话"
-            @click="newChat"
-          >
-            <Plus :size="18" />
-            <span>新对话</span>
-          </button>
-          <button
-            class="sidebar-collapse-button"
-            type="button"
-            :title="sidebarCollapsed ? '展开侧边栏' : '折叠侧边栏'"
-            :aria-label="sidebarCollapsed ? '展开侧边栏' : '折叠侧边栏'"
-            :aria-pressed="sidebarCollapsed"
-            @click.stop="toggleSidebarCollapsed"
-          >
-            <PanelLeftOpen v-if="sidebarCollapsed" :size="18" />
-            <PanelLeftClose v-else :size="18" />
-          </button>
+          <div class="sidebar-title-row">
+            <div class="sidebar-brand">KnowHub</div>
+            <button
+              class="sidebar-collapse-button"
+              type="button"
+              :title="sidebarCollapsed ? '展开侧边栏' : '折叠侧边栏'"
+              :aria-label="sidebarCollapsed ? '展开侧边栏' : '折叠侧边栏'"
+              :aria-pressed="sidebarCollapsed"
+              @click.stop="toggleSidebarCollapsed"
+            >
+              <PanelLeftOpen v-if="sidebarCollapsed" :size="18" />
+              <PanelLeftClose v-else :size="18" />
+            </button>
+          </div>
+          <div class="sidebar-primary-actions">
+            <button
+              class="sidebar-new-chat-button"
+              type="button"
+              title="新对话"
+              aria-label="新对话"
+              @click="newChat"
+            >
+              <Plus :size="18" />
+              <span>新对话</span>
+            </button>
+            <button class="sidebar-search-button" type="button" title="搜索聊天" aria-label="搜索聊天" @click="openSearchDialog">
+              <Search :size="18" />
+              <span>搜索聊天</span>
+            </button>
+          </div>
         </div>
       </div>
 
@@ -1397,6 +1515,74 @@ onMounted(async () => {
                 </form>
               </section>
             </Transition>
+          </div>
+        </section>
+      </div>
+    </Transition>
+
+    <Transition name="dialog-pop">
+      <div v-if="searchOpen" class="chat-search-backdrop" @click.self="closeSearchDialog">
+        <section class="chat-search-modal" role="dialog" aria-modal="true" aria-label="搜索聊天">
+          <div class="chat-search-header">
+            <div class="chat-search-field">
+              <Search :size="19" />
+              <input
+                v-model="searchQuery"
+                class="chat-search-input"
+                placeholder="搜索聊天..."
+                @keydown.esc="closeSearchDialog"
+              />
+              <button v-if="searchQuery" class="chat-search-clear" type="button" title="清空" aria-label="清空" @click="searchQuery = ''">
+                <X :size="18" />
+              </button>
+            </div>
+            <button class="chat-search-close" type="button" title="关闭" aria-label="关闭" @click="closeSearchDialog">
+              <X :size="20" />
+            </button>
+          </div>
+
+          <div class="chat-search-body">
+            <button v-if="!searchQuery.trim()" class="chat-search-new" type="button" @click="newChat(); closeSearchDialog()">
+              <Plus :size="18" />
+              <span>新聊天</span>
+            </button>
+
+            <template v-if="!searchQuery.trim()">
+              <div class="chat-search-section-title">最近</div>
+              <button
+                v-for="conversation in recentSearchConversations"
+                :key="conversation.id"
+                class="chat-search-row"
+                type="button"
+                @click="openRecentConversation(conversation)"
+              >
+                <MessageCircle :size="18" />
+                <span>{{ conversation.title }}</span>
+                <time>{{ formatSearchDate(conversation.updatedAt) }}</time>
+              </button>
+            </template>
+
+            <template v-else>
+              <div v-if="searchLoading" class="chat-search-empty">正在搜索...</div>
+              <div v-else-if="searchError" class="chat-search-empty error">{{ searchError }}</div>
+              <div v-else-if="!searchResults.length" class="chat-search-empty">没有找到相关聊天</div>
+              <template v-else>
+                <button
+                  v-for="result in searchResults"
+                  :key="`${result.conversationId}-${result.messageId}`"
+                  class="chat-search-result"
+                  type="button"
+                  @click="openSearchResult(result)"
+                >
+                  <MessageCircle :size="18" />
+                  <span class="chat-search-result-main">
+                    <strong>{{ result.conversationTitle }}</strong>
+                    <small>{{ result.snippet }}</small>
+                  </span>
+                  <time>{{ formatSearchDate(result.createdAt) }}</time>
+                </button>
+              </template>
+            </template>
           </div>
         </section>
       </div>

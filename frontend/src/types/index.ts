@@ -31,6 +31,15 @@ export interface Message {
   createdAt: string
 }
 
+export interface ConversationSearchResult {
+  conversationId: string
+  conversationTitle: string
+  messageId: string
+  role: 'user' | 'assistant' | 'system'
+  snippet: string
+  createdAt: string
+}
+
 export interface Attachment {
   id: string
   filename: string

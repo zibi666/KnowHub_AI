@@ -38,6 +38,15 @@ class MessageOut(ApiModel):
     created_at: datetime
 
 
+class ConversationSearchResult(ApiModel):
+    conversation_id: str
+    conversation_title: str
+    message_id: str
+    role: str
+    snippet: str
+    created_at: datetime
+
+
 class ContextStatsOut(ApiModel):
     prompt_tokens_estimated: int
     context_window_tokens: int
