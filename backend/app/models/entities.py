@@ -5,6 +5,7 @@ from datetime import date, datetime
 
 from sqlalchemy import (
     Boolean,
+    BigInteger,
     Date,
     DateTime,
     ForeignKey,
@@ -16,9 +17,14 @@ from sqlalchemy import (
     UniqueConstraint,
     func,
 )
+from sqlalchemy.dialects.mysql import LONGTEXT, MEDIUMTEXT
 from sqlalchemy.orm import Mapped, mapped_column, relationship
 
 from app.core.db import Base
+
+
+MediumText = Text().with_variant(MEDIUMTEXT(), "mysql")
+LongText = Text().with_variant(LONGTEXT(), "mysql")
 
 
 def uuid_str() -> str:
@@ -81,7 +87,7 @@ class UserQuota(Base, TimestampMixin):
     __tablename__ = "user_quotas"
 
     user_id: Mapped[str] = mapped_column(ForeignKey("users.id", ondelete="CASCADE"), primary_key=True)
-    max_storage_bytes: Mapped[int] = mapped_column(Integer, nullable=False)
+    max_storage_bytes: Mapped[int] = mapped_column(BigInteger, nullable=False)
     max_image_mb: Mapped[int] = mapped_column(Integer, default=5, nullable=False)
     max_document_mb: Mapped[int] = mapped_column(Integer, default=10, nullable=False)
     daily_download_limit: Mapped[int] = mapped_column(Integer, default=20, nullable=False)
@@ -119,7 +125,7 @@ class Message(Base, TimestampMixin):
     parent_message_id: Mapped[str | None] = mapped_column(String(36), nullable=True)
     retry_of_message_id: Mapped[str | None] = mapped_column(String(36), nullable=True)
     role: Mapped[str] = mapped_column(String(20), nullable=False)
-    content: Mapped[str] = mapped_column(Text, default="", nullable=False)
+    content: Mapped[str] = mapped_column(MediumText, default="", nullable=False)
     status: Mapped[str] = mapped_column(String(30), default="completed", nullable=False)
     model: Mapped[str | None] = mapped_column(String(100), nullable=True)
     prompt_tokens: Mapped[int] = mapped_column(Integer, default=0, nullable=False)
@@ -152,8 +158,8 @@ class ConversationCompaction(Base, TimestampMixin):
     decisions_json: Mapped[list | None] = mapped_column(JSON, nullable=True)
     open_questions_json: Mapped[list | None] = mapped_column(JSON, nullable=True)
     artifacts_json: Mapped[list | None] = mapped_column(JSON, nullable=True)
-    preferences_text: Mapped[str | None] = mapped_column(Text, nullable=True)
-    raw_compact_text: Mapped[str] = mapped_column(Text, default="", nullable=False)
+    preferences_text: Mapped[str | None] = mapped_column(MediumText, nullable=True)
+    raw_compact_text: Mapped[str] = mapped_column(MediumText, default="", nullable=False)
     model: Mapped[str | None] = mapped_column(String(100), nullable=True)
     prompt_hash: Mapped[str] = mapped_column(String(64), nullable=False)
     token_count: Mapped[int] = mapped_column(Integer, default=0, nullable=False)
@@ -171,12 +177,12 @@ class Attachment(Base, TimestampMixin):
     sha256_active_key: Mapped[str | None] = mapped_column(String(64), nullable=True)
     filename: Mapped[str] = mapped_column(String(255), nullable=False)
     mime_sniffed: Mapped[str] = mapped_column(String(120), default="application/octet-stream", nullable=False)
-    size_bytes: Mapped[int] = mapped_column(Integer, default=0, nullable=False)
+    size_bytes: Mapped[int] = mapped_column(BigInteger, default=0, nullable=False)
     cos_key: Mapped[str] = mapped_column(String(500), nullable=False)
     parse_status: Mapped[str] = mapped_column(String(20), default="pending", nullable=False)
     parse_error: Mapped[str | None] = mapped_column(Text, nullable=True)
-    parsed_text: Mapped[str | None] = mapped_column(Text, nullable=True)
-    context_text: Mapped[str | None] = mapped_column(Text, nullable=True)
+    parsed_text: Mapped[str | None] = mapped_column(LongText, nullable=True)
+    context_text: Mapped[str | None] = mapped_column(MediumText, nullable=True)
     context_text_tokens: Mapped[int] = mapped_column(Integer, default=0, nullable=False)
     deleted_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=False), nullable=True)
 
@@ -186,7 +192,7 @@ class FileCacheEntry(Base, TimestampMixin):
 
     cache_key: Mapped[str] = mapped_column(String(255), primary_key=True)
     attachment_id: Mapped[str] = mapped_column(ForeignKey("attachments.id", ondelete="CASCADE"), index=True)
-    size_bytes: Mapped[int] = mapped_column(Integer, default=0, nullable=False)
+    size_bytes: Mapped[int] = mapped_column(BigInteger, default=0, nullable=False)
     last_access_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=False), nullable=True)
 
 
@@ -211,7 +217,7 @@ class CosTrafficDaily(Base, TimestampMixin):
     user_id: Mapped[str] = mapped_column(ForeignKey("users.id", ondelete="CASCADE"), index=True)
     date: Mapped[date] = mapped_column(Date, nullable=False)
     traffic_type: Mapped[str] = mapped_column(String(40), nullable=False)
-    bytes: Mapped[int] = mapped_column(Integer, default=0, nullable=False)
+    bytes: Mapped[int] = mapped_column(BigInteger, default=0, nullable=False)
 
 
 class CleanupJob(Base, TimestampMixin):
