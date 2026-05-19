@@ -349,6 +349,11 @@ function openAdminMonitor() {
   void router.push('/admin')
 }
 
+function openVersionControl() {
+  settingsMenuOpen.value = false
+  void router.push('/versions')
+}
+
 function requestLogout() {
   settingsMenuOpen.value = false
   logoutConfirmOpen.value = true
@@ -962,6 +967,7 @@ onMounted(async () => {
             <Transition name="menu-rise">
               <div v-if="settingsMenuOpen" class="sidebar-settings-popover" @pointerdown.stop @mousedown.stop @click.stop>
                 <button type="button" @click="openSettings('appearance')">设置</button>
+                <button type="button" @click="openVersionControl">版本控制</button>
                 <button v-if="auth.user?.role === 'admin'" type="button" @click="openAdminMonitor">管理员监控</button>
                 <button class="sidebar-settings-danger" type="button" @click="requestLogout">退出登录</button>
               </div>
