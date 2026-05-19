@@ -927,11 +927,14 @@ onMounted(async () => {
       </div>
 
       <div class="chat-sidebar-footer">
-        <div class="sidebar-primary-actions">
-          <button class="chat-control flex-1 px-3 py-2 text-sm" @click="newChat">新对话</button>
+        <div class="sidebar-action-panel">
+          <button class="sidebar-new-chat-button" type="button" @click="newChat">
+            <Plus :size="16" />
+            <span>新对话</span>
+          </button>
           <div class="sidebar-settings-menu" :class="{ open: settingsMenuOpen }" @pointerdown.stop @mousedown.stop @click.stop>
-            <button class="chat-icon-button" title="设置" aria-label="设置" type="button" @click.stop="toggleSettingsMenu">
-              <Settings :size="18" />
+            <button class="sidebar-round-button" title="设置" aria-label="设置" type="button" @click.stop="toggleSettingsMenu">
+              <Settings :size="17" />
             </button>
             <div v-if="settingsMenuOpen" class="sidebar-settings-popover" @pointerdown.stop @mousedown.stop @click.stop>
               <button type="button" @click="openSettings('appearance')">设置</button>
@@ -939,9 +942,13 @@ onMounted(async () => {
             </div>
           </div>
         </div>
-        <div class="sidebar-account-row">
-          <span class="sidebar-username">{{ auth.user?.username }}</span>
-          <button class="chat-icon-button" title="退出登录" aria-label="退出登录" @click="logout"><LogOut :size="18" /></button>
+        <div class="sidebar-account-card">
+          <div class="sidebar-avatar" aria-hidden="true">{{ auth.user?.username?.slice(0, 1).toUpperCase() || 'U' }}</div>
+          <div class="sidebar-account-main">
+            <span class="sidebar-username">{{ auth.user?.username }}</span>
+            <span class="sidebar-account-role">{{ auth.user?.role === 'admin' ? '管理员' : '用户' }}</span>
+          </div>
+          <button class="sidebar-round-button" title="退出登录" aria-label="退出登录" @click="logout"><LogOut :size="17" /></button>
         </div>
       </div>
     </aside>
