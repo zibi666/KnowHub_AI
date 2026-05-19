@@ -1,7 +1,8 @@
 <script setup lang="ts">
-import { onMounted, ref } from 'vue'
+import { computed, onMounted, ref } from 'vue'
 import { useRouter } from 'vue-router'
 import { apiFetch } from '../api/client'
+import AppSelect from '../components/AppSelect.vue'
 import { useAuthStore } from '../stores/auth'
 import type { ApiKeyEntry, ApiKeyGroup } from '../types'
 
@@ -15,6 +16,11 @@ const error = ref('')
 const newKey = ref({ name: '默认密钥', apiKey: '', groupId: '', makeActive: true })
 const keyDrafts = ref<Record<string, { name: string; groupId: string }>>({})
 
+const groupOptions = computed(() => [
+  { value: '', label: '不分组' },
+  ...groups.value.map((group) => ({ value: group.id, label: group.name, hint: group.description || undefined }))
+])
+
 function resetMessage() {
   notice.value = ''
   error.value = ''
@@ -25,6 +31,14 @@ function draftFor(key: ApiKeyEntry) {
     keyDrafts.value[key.id] = { name: key.name, groupId: key.groupId || '' }
   }
   return keyDrafts.value[key.id]
+}
+
+function setNewKeyGroup(value: string | number) {
+  newKey.value.groupId = String(value)
+}
+
+function setKeyDraftGroup(key: ApiKeyEntry, value: string | number) {
+  draftFor(key).groupId = String(value)
 }
 
 async function load() {
@@ -122,10 +136,12 @@ onMounted(load)
         <h2 class="font-semibold">添加新密钥</h2>
         <div class="grid gap-3 md:grid-cols-2">
           <input v-model="newKey.name" class="app-input rounded-md px-3 py-2" placeholder="密钥名称，例如：工作 / 备用" />
-          <select v-model="newKey.groupId" class="app-input rounded-md px-3 py-2">
-            <option value="">不分组</option>
-            <option v-for="group in groups" :key="group.id" :value="group.id">{{ group.name }}</option>
-          </select>
+          <AppSelect
+            v-model="newKey.groupId"
+            class="app-select-compact"
+            :options="groupOptions"
+            @change="setNewKeyGroup"
+          />
           <input v-model="newKey.apiKey" class="app-input rounded-md px-3 py-2" type="password" placeholder="API Key 明文只提交一次" />
         </div>
         <label class="inline-flex items-center gap-2 text-sm app-muted">
@@ -137,7 +153,7 @@ onMounted(load)
         </div>
       </form>
 
-      <div class="app-card rounded-lg overflow-hidden">
+      <div class="app-card rounded-lg overflow-visible">
         <div class="p-4 font-semibold">我的密钥</div>
         <table class="w-full text-sm">
           <thead class="app-table-head text-left">
@@ -156,10 +172,12 @@ onMounted(load)
                 <input v-model="draftFor(key).name" class="app-input w-full rounded-md px-2 py-1" />
               </td>
               <td class="p-3">
-                <select v-model="draftFor(key).groupId" class="app-input rounded-md px-2 py-1">
-                  <option value="">不分组</option>
-                  <option v-for="group in groups" :key="group.id" :value="group.id">{{ group.name }}</option>
-                </select>
+                <AppSelect
+                  :model-value="draftFor(key).groupId"
+                  class="app-select-compact min-w-[150px]"
+                  :options="groupOptions"
+                  @update:model-value="setKeyDraftGroup(key, $event)"
+                />
               </td>
               <td class="p-3">
                 <div class="key-mask">{{ key.maskedKey }}</div>

@@ -1,15 +1,15 @@
 <script setup lang="ts">
 import { computed, nextTick, onMounted, ref, type CSSProperties } from 'vue'
-import { ArrowDown, ChevronDown, Maximize2, Minimize2, Paperclip, Pencil, Plus, Send, Settings, X } from 'lucide-vue-next'
+import { ArrowDown, Maximize2, Minimize2, Paperclip, Pencil, Plus, Send, Settings, X } from 'lucide-vue-next'
 import { useRouter } from 'vue-router'
 import { ApiError, apiFetch, localizeApiMessage, readCookie, streamJsonLines } from '../api/client'
+import AppSelect from '../components/AppSelect.vue'
 import ChatMessage from '../components/ChatMessage.vue'
 import { useAuthStore } from '../stores/auth'
 import type { ApiKeyEntry, ApiKeyGroup, Attachment, Conversation, Message, User } from '../types'
 
 type ThemeMode = 'dark' | 'light'
 type SettingsTab = 'appearance' | 'api' | 'groups' | 'account'
-type AppearanceMenu = 'theme' | 'bubble' | 'textSize' | 'codeSize'
 
 const bubbleOptions = [
   { value: 'blue', label: '蓝色', bg: '#075a9f', hover: '#0b65b8', shadow: 'rgba(0,78,150,0.25)' },
@@ -59,8 +59,6 @@ const input = ref('')
 const composerExpanded = ref(false)
 const models = ref<string[]>([])
 const selectedModel = ref('')
-const modelMenuOpen = ref(false)
-const reasoningMenuOpen = ref(false)
 const reasoningEffort = ref<ReasoningEffort>('medium')
 const streaming = ref(false)
 const pendingAttachments = ref<Attachment[]>([])
@@ -89,7 +87,6 @@ const textSize = ref(15)
 const codeSize = ref(12)
 const settingsMenuOpen = ref(false)
 const settingsOpen = ref(false)
-const appearanceMenuOpen = ref<AppearanceMenu | null>(null)
 const logoutConfirmOpen = ref(false)
 const logoutLoading = ref(false)
 const settingsTab = ref<SettingsTab>('appearance')
@@ -108,6 +105,11 @@ const renameDialogOpen = ref(false)
 const renameDraft = ref('')
 const renameError = ref('')
 const selectedApiKeyGroup = computed(() => apiKeyGroups.value.find((group) => group.id === selectedGroupId.value) || null)
+const modelOptions = computed(() => models.value.map((model) => ({ value: model, label: model })))
+const groupOptions = computed(() => [
+  { value: '', label: '未分组' },
+  ...apiKeyGroups.value.map((group) => ({ value: group.id, label: group.name, hint: group.description || undefined }))
+])
 const keyDrafts = ref<Record<string, { name: string; groupId: string }>>({})
 const groupDrafts = ref<Record<string, { name: string; description: string }>>({})
 const newApiKey = ref({ name: '默认密钥', apiKey: '', groupId: '', makeActive: true })
@@ -233,25 +235,14 @@ function loadAppearance() {
 function setReasoningEffort(effort: ReasoningEffort) {
   reasoningEffort.value = effort
   window.localStorage.setItem(REASONING_STORAGE_KEY, effort)
-  reasoningMenuOpen.value = false
 }
 
 const reasoningLabel = computed(() => reasoningOptions.find((item) => item.value === reasoningEffort.value)?.label || '中')
 
-function toggleModelMenu() {
-  const shouldOpen = !modelMenuOpen.value
-  closeFloatingMenus()
-  modelMenuOpen.value = shouldOpen
-}
-
-function toggleReasoningMenu() {
-  const shouldOpen = !reasoningMenuOpen.value
-  closeFloatingMenus()
-  reasoningMenuOpen.value = shouldOpen
-}
-
-function toggleAppearanceMenu(menu: AppearanceMenu) {
-  appearanceMenuOpen.value = appearanceMenuOpen.value === menu ? null : menu
+function setReasoningEffortFromSelect(effort: string | number) {
+  if (reasoningOptions.some((item) => item.value === effort)) {
+    setReasoningEffort(effort as ReasoningEffort)
+  }
 }
 
 function setTheme(mode: ThemeMode) {
@@ -259,25 +250,29 @@ function setTheme(mode: ThemeMode) {
   window.localStorage.setItem(THEME_STORAGE_KEY, mode)
   document.querySelector('.app-root')?.classList.toggle('theme-light', mode === 'light')
   document.querySelector('.app-root')?.classList.toggle('theme-dark', mode === 'dark')
-  appearanceMenuOpen.value = null
 }
 
 function setBubbleColor(color: BubbleColor) {
   bubbleColor.value = color
   window.localStorage.setItem(BUBBLE_STORAGE_KEY, color)
-  appearanceMenuOpen.value = null
 }
 
 function setTextSize(size: number) {
   textSize.value = size
   window.localStorage.setItem(TEXT_SIZE_STORAGE_KEY, String(size))
-  appearanceMenuOpen.value = null
 }
 
 function setCodeSize(size: number) {
   codeSize.value = size
   window.localStorage.setItem(CODE_SIZE_STORAGE_KEY, String(size))
-  appearanceMenuOpen.value = null
+}
+
+function setNewApiKeyGroup(groupId: string | number) {
+  newApiKey.value.groupId = String(groupId)
+}
+
+function setApiKeyDraftGroup(key: ApiKeyEntry, groupId: string | number) {
+  keyDraftFor(key).groupId = String(groupId)
 }
 
 function resetSettingsMessages() {
@@ -654,7 +649,6 @@ async function saveSelectedModel() {
 
 async function chooseModel(model: string) {
   selectedModel.value = model
-  modelMenuOpen.value = false
   await saveSelectedModel()
 }
 
@@ -783,7 +777,6 @@ async function send() {
   if (!input.value.trim() || streaming.value) return
   cancelPendingScroll()
   userHasScrolledUp = false
-  modelMenuOpen.value = false
   error.value = ''
   streaming.value = true
   const userText = input.value
@@ -895,10 +888,7 @@ function handleComposerKeydown(event: KeyboardEvent) {
 }
 
 function closeFloatingMenus() {
-  modelMenuOpen.value = false
   settingsMenuOpen.value = false
-  reasoningMenuOpen.value = false
-  appearanceMenuOpen.value = null
 }
 
 onMounted(async () => {
@@ -987,48 +977,27 @@ onMounted(async () => {
     >
       <header class="chat-header">
         <div class="top-model-controls" @click.stop>
-          <div class="model-picker model-picker-model" @click.stop>
-            <button type="button" class="model-picker-button" @click="toggleModelMenu">
-              <strong>{{ selectedModel || DEFAULT_MODEL }}</strong>
-            </button>
-            <ChevronDown class="model-picker-chevron" :size="16" />
-            <Transition name="menu-pop">
-              <div v-if="modelMenuOpen" class="model-picker-menu">
-                <button
-                  v-for="model in models"
-                  :key="model"
-                  type="button"
-                  class="model-picker-option"
-                  :class="{ active: model === selectedModel }"
-                  @click="chooseModel(model)"
-                >
-                  {{ model }}
-                </button>
-              </div>
-            </Transition>
-          </div>
+          <AppSelect
+            v-model="selectedModel"
+            class="model-picker model-picker-model"
+            button-class="model-picker-button"
+            menu-class="model-picker-menu"
+            option-class="model-picker-option"
+            :options="modelOptions"
+            :placeholder="DEFAULT_MODEL"
+            @change="chooseModel(String($event))"
+          />
 
-          <div class="model-picker model-picker-reasoning" @click.stop>
-            <button type="button" class="model-picker-button" :title="reasoningLabel" @click="toggleReasoningMenu">
-              <strong>{{ reasoningLabel }}</strong>
-            </button>
-            <ChevronDown class="model-picker-chevron" :size="16" />
-            <Transition name="menu-pop">
-              <div v-if="reasoningMenuOpen" class="model-picker-menu">
-                <button
-                  v-for="option in reasoningOptions"
-                  :key="option.value"
-                  type="button"
-                  class="model-picker-option"
-                  :class="{ active: option.value === reasoningEffort }"
-                  :title="option.hint"
-                  @click="setReasoningEffort(option.value)"
-                >
-                  {{ option.label }} <span style="opacity:0.55;font-size:12px;margin-left:6px">{{ option.hint }}</span>
-                </button>
-              </div>
-            </Transition>
-          </div>
+          <AppSelect
+            v-model="reasoningEffort"
+            class="model-picker model-picker-reasoning"
+            button-class="model-picker-button"
+            menu-class="model-picker-menu"
+            option-class="model-picker-option"
+            :title="reasoningLabel"
+            :options="reasoningOptions"
+            @change="setReasoningEffortFromSelect"
+          />
 
           <button class="top-icon-button" type="button" title="新对话" aria-label="新对话" @click="newChat">
             <Plus :size="15" />
@@ -1156,96 +1125,51 @@ onMounted(async () => {
                 <div class="settings-grid">
                   <label class="settings-field">
                     <span>主题</span>
-                    <div class="settings-select" @click.stop>
-                      <button class="settings-select-button" type="button" :aria-expanded="appearanceMenuOpen === 'theme'" @click="toggleAppearanceMenu('theme')">
-                        <span>{{ themeOptions.find((option) => option.value === themeMode)?.label }}</span>
-                        <ChevronDown :size="15" />
-                      </button>
-                      <Transition name="menu-pop">
-                        <div v-if="appearanceMenuOpen === 'theme'" class="settings-select-menu">
-                          <button
-                            v-for="option in themeOptions"
-                            :key="option.value"
-                            class="settings-select-option"
-                            :class="{ active: option.value === themeMode }"
-                            type="button"
-                            @click="setTheme(option.value)"
-                          >
-                            {{ option.label }}
-                          </button>
-                        </div>
-                      </Transition>
-                    </div>
+                    <AppSelect
+                      v-model="themeMode"
+                      class="settings-select"
+                      button-class="settings-select-button"
+                      menu-class="settings-select-menu"
+                      option-class="settings-select-option"
+                      :options="themeOptions"
+                      @change="setTheme($event as ThemeMode)"
+                    />
                   </label>
                   <label class="settings-field">
                     <span>气泡颜色</span>
-                    <div class="settings-select" @click.stop>
-                      <button class="settings-select-button" type="button" :aria-expanded="appearanceMenuOpen === 'bubble'" @click="toggleAppearanceMenu('bubble')">
-                        <span>{{ selectedBubble.label }}</span>
-                        <ChevronDown :size="15" />
-                      </button>
-                      <Transition name="menu-pop">
-                        <div v-if="appearanceMenuOpen === 'bubble'" class="settings-select-menu">
-                          <button
-                            v-for="option in bubbleOptions"
-                            :key="option.value"
-                            class="settings-select-option"
-                            :class="{ active: option.value === bubbleColor }"
-                            type="button"
-                            @click="setBubbleColor(option.value)"
-                          >
-                            <span class="settings-color-swatch" :style="{ background: option.bg }" />
-                            {{ option.label }}
-                          </button>
-                        </div>
-                      </Transition>
-                    </div>
+                    <AppSelect
+                      v-model="bubbleColor"
+                      class="settings-select"
+                      button-class="settings-select-button"
+                      menu-class="settings-select-menu"
+                      option-class="settings-select-option"
+                      :options="bubbleOptions.map((option) => ({ value: option.value, label: option.label, swatch: option.bg }))"
+                      @change="setBubbleColor($event as BubbleColor)"
+                    />
                   </label>
                   <label class="settings-field">
                     <span>正文字号</span>
-                    <div class="settings-select" @click.stop>
-                      <button class="settings-select-button" type="button" :aria-expanded="appearanceMenuOpen === 'textSize'" @click="toggleAppearanceMenu('textSize')">
-                        <span>{{ textSize }} px</span>
-                        <ChevronDown :size="15" />
-                      </button>
-                      <Transition name="menu-pop">
-                        <div v-if="appearanceMenuOpen === 'textSize'" class="settings-select-menu">
-                          <button
-                            v-for="option in textSizeMenuOptions"
-                            :key="option.value"
-                            class="settings-select-option"
-                            :class="{ active: option.value === textSize }"
-                            type="button"
-                            @click="setTextSize(option.value)"
-                          >
-                            {{ option.label }}
-                          </button>
-                        </div>
-                      </Transition>
-                    </div>
+                    <AppSelect
+                      v-model="textSize"
+                      class="settings-select"
+                      button-class="settings-select-button"
+                      menu-class="settings-select-menu"
+                      option-class="settings-select-option"
+                      :options="textSizeMenuOptions"
+                      @change="setTextSize(Number($event))"
+                    />
                   </label>
                   <label class="settings-field">
                     <span>代码字号</span>
-                    <div class="settings-select" @click.stop>
-                      <button class="settings-select-button" type="button" :aria-expanded="appearanceMenuOpen === 'codeSize'" @click="toggleAppearanceMenu('codeSize')">
-                        <span>{{ codeSize }} px</span>
-                        <ChevronDown :size="15" />
-                      </button>
-                      <Transition name="menu-pop">
-                        <div v-if="appearanceMenuOpen === 'codeSize'" class="settings-select-menu">
-                          <button
-                            v-for="option in codeSizeMenuOptions"
-                            :key="option.value"
-                            class="settings-select-option"
-                            :class="{ active: option.value === codeSize }"
-                            type="button"
-                            @click="setCodeSize(option.value)"
-                          >
-                            {{ option.label }}
-                          </button>
-                        </div>
-                      </Transition>
-                    </div>
+                    <AppSelect
+                      v-model="codeSize"
+                      class="settings-select"
+                      button-class="settings-select-button"
+                      menu-class="settings-select-menu"
+                      option-class="settings-select-option"
+                      :options="codeSizeMenuOptions"
+                      @change="setCodeSize(Number($event))"
+                    />
                   </label>
                 </div>
               </section>
@@ -1260,10 +1184,15 @@ onMounted(async () => {
                   <h3>添加新密钥</h3>
                   <div class="settings-grid">
                     <input v-model="newApiKey.name" class="settings-input" placeholder="密钥名称，例如：工作 / 备用" />
-                    <select v-model="newApiKey.groupId" class="settings-input">
-                      <option value="">未分组</option>
-                      <option v-for="group in apiKeyGroups" :key="group.id" :value="group.id">{{ group.name }}</option>
-                    </select>
+                    <AppSelect
+                      v-model="newApiKey.groupId"
+                      class="settings-select"
+                      button-class="settings-select-button"
+                      menu-class="settings-select-menu"
+                      option-class="settings-select-option"
+                      :options="groupOptions"
+                      @change="setNewApiKeyGroup"
+                    />
                     <input v-model="newApiKey.apiKey" class="settings-input" type="password" placeholder="API Key 明文只提交一次" />
                   </div>
                   <label class="settings-check">
@@ -1295,10 +1224,15 @@ onMounted(async () => {
                   <div v-for="key in apiKeys" v-else :key="key.id" class="settings-key-row">
                     <div class="settings-key-main">
                       <input v-model="keyDraftFor(key).name" class="settings-input" />
-                      <select v-model="keyDraftFor(key).groupId" class="settings-input">
-                        <option value="">未分组</option>
-                        <option v-for="group in apiKeyGroups" :key="group.id" :value="group.id">{{ group.name }}</option>
-                      </select>
+                      <AppSelect
+                        :model-value="keyDraftFor(key).groupId"
+                        class="settings-select"
+                        button-class="settings-select-button"
+                        menu-class="settings-select-menu"
+                        option-class="settings-select-option"
+                        :options="groupOptions"
+                        @update:model-value="setApiKeyDraftGroup(key, $event)"
+                      />
                       <div class="settings-key-meta">
                         <span>{{ key.groupName || '未分组' }}</span>
                         <span class="key-mask">{{ key.maskedKey }}</span>

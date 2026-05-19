@@ -1,7 +1,8 @@
 <script setup lang="ts">
-import { onMounted, ref } from 'vue'
+import { computed, onMounted, ref } from 'vue'
 import { useRouter } from 'vue-router'
 import { apiFetch } from '../api/client'
+import AppSelect from '../components/AppSelect.vue'
 import type { ApiKeyEntry, ApiKeyGroup, User } from '../types'
 
 const router = useRouter()
@@ -38,6 +39,29 @@ const cleanupKindLabels: Record<string, string> = {
   orphan_attachments: '孤儿附件'
 }
 
+const cleanupKindOptions = [
+  { value: 'pending_cos', label: '未提交上传' },
+  { value: 'soft_deleted_attachments', label: '软删除附件' },
+  { value: 'expired_attachments', label: '过期附件' },
+  { value: 'orphan_attachments', label: '孤儿附件' }
+]
+
+const userRoleOptions = [
+  { value: 'user', label: '用户' },
+  { value: 'admin', label: '管理员' }
+]
+
+const userStatusOptions = [
+  { value: 'active', label: '启用' },
+  { value: 'disabled', label: '禁用' },
+  { value: 'purging', label: '删除中' }
+]
+
+const groupOptions = computed(() => [
+  { value: '', label: '不分组' },
+  ...groups.value.map((group) => ({ value: group.id, label: group.name, hint: group.description || undefined }))
+])
+
 function draftFor(user: User) {
   if (!userDrafts.value[user.id]) {
     userDrafts.value[user.id] = {
@@ -55,6 +79,26 @@ function keyDraftFor(key: ApiKeyEntry) {
     keyDrafts.value[key.id] = { name: key.name, groupId: key.groupId || '' }
   }
   return keyDrafts.value[key.id]
+}
+
+function setCleanupKind(value: string | number) {
+  cleanupKind.value = String(value)
+}
+
+function setUserRole(user: User, value: string | number) {
+  draftFor(user).role = String(value)
+}
+
+function setUserStatus(user: User, value: string | number) {
+  draftFor(user).status = String(value)
+}
+
+function setAdminKeyGroup(value: string | number) {
+  adminKeyDraft.value.groupId = String(value)
+}
+
+function setKeyDraftGroup(key: ApiKeyEntry, value: string | number) {
+  keyDraftFor(key).groupId = String(value)
 }
 
 async function load() {
@@ -234,12 +278,12 @@ onMounted(load)
         <div class="app-card rounded-lg p-4">
           <h2 class="font-semibold mb-3">存储清理</h2>
           <div class="flex gap-2">
-            <select v-model="cleanupKind" class="app-input rounded-md px-3 py-2 text-sm">
-              <option value="pending_cos">未提交上传</option>
-              <option value="soft_deleted_attachments">软删除附件</option>
-              <option value="expired_attachments">过期附件</option>
-              <option value="orphan_attachments">孤儿附件</option>
-            </select>
+            <AppSelect
+              v-model="cleanupKind"
+              class="app-select-compact min-w-[180px]"
+              :options="cleanupKindOptions"
+              @change="setCleanupKind"
+            />
             <button class="app-secondary-button rounded-md px-3 text-sm" @click="previewCleanup">预览</button>
           </div>
           <div v-if="cleanupPreview" class="app-subtle-panel mt-3 text-sm rounded-md p-3">
@@ -256,7 +300,7 @@ onMounted(load)
           <button class="app-primary-button mt-2 rounded-md px-3 py-2 text-sm" @click="saveReasoningModels">保存</button>
         </div>
       </div>
-      <div class="app-card rounded-lg overflow-hidden">
+      <div class="app-card rounded-lg overflow-visible">
         <table class="w-full text-sm">
           <thead class="app-table-head text-left">
             <tr><th class="p-3">用户名</th><th class="p-3">角色</th><th class="p-3">状态</th><th class="p-3">需改密</th><th class="p-3">密钥</th><th class="p-3">操作</th></tr>
@@ -267,17 +311,20 @@ onMounted(load)
                 <input v-model="draftFor(user).username" class="app-input w-full rounded-md px-2 py-1" />
               </td>
               <td class="p-3">
-                <select v-model="draftFor(user).role" class="app-input rounded-md px-2 py-1">
-                  <option value="user">用户</option>
-                  <option value="admin">管理员</option>
-                </select>
+                <AppSelect
+                  :model-value="draftFor(user).role"
+                  class="app-select-compact min-w-[96px]"
+                  :options="userRoleOptions"
+                  @update:model-value="setUserRole(user, $event)"
+                />
               </td>
               <td class="p-3">
-                <select v-model="draftFor(user).status" class="app-input rounded-md px-2 py-1">
-                  <option value="active">启用</option>
-                  <option value="disabled">禁用</option>
-                  <option value="purging">删除中</option>
-                </select>
+                <AppSelect
+                  :model-value="draftFor(user).status"
+                  class="app-select-compact min-w-[104px]"
+                  :options="userStatusOptions"
+                  @update:model-value="setUserStatus(user, $event)"
+                />
               </td>
               <td class="p-3">{{ user.mustChangePassword ? '是' : '否' }}</td>
               <td class="p-3">
@@ -305,10 +352,12 @@ onMounted(load)
         </div>
         <form class="grid gap-2 lg:grid-cols-[1fr_1fr_1fr_1fr_auto]" @submit.prevent="createAdminKey">
           <input v-model="adminKeyDraft.name" class="app-input rounded-md px-3 py-2" placeholder="密钥名称" />
-          <select v-model="adminKeyDraft.groupId" class="app-input rounded-md px-3 py-2">
-            <option value="">不分组</option>
-            <option v-for="group in groups" :key="group.id" :value="group.id">{{ group.name }}</option>
-          </select>
+          <AppSelect
+            v-model="adminKeyDraft.groupId"
+            class="app-select-compact"
+            :options="groupOptions"
+            @change="setAdminKeyGroup"
+          />
           <input v-model="adminKeyDraft.apiKey" class="app-input rounded-md px-3 py-2" type="password" placeholder="API Key" />
           <label class="inline-flex items-center gap-2 text-sm app-muted">
             <input v-model="adminKeyDraft.makeActive" type="checkbox" />
@@ -325,10 +374,12 @@ onMounted(load)
             <tr v-for="key in selectedUserKeys" :key="key.id" class="app-table-row">
               <td class="p-3"><input v-model="keyDraftFor(key).name" class="app-input w-full rounded-md px-2 py-1" /></td>
               <td class="p-3">
-                <select v-model="keyDraftFor(key).groupId" class="app-input rounded-md px-2 py-1">
-                  <option value="">不分组</option>
-                  <option v-for="group in groups" :key="group.id" :value="group.id">{{ group.name }}</option>
-                </select>
+                <AppSelect
+                  :model-value="keyDraftFor(key).groupId"
+                  class="app-select-compact min-w-[150px]"
+                  :options="groupOptions"
+                  @update:model-value="setKeyDraftGroup(key, $event)"
+                />
               </td>
               <td class="p-3">
                 <div class="key-mask">{{ key.maskedKey }}</div>
@@ -347,7 +398,7 @@ onMounted(load)
         </table>
       </div>
 
-      <div class="app-card rounded-lg overflow-hidden">
+      <div class="app-card rounded-lg overflow-visible">
         <div class="p-4 font-semibold">死信消息</div>
         <table class="w-full text-sm">
           <thead class="app-table-head text-left">
