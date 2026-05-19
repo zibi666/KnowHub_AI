@@ -1400,25 +1400,6 @@ onMounted(async () => {
           <ArrowDown :size="20" />
         </button>
 
-        <div v-if="uploadingAttachmentNames.length || pendingAttachments.length" class="composer-attachments mb-2 flex flex-wrap gap-2">
-          <span v-for="name in uploadingAttachmentNames" :key="`uploading-${name}`" class="attachment-pill is-uploading">
-            <FileText :size="14" />
-            <span class="attachment-pill-text">{{ name }}</span>
-            <span class="attachment-pill-status">上传中</span>
-          </span>
-          <span v-for="item in pendingAttachments" :key="item.id" class="attachment-pill">
-            <button class="attachment-pill-main" type="button" @click="openAttachmentPreview(item)">
-              <ImageIcon v-if="isImageAttachment(item)" :size="14" />
-              <FileText v-else :size="14" />
-              <span class="attachment-pill-text">{{ item.filename }}</span>
-              <span class="attachment-pill-status">{{ parseStatusText[item.parseStatus] || item.parseStatus }}</span>
-            </button>
-            <button class="attachment-pill-remove" type="button" title="移除本次附件" aria-label="移除本次附件" @click.stop="removePendingAttachment(item.id)">
-              <X :size="13" />
-            </button>
-          </span>
-        </div>
-
         <form
           class="composer-card"
           :class="{ 'is-expanded': composerExpanded, 'is-drag-active': composerDragActive }"
@@ -1429,6 +1410,28 @@ onMounted(async () => {
           @dragleave="handleComposerDragLeave"
           @drop="handleComposerDrop"
         >
+          <div v-if="uploadingAttachmentNames.length || pendingAttachments.length" class="composer-attachments">
+            <div v-for="name in uploadingAttachmentNames" :key="`uploading-${name}`" class="composer-attachment-card is-uploading">
+              <div class="composer-attachment-loading" aria-hidden="true" />
+              <span>{{ name }}</span>
+            </div>
+            <div
+              v-for="item in pendingAttachments"
+              :key="item.id"
+              class="composer-attachment-card"
+              :class="{ 'is-image': isImageAttachment(item) }"
+            >
+              <button class="composer-attachment-preview" type="button" @click="openAttachmentPreview(item)">
+                <img v-if="isImageAttachment(item)" :src="attachmentPreviewUrl(item.id)" :alt="item.filename" />
+                <FileText v-else :size="24" />
+                <span v-if="!isImageAttachment(item)">{{ item.filename }}</span>
+              </button>
+              <button class="composer-attachment-remove" type="button" title="移除本次附件" aria-label="移除本次附件" @click.stop="removePendingAttachment(item.id)">
+                <X :size="14" />
+              </button>
+              <span class="composer-attachment-status">{{ parseStatusText[item.parseStatus] || item.parseStatus }}</span>
+            </div>
+          </div>
           <button
             class="composer-expand-button"
             type="button"

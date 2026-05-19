@@ -40,6 +40,8 @@ const collapsibleClasses = computed(() => ({
   'is-assistant': !isUserMessage.value
 }))
 const hasAttachments = computed(() => Boolean(props.message.attachments?.length))
+const imageAttachments = computed(() => (props.message.attachments || []).filter(isImageAttachment))
+const fileAttachments = computed(() => (props.message.attachments || []).filter((attachment) => !isImageAttachment(attachment)))
 
 const parseStatusText: Record<string, string> = {
   pending: '等待解析',
@@ -50,6 +52,10 @@ const parseStatusText: Record<string, string> = {
 
 function isImageAttachment(item: Attachment) {
   return item.mimeSniffed?.startsWith('image/')
+}
+
+function attachmentPreviewUrl(id: string) {
+  return `/api/attachments/${id}/preview`
 }
 
 watch(
@@ -63,34 +69,46 @@ watch(
 <template>
   <article class="chat-message py-3" :data-message-id="message.id">
     <div class="message-row chat-message-row mx-auto flex w-full" :class="message.role === 'user' ? 'message-row-user justify-end' : 'justify-start'">
-      <div :class="message.role === 'user' ? 'message-bubble message-user' : 'message-assistant'">
+      <div :class="message.role === 'user' ? 'message-user-stack' : 'message-assistant'">
         <template v-if="message.role === 'user'">
-          <div class="message-collapsible" :class="collapsibleClasses">
+          <div v-if="imageAttachments.length" class="message-image-attachments">
             <button
-              v-if="canCollapse"
-              class="message-collapse-button"
+              v-for="attachment in imageAttachments"
+              :key="attachment.id"
+              class="message-image-card"
               type="button"
-              :aria-expanded="isExpanded"
-              :title="collapseButtonLabel"
-              @click="isExpanded = !isExpanded"
+              @click="emit('previewAttachment', attachment)"
             >
-              <ChevronDown v-if="isCollapsed" :size="16" />
-              <ChevronUp v-else :size="16" />
+              <img :src="attachmentPreviewUrl(attachment.id)" :alt="attachment.filename" />
             </button>
-            <div class="message-collapsible-content">
-              <div class="plain-user-message">{{ message.content }}</div>
+          </div>
+          <div v-if="message.content.trim()" class="message-bubble message-user">
+            <div class="message-collapsible" :class="collapsibleClasses">
+              <button
+                v-if="canCollapse"
+                class="message-collapse-button"
+                type="button"
+                :aria-expanded="isExpanded"
+                :title="collapseButtonLabel"
+                @click="isExpanded = !isExpanded"
+              >
+                <ChevronDown v-if="isCollapsed" :size="16" />
+                <ChevronUp v-else :size="16" />
+              </button>
+              <div class="message-collapsible-content">
+                <div class="plain-user-message">{{ message.content }}</div>
+              </div>
             </div>
           </div>
-          <div v-if="hasAttachments" class="message-attachments">
+          <div v-if="fileAttachments.length" class="message-attachments">
             <button
-              v-for="attachment in message.attachments"
+              v-for="attachment in fileAttachments"
               :key="attachment.id"
               class="message-attachment-pill"
               type="button"
               @click="emit('previewAttachment', attachment)"
             >
-              <ImageIcon v-if="isImageAttachment(attachment)" :size="14" />
-              <FileText v-else :size="14" />
+              <FileText :size="14" />
               <span>{{ attachment.filename }}</span>
               <em>{{ parseStatusText[attachment.parseStatus] || attachment.parseStatus }}</em>
             </button>
