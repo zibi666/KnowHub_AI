@@ -215,6 +215,8 @@ body,
 }
 
 .app-select-option {
+  --app-select-option-accent-left: 0.42rem;
+  --app-select-option-padding-left: 1.14rem;
   position: relative;
   display: flex;
   min-width: 0;
@@ -227,7 +229,7 @@ body,
   color: var(--text);
   gap: 0.58rem;
   overflow: hidden;
-  padding: 0.5rem 0.66rem 0.5rem 0.76rem;
+  padding: 0.5rem 0.66rem 0.5rem var(--app-select-option-padding-left);
   text-align: left;
   transition:
     background var(--motion-fast) ease,
@@ -241,7 +243,7 @@ body,
   position: absolute;
   top: 0.44rem;
   bottom: 0.44rem;
-  left: 0.34rem;
+  left: var(--app-select-option-accent-left);
   width: 3px;
   border-radius: 999px;
   background: var(--bubble-bg);
@@ -324,10 +326,12 @@ body,
 }
 
 .app-select-compact .app-select-option {
+  --app-select-option-accent-left: 0.36rem;
+  --app-select-option-padding-left: 1.04rem;
   min-height: 2rem;
   border-radius: 8px;
   font-size: 0.86rem;
-  padding: 0.42rem 0.58rem 0.42rem 0.72rem;
+  padding: 0.42rem 0.58rem 0.42rem var(--app-select-option-padding-left);
 }
 
 .app-primary-button {
@@ -2842,18 +2846,31 @@ body,
 }
 
 .model-picker-reasoning .model-picker-option {
+  --app-select-option-accent-left: 0.46rem;
+  --app-select-option-padding-left: 1.28rem;
   min-height: 2.7rem;
-  align-items: baseline;
-  gap: 0.45rem;
+  align-items: center;
+  gap: 0.65rem;
   font-size: 1.02rem;
   font-weight: 800;
-  padding: 0.62rem 0.78rem;
+  padding: 0.62rem 0.82rem 0.62rem var(--app-select-option-padding-left);
 }
 
 .model-picker-reasoning .model-picker-option .app-select-option-main {
   display: flex;
-  align-items: baseline;
+  align-items: center;
   min-width: 0;
+  gap: 0.68rem;
+}
+
+.model-picker-reasoning .model-picker-option strong {
+  display: inline-flex;
+  flex: 0 0 2.25rem;
+  min-width: 2.25rem;
+  justify-content: flex-start;
+  font-size: 0.98rem;
+  font-weight: 850;
+  letter-spacing: 0.01em;
 }
 
 .model-picker-reasoning .model-picker-option small {
@@ -2862,9 +2879,12 @@ body,
   font-weight: 600;
   line-height: 1.35;
   white-space: normal;
+  color: color-mix(in srgb, var(--text) 58%, var(--muted));
 }
 
 .model-picker-option.app-select-option {
+  --app-select-option-accent-left: 0.38rem;
+  --app-select-option-padding-left: 1.08rem;
   display: flex;
   min-width: 0;
   min-height: 2.1rem;
@@ -2876,7 +2896,7 @@ body,
   font-weight: 600;
   line-height: 1.25;
   overflow: hidden;
-  padding: 0.48rem 0.62rem;
+  padding: 0.48rem 0.62rem 0.48rem var(--app-select-option-padding-left);
   text-align: left;
   text-overflow: ellipsis;
   white-space: nowrap;
