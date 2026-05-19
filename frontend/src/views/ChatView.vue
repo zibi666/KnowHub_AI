@@ -1,6 +1,6 @@
 <script setup lang="ts">
 import { computed, nextTick, onMounted, ref, type CSSProperties } from 'vue'
-import { ArrowDown, ChevronDown, LogOut, Maximize2, Minimize2, Paperclip, Send, Settings, X } from 'lucide-vue-next'
+import { ArrowDown, ChevronDown, LogOut, Maximize2, Minimize2, Paperclip, Plus, Send, Settings, X } from 'lucide-vue-next'
 import { useRouter } from 'vue-router'
 import { ApiError, apiFetch, localizeApiMessage, readCookie, streamJsonLines } from '../api/client'
 import ChatMessage from '../components/ChatMessage.vue'
@@ -27,7 +27,6 @@ const BUBBLE_STORAGE_KEY = 'private-gpt-bubble'
 const TEXT_SIZE_STORAGE_KEY = 'private-gpt-text-size'
 const CODE_SIZE_STORAGE_KEY = 'private-gpt-code-size'
 const REASONING_STORAGE_KEY = 'private-gpt-reasoning-effort'
-const MAX_TOKENS_STORAGE_KEY = 'private-gpt-max-tokens'
 
 type ReasoningEffort = 'low' | 'medium' | 'high' | 'xhigh'
 const reasoningOptions: Array<{ value: ReasoningEffort; label: string; hint: string }> = [
@@ -36,7 +35,6 @@ const reasoningOptions: Array<{ value: ReasoningEffort; label: string; hint: str
   { value: 'high', label: '高', hint: '更深思考，适合复杂分析' },
   { value: 'xhigh', label: '极致', hint: '最大推理预算，最慢，仅复杂难题' }
 ]
-const maxTokensOptions = [768, 1024, 1536, 2048, 3072, 4096, 6144, 8192]
 
 const textSizeOptions = [13, 14, 15, 16, 17, 18, 19]
 const codeSizeOptions = [11, 12, 13, 14, 15, 16]
@@ -57,9 +55,7 @@ const models = ref<string[]>([])
 const selectedModel = ref('')
 const modelMenuOpen = ref(false)
 const reasoningMenuOpen = ref(false)
-const maxTokensMenuOpen = ref(false)
 const reasoningEffort = ref<ReasoningEffort>('medium')
-const maxTokensOverride = ref<number>(1536)
 const streaming = ref(false)
 const pendingAttachments = ref<Attachment[]>([])
 const error = ref('')
@@ -216,22 +212,12 @@ function loadAppearance() {
     reasoningEffort.value = storedReasoning as ReasoningEffort
   }
 
-  const storedMaxTokens = Number(window.localStorage.getItem(MAX_TOKENS_STORAGE_KEY))
-  if (maxTokensOptions.includes(storedMaxTokens)) {
-    maxTokensOverride.value = storedMaxTokens
-  }
 }
 
 function setReasoningEffort(effort: ReasoningEffort) {
   reasoningEffort.value = effort
   window.localStorage.setItem(REASONING_STORAGE_KEY, effort)
   reasoningMenuOpen.value = false
-}
-
-function setMaxTokens(value: number) {
-  maxTokensOverride.value = value
-  window.localStorage.setItem(MAX_TOKENS_STORAGE_KEY, String(value))
-  maxTokensMenuOpen.value = false
 }
 
 const reasoningLabel = computed(() => reasoningOptions.find((item) => item.value === reasoningEffort.value)?.label || '中')
@@ -246,12 +232,6 @@ function toggleReasoningMenu() {
   const shouldOpen = !reasoningMenuOpen.value
   closeFloatingMenus()
   reasoningMenuOpen.value = shouldOpen
-}
-
-function toggleMaxTokensMenu() {
-  const shouldOpen = !maxTokensMenuOpen.value
-  closeFloatingMenus()
-  maxTokensMenuOpen.value = shouldOpen
 }
 
 function setTheme(mode: ThemeMode) {
@@ -788,8 +768,7 @@ async function send() {
         model: selectedModel.value,
         attachmentIds,
         referencedAttachmentIds: attachmentIds,
-        reasoningEffort: reasoningEffort.value,
-        maxCompletionTokens: maxTokensOverride.value
+        reasoningEffort: reasoningEffort.value
       },
       async (event, data) => {
         if (event === 'conversation_created') {
@@ -874,7 +853,6 @@ function closeFloatingMenus() {
   modelMenuOpen.value = false
   settingsMenuOpen.value = false
   reasoningMenuOpen.value = false
-  maxTokensMenuOpen.value = false
 }
 
 async function logout() {
@@ -936,19 +914,62 @@ onMounted(async () => {
 
     <main class="chat-main flex flex-col min-w-0 min-h-0 overflow-hidden">
       <header class="chat-header">
-        <button v-if="currentId" class="chat-glass-button" @click="compact">压缩上下文</button>
+        <div class="top-model-controls" @click.stop>
+          <div class="model-picker model-picker-model" @click.stop>
+            <button type="button" class="model-picker-button" @click="toggleModelMenu">
+              <strong>{{ selectedModel || DEFAULT_MODEL }}</strong>
+            </button>
+            <ChevronDown class="model-picker-chevron" :size="16" />
+            <div v-if="modelMenuOpen" class="model-picker-menu">
+              <button
+                v-for="model in models"
+                :key="model"
+                type="button"
+                class="model-picker-option"
+                :class="{ active: model === selectedModel }"
+                @click="chooseModel(model)"
+              >
+                {{ model }}
+              </button>
+            </div>
+          </div>
+
+          <div class="model-picker model-picker-reasoning" @click.stop>
+            <button type="button" class="model-picker-button" :title="reasoningLabel" @click="toggleReasoningMenu">
+              <strong>{{ reasoningLabel }}</strong>
+            </button>
+            <ChevronDown class="model-picker-chevron" :size="16" />
+            <div v-if="reasoningMenuOpen" class="model-picker-menu">
+              <button
+                v-for="option in reasoningOptions"
+                :key="option.value"
+                type="button"
+                class="model-picker-option"
+                :class="{ active: option.value === reasoningEffort }"
+                :title="option.hint"
+                @click="setReasoningEffort(option.value)"
+              >
+                {{ option.label }} <span style="opacity:0.55;font-size:12px;margin-left:6px">{{ option.hint }}</span>
+              </button>
+            </div>
+          </div>
+
+          <button class="top-icon-button" type="button" title="新对话" aria-label="新对话" @click="newChat">
+            <Plus :size="15" />
+          </button>
+        </div>
         <div class="chat-header-info">
           <span>{{ conversationUsage.tokens.toLocaleString() }} Tokens · {{ conversationUsage.requests }} requests</span>
           <span>{{ currentConversation?.title || '新对话' }}</span>
         </div>
+        <button v-if="currentId" class="chat-glass-button" @click="compact">压缩上下文</button>
       </header>
 
       <section ref="messageScroller" class="chat-surface flex-1 min-h-0 overflow-y-auto overscroll-contain px-6 py-8" @scroll="handleScrollerScroll">
-        <div v-if="!messages.length" class="h-full flex items-center justify-center chat-muted">开始一个新问题吧</div>
+        <div v-if="!messages.length" class="empty-chat-state flex items-center justify-center chat-muted">开始一个新问题吧</div>
         <ChatMessage v-for="message in messages" :key="message.id" :message="message" />
-      </section>
 
-      <footer class="chat-footer p-4">
+        <footer class="chat-footer p-4">
         <button
           v-if="showScrollToBottom"
           class="scroll-bottom-button"
@@ -991,76 +1012,6 @@ onMounted(async () => {
                 <input class="hidden" type="file" @change="uploadFile" />
               </label>
 
-              <div class="model-picker model-picker-model" @click.stop>
-                <span>模型</span>
-                <button type="button" class="model-picker-button" @click="toggleModelMenu">
-                  <strong>{{ selectedModel || DEFAULT_MODEL }}</strong>
-                </button>
-                <ChevronDown class="model-picker-chevron" :size="16" />
-                <div v-if="modelMenuOpen" class="model-picker-menu">
-                  <button
-                    v-for="model in models"
-                    :key="model"
-                    type="button"
-                    class="model-picker-option"
-                    :class="{ active: model === selectedModel }"
-                    @click="chooseModel(model)"
-                  >
-                    {{ model }}
-                  </button>
-                </div>
-              </div>
-
-              <div class="model-picker model-picker-reasoning" @click.stop>
-                <span>思考</span>
-                <button
-                  type="button"
-                  class="model-picker-button"
-                  :title="'当前推理强度：' + reasoningLabel"
-                  @click="toggleReasoningMenu"
-                >
-                  <strong>{{ reasoningLabel }}</strong>
-                </button>
-                <ChevronDown class="model-picker-chevron" :size="16" />
-                <div v-if="reasoningMenuOpen" class="model-picker-menu">
-                  <button
-                    v-for="option in reasoningOptions"
-                    :key="option.value"
-                    type="button"
-                    class="model-picker-option"
-                    :class="{ active: option.value === reasoningEffort }"
-                    :title="option.hint"
-                    @click="setReasoningEffort(option.value)"
-                  >
-                    {{ option.label }} <span style="opacity:0.55;font-size:12px;margin-left:6px">{{ option.hint }}</span>
-                  </button>
-                </div>
-              </div>
-
-              <div class="model-picker model-picker-tokens" @click.stop>
-                <span>回复上限</span>
-                <button
-                  type="button"
-                  class="model-picker-button"
-                  title="单次回复最多输出多少 token。越小越快"
-                  @click="toggleMaxTokensMenu"
-                >
-                  <strong>{{ maxTokensOverride }}</strong>
-                </button>
-                <ChevronDown class="model-picker-chevron" :size="16" />
-                <div v-if="maxTokensMenuOpen" class="model-picker-menu">
-                  <button
-                    v-for="value in maxTokensOptions"
-                    :key="value"
-                    type="button"
-                    class="model-picker-option"
-                    :class="{ active: value === maxTokensOverride }"
-                    @click="setMaxTokens(value)"
-                  >
-                    {{ value }} tokens
-                  </button>
-                </div>
-              </div>
             </div>
 
             <div class="composer-right-tools">
@@ -1078,7 +1029,10 @@ onMounted(async () => {
             </div>
           </div>
         </form>
-      </footer>
+        </footer>
+      </section>
+
+
     </main>
 
     <div v-if="settingsOpen" class="settings-modal-backdrop" @click.self="settingsOpen = false">

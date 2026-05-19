@@ -835,16 +835,45 @@ body,
 .chat-header {
   display: flex;
   position: absolute;
-  top: 0.85rem;
-  left: 1.35rem;
-  right: 1.35rem;
+  top: 0.65rem;
+  left: 0.85rem;
+  right: 0.85rem;
   z-index: 24;
   pointer-events: none;
   align-items: center;
-  gap: 0.75rem;
+  gap: 0.55rem;
   border: 0;
   background: transparent;
   padding: 0;
+}
+
+.top-model-controls {
+  pointer-events: auto;
+  display: inline-flex;
+  align-items: center;
+  gap: 0.12rem;
+  min-width: 0;
+}
+
+.top-icon-button {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 1.55rem;
+  height: 1.55rem;
+  border-radius: 999px;
+  color: var(--muted);
+  background: transparent;
+  transition: background 150ms ease, color 150ms ease, transform 150ms ease;
+}
+
+.top-icon-button:hover {
+  color: var(--text);
+  background: color-mix(in srgb, var(--text) 9%, transparent);
+}
+
+.top-icon-button:active {
+  transform: scale(0.96);
 }
 
 .chat-glass-button,
@@ -893,8 +922,12 @@ body,
 .chat-surface {
   background: var(--surface-bg);
   padding-top: 5.2rem !important;
-  padding-bottom: 12.5rem !important;
+  padding-bottom: 2.4rem !important;
   scrollbar-color: var(--scroll-thumb) transparent;
+}
+
+.empty-chat-state {
+  min-height: calc(100vh - 18rem);
 }
 
 .message-bubble {
@@ -1085,12 +1118,15 @@ body,
 }
 
 .chat-footer {
-  pointer-events: none;
-  position: absolute;
-  right: 0;
+  pointer-events: auto;
+  position: sticky;
   bottom: 0;
-  left: 0;
-  z-index: 20;
+  z-index: 18;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  width: min(920px, 100%);
+  margin: clamp(3.5rem, 10vh, 7rem) auto 0;
   border-top: 0;
   background: transparent;
 }
@@ -1102,7 +1138,7 @@ body,
   justify-content: center;
   width: 2.35rem;
   height: 2.35rem;
-  margin: 0 auto 3rem;
+  margin: 0 auto 1rem;
   border: 1px solid color-mix(in srgb, var(--text) 18%, transparent);
   border-radius: 999px;
   color: var(--text);
@@ -1137,18 +1173,18 @@ body,
 .composer-card {
   pointer-events: auto;
   position: relative;
-  width: min(660px, calc(100vw - 2rem));
-  border: 1px solid var(--input-border);
-  border-radius: 24px;
+  width: min(880px, 100%);
+  border: 1px solid color-mix(in srgb, var(--input-border) 74%, transparent);
+  border-radius: 22px;
   background: var(--input-bg);
-  box-shadow: 0 18px 44px rgba(0, 0, 0, 0.32);
+  box-shadow: 0 18px 52px rgba(0, 0, 0, 0.34);
   overflow: visible;
   transition: border-radius 180ms ease, box-shadow 180ms ease;
 }
 
 .composer-card::before {
   position: absolute;
-  inset: -18px -24px;
+  inset: -18px -22px;
   z-index: -1;
   border-radius: 34px;
   content: "";
@@ -1170,7 +1206,7 @@ body,
 }
 
 .composer-card.is-expanded {
-  border-radius: 24px;
+  border-radius: 22px;
 }
 
 .composer-expand-button {
@@ -1216,8 +1252,8 @@ body,
 
 .composer-icon-button {
   display: inline-flex;
-  height: 30px;
-  width: 30px;
+  height: 32px;
+  width: 32px;
   align-items: center;
   justify-content: center;
   border: 0;
@@ -1237,14 +1273,14 @@ body,
   position: relative;
   z-index: 1;
   width: 100%;
-  height: clamp(4.3rem, 11vh, 5.8rem);
+  height: 4.75rem;
   resize: none;
   border: 0;
   border-radius: 0;
   background: transparent;
   color: var(--text);
   outline: none;
-  padding: 0.82rem 2.65rem 0.35rem 1.05rem;
+  padding: 0.9rem 2.65rem 0.25rem 1.05rem;
   font-size: 0.92rem;
   line-height: 1.55;
   scrollbar-width: none;
@@ -1252,7 +1288,7 @@ body,
 }
 
 .composer-card.is-expanded .composer-input {
-  height: min(48vh, 28rem);
+  height: min(34vh, 20rem);
 }
 
 .composer-input::-webkit-scrollbar {
@@ -1272,7 +1308,7 @@ body,
   flex-wrap: wrap;
   gap: 0.45rem 0.6rem;
   border-top: 0;
-  padding: 0.35rem 0.75rem 0.65rem;
+  padding: 0.3rem 0.7rem 0.62rem;
 }
 
 .composer-left-tools,
@@ -1299,13 +1335,13 @@ body,
   display: inline-flex;
   align-items: center;
   gap: 0.28rem;
-  min-height: 1.85rem;
+  min-height: 1.7rem;
   border: 0;
   border-radius: 12px;
   background: transparent;
   color: var(--text);
-  font-size: 0.8rem;
-  padding: 0 0.32rem;
+  font-size: 0.88rem;
+  padding: 0 0.26rem;
   transition: background 150ms ease, color 150ms ease;
 }
 
@@ -1326,8 +1362,16 @@ body,
   white-space: nowrap;
 }
 
-.model-picker-model > span,
-.model-picker-tokens > span {
+.top-model-controls .model-picker {
+  color: var(--text);
+}
+
+.top-model-controls .model-picker:hover,
+.top-model-controls .model-picker:focus-within {
+  background: color-mix(in srgb, var(--text) 7%, transparent);
+}
+
+.model-picker-model > span {
   display: none;
 }
 
@@ -1336,19 +1380,14 @@ body,
   max-width: 2.9rem;
 }
 
-.model-picker-tokens .model-picker-button {
-  min-width: 3.4rem;
-  max-width: 4.2rem;
-}
-
 .model-picker-button {
   min-width: 2.4rem;
-  max-width: 6.6rem;
+  max-width: 7.2rem;
   border: 0;
   background: transparent;
   color: var(--text);
   overflow: hidden;
-  padding: 0.28rem 1.25rem 0.28rem 0.04rem;
+  padding: 0.22rem 1.15rem 0.22rem 0.04rem;
   text-align: left;
   text-overflow: ellipsis;
   white-space: nowrap;
@@ -1360,7 +1399,8 @@ body,
 
 .model-picker-menu {
   position: absolute;
-  bottom: calc(100% + 0.55rem);
+  bottom: auto;
+  top: calc(100% + 0.5rem);
   left: 0;
   z-index: 120;
   min-width: 12rem;
@@ -1385,8 +1425,7 @@ body,
   display: none;
 }
 
-.model-picker-model .model-picker-menu,
-.model-picker-tokens .model-picker-menu {
+.model-picker-model .model-picker-menu {
   display: grid;
   grid-template-columns: repeat(2, minmax(8.5rem, 1fr));
   gap: 0.12rem;
@@ -1394,11 +1433,6 @@ body,
 
 .model-picker-reasoning .model-picker-menu {
   width: min(23rem, calc(100vw - 3rem));
-}
-
-.model-picker-tokens .model-picker-menu {
-  right: 0;
-  left: auto;
 }
 
 .model-picker-option {
