@@ -9,6 +9,7 @@ import type { ApiKeyEntry, ApiKeyGroup, Attachment, Conversation, Message, User 
 
 type ThemeMode = 'dark' | 'light'
 type SettingsTab = 'appearance' | 'api' | 'groups' | 'account'
+type AppearanceMenu = 'theme' | 'bubble' | 'textSize' | 'codeSize'
 
 const bubbleOptions = [
   { value: 'blue', label: '蓝色', bg: '#075a9f', hover: '#0b65b8', shadow: 'rgba(0,78,150,0.25)' },
@@ -42,6 +43,9 @@ const themeOptions: Array<{ value: ThemeMode; label: string }> = [
   { value: 'dark', label: '暗色' },
   { value: 'light', label: '浅色' }
 ]
+
+const textSizeMenuOptions = textSizeOptions.map((size) => ({ value: size, label: `${size} px` }))
+const codeSizeMenuOptions = codeSizeOptions.map((size) => ({ value: size, label: `${size} px` }))
 
 const auth = useAuthStore()
 const router = useRouter()
@@ -85,6 +89,7 @@ const textSize = ref(15)
 const codeSize = ref(12)
 const settingsMenuOpen = ref(false)
 const settingsOpen = ref(false)
+const appearanceMenuOpen = ref<AppearanceMenu | null>(null)
 const logoutConfirmOpen = ref(false)
 const logoutLoading = ref(false)
 const settingsTab = ref<SettingsTab>('appearance')
@@ -245,24 +250,34 @@ function toggleReasoningMenu() {
   reasoningMenuOpen.value = shouldOpen
 }
 
+function toggleAppearanceMenu(menu: AppearanceMenu) {
+  appearanceMenuOpen.value = appearanceMenuOpen.value === menu ? null : menu
+}
+
 function setTheme(mode: ThemeMode) {
   themeMode.value = mode
   window.localStorage.setItem(THEME_STORAGE_KEY, mode)
   document.querySelector('.app-root')?.classList.toggle('theme-light', mode === 'light')
   document.querySelector('.app-root')?.classList.toggle('theme-dark', mode === 'dark')
+  appearanceMenuOpen.value = null
 }
 
 function setBubbleColor(color: BubbleColor) {
   bubbleColor.value = color
   window.localStorage.setItem(BUBBLE_STORAGE_KEY, color)
+  appearanceMenuOpen.value = null
 }
 
-function saveTextSize() {
-  window.localStorage.setItem(TEXT_SIZE_STORAGE_KEY, String(textSize.value))
+function setTextSize(size: number) {
+  textSize.value = size
+  window.localStorage.setItem(TEXT_SIZE_STORAGE_KEY, String(size))
+  appearanceMenuOpen.value = null
 }
 
-function saveCodeSize() {
-  window.localStorage.setItem(CODE_SIZE_STORAGE_KEY, String(codeSize.value))
+function setCodeSize(size: number) {
+  codeSize.value = size
+  window.localStorage.setItem(CODE_SIZE_STORAGE_KEY, String(size))
+  appearanceMenuOpen.value = null
 }
 
 function resetSettingsMessages() {
@@ -883,6 +898,7 @@ function closeFloatingMenus() {
   modelMenuOpen.value = false
   settingsMenuOpen.value = false
   reasoningMenuOpen.value = false
+  appearanceMenuOpen.value = null
 }
 
 onMounted(async () => {
@@ -1140,27 +1156,96 @@ onMounted(async () => {
                 <div class="settings-grid">
                   <label class="settings-field">
                     <span>主题</span>
-                    <select v-model="themeMode" class="settings-input" @change="setTheme(themeMode)">
-                      <option v-for="option in themeOptions" :key="option.value" :value="option.value">{{ option.label }}</option>
-                    </select>
+                    <div class="settings-select" @click.stop>
+                      <button class="settings-select-button" type="button" :aria-expanded="appearanceMenuOpen === 'theme'" @click="toggleAppearanceMenu('theme')">
+                        <span>{{ themeOptions.find((option) => option.value === themeMode)?.label }}</span>
+                        <ChevronDown :size="15" />
+                      </button>
+                      <Transition name="menu-pop">
+                        <div v-if="appearanceMenuOpen === 'theme'" class="settings-select-menu">
+                          <button
+                            v-for="option in themeOptions"
+                            :key="option.value"
+                            class="settings-select-option"
+                            :class="{ active: option.value === themeMode }"
+                            type="button"
+                            @click="setTheme(option.value)"
+                          >
+                            {{ option.label }}
+                          </button>
+                        </div>
+                      </Transition>
+                    </div>
                   </label>
                   <label class="settings-field">
                     <span>气泡颜色</span>
-                    <select v-model="bubbleColor" class="settings-input" @change="setBubbleColor(bubbleColor)">
-                      <option v-for="option in bubbleOptions" :key="option.value" :value="option.value">{{ option.label }}</option>
-                    </select>
+                    <div class="settings-select" @click.stop>
+                      <button class="settings-select-button" type="button" :aria-expanded="appearanceMenuOpen === 'bubble'" @click="toggleAppearanceMenu('bubble')">
+                        <span>{{ selectedBubble.label }}</span>
+                        <ChevronDown :size="15" />
+                      </button>
+                      <Transition name="menu-pop">
+                        <div v-if="appearanceMenuOpen === 'bubble'" class="settings-select-menu">
+                          <button
+                            v-for="option in bubbleOptions"
+                            :key="option.value"
+                            class="settings-select-option"
+                            :class="{ active: option.value === bubbleColor }"
+                            type="button"
+                            @click="setBubbleColor(option.value)"
+                          >
+                            <span class="settings-color-swatch" :style="{ background: option.bg }" />
+                            {{ option.label }}
+                          </button>
+                        </div>
+                      </Transition>
+                    </div>
                   </label>
                   <label class="settings-field">
                     <span>正文字号</span>
-                    <select v-model.number="textSize" class="settings-input" @change="saveTextSize">
-                      <option v-for="size in textSizeOptions" :key="size" :value="size">{{ size }} px</option>
-                    </select>
+                    <div class="settings-select" @click.stop>
+                      <button class="settings-select-button" type="button" :aria-expanded="appearanceMenuOpen === 'textSize'" @click="toggleAppearanceMenu('textSize')">
+                        <span>{{ textSize }} px</span>
+                        <ChevronDown :size="15" />
+                      </button>
+                      <Transition name="menu-pop">
+                        <div v-if="appearanceMenuOpen === 'textSize'" class="settings-select-menu">
+                          <button
+                            v-for="option in textSizeMenuOptions"
+                            :key="option.value"
+                            class="settings-select-option"
+                            :class="{ active: option.value === textSize }"
+                            type="button"
+                            @click="setTextSize(option.value)"
+                          >
+                            {{ option.label }}
+                          </button>
+                        </div>
+                      </Transition>
+                    </div>
                   </label>
                   <label class="settings-field">
                     <span>代码字号</span>
-                    <select v-model.number="codeSize" class="settings-input" @change="saveCodeSize">
-                      <option v-for="size in codeSizeOptions" :key="size" :value="size">{{ size }} px</option>
-                    </select>
+                    <div class="settings-select" @click.stop>
+                      <button class="settings-select-button" type="button" :aria-expanded="appearanceMenuOpen === 'codeSize'" @click="toggleAppearanceMenu('codeSize')">
+                        <span>{{ codeSize }} px</span>
+                        <ChevronDown :size="15" />
+                      </button>
+                      <Transition name="menu-pop">
+                        <div v-if="appearanceMenuOpen === 'codeSize'" class="settings-select-menu">
+                          <button
+                            v-for="option in codeSizeMenuOptions"
+                            :key="option.value"
+                            class="settings-select-option"
+                            :class="{ active: option.value === codeSize }"
+                            type="button"
+                            @click="setCodeSize(option.value)"
+                          >
+                            {{ option.label }}
+                          </button>
+                        </div>
+                      </Transition>
+                    </div>
                   </label>
                 </div>
               </section>
