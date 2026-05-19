@@ -384,7 +384,7 @@ async def stream_chat(user_id: str, payload: SendMessageRequest, conversation_id
                 "error",
                 {
                     "code": "UPSTREAM_ERROR",
-                    "message": "模型返回了空回复，可能是上游服务暂时异常或上下文过长，请稍后重试或压缩上下文",
+                    "message": "模型返回了空回复，可能是上游服务暂时异常或本轮输入过长，请稍后重试或减少本轮输入/附件内容",
                     "retryable": True,
                 },
             )
@@ -602,11 +602,17 @@ async def maybe_auto_compact(
             prompt_budget = int((context_event or {}).get("prompt_budget_tokens") or 0)
             remaining_tokens = int((context_event or {}).get("remaining_context_tokens") or 0)
             messages_to_refine = int((context_event or {}).get("messages_to_refine_count") or 0)
-            trigger_by_interval = user_count_since >= interval and user_count_since % interval == 0
+            min_messages = max(1, int(settings.compaction_min_messages))
+            trigger_by_interval = user_count_since >= interval and len(rows_to_count) >= min_messages
             trigger_by_trim = messages_to_refine > 0
             trigger_by_ratio = prompt_budget > 0 and prompt_tokens >= int(prompt_budget * settings.compaction_trigger_ratio)
             trigger_by_remaining = prompt_budget > 0 and remaining_tokens <= int(prompt_budget * (1 - settings.compaction_force_ratio))
-            if not (trigger_by_interval or trigger_by_trim or trigger_by_ratio or trigger_by_remaining):
+            forced_by_pressure = trigger_by_trim or trigger_by_ratio or trigger_by_remaining
+            if active_compaction and active_compaction.created_at and not forced_by_pressure:
+                age_minutes = (datetime.utcnow() - active_compaction.created_at).total_seconds() / 60
+                if age_minutes < max(0, int(settings.compaction_min_interval_minutes)):
+                    return
+            if not (trigger_by_interval or forced_by_pressure):
                 return
 
             conversation.compaction_pending = True

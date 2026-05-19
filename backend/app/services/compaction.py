@@ -12,7 +12,7 @@ from app.models.entities import Conversation, ConversationCompaction, Message, U
 from app.providers.openai_compatible import OpenAICompatibleProvider, estimate_tokens_text
 from app.security.crypto import decrypt_api_key
 from app.services.api_keys import get_active_api_key
-from app.services.context import build_message_branch, prompt_hash
+from app.services.context import build_message_branch, order_messages_chronologically, parse_json_object, prompt_hash, wrap_untrusted
 
 logger = logging.getLogger("app.services.compaction")
 
@@ -54,7 +54,7 @@ def _build_summary_dialog(rows: list[Message]) -> str:
         body = msg.content or ""
         if msg.status == "interrupted" and role == "assistant":
             body = "[truncated reply, user moved on]\n" + body
-        parts.append(f"{role}: {_trim_for_prompt(body)}")
+        parts.append(wrap_untrusted("conversation_line", f"{role}: {_trim_for_prompt(body)}"))
     return "\n\n".join(parts)
 
 
@@ -120,24 +120,7 @@ async def _llm_summarize(
 
 
 def _parse_summary_json(raw: str) -> dict:
-    text = raw.strip()
-    if text.startswith("```"):
-        text = text.strip("`")
-        if text.lower().startswith("json"):
-            text = text[4:]
-        text = text.strip()
-    try:
-        return json.loads(text)
-    except json.JSONDecodeError:
-        pass
-    start = text.find("{")
-    end = text.rfind("}")
-    if start != -1 and end != -1 and end > start:
-        try:
-            return json.loads(text[start : end + 1])
-        except json.JSONDecodeError:
-            pass
-    return {}
+    return parse_json_object(raw)
 
 
 def _as_list(value) -> list:
@@ -174,6 +157,7 @@ async def compact_conversation(
             .order_by(Message.created_at.asc())
         )
     ).scalars().all()
+    rows = order_messages_chronologically(rows)
     if not rows:
         raise ValueError("no messages to compact")
     if head_message_id:
