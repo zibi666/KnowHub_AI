@@ -9,8 +9,11 @@ from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.config import get_settings
-from app.models.entities import Attachment, ConversationCompaction, Message
-from app.providers.openai_compatible import estimate_tokens_text
+from app.models.entities import Attachment, AttachmentChunk, ConversationCompaction, Message
+from app.providers.openai_compatible import OpenAICompatibleProvider, estimate_tokens_text
+from app.services.api_keys import get_active_api_key
+from app.security.crypto import decrypt_api_key
+from app.services.attachments import cosine_similarity
 
 SYSTEM_PROMPT = """You are a helpful private GPT-style assistant.
 
@@ -297,6 +300,96 @@ def build_attachment_context_blocks(
     return blocks
 
 
+async def build_rag_attachment_context_blocks(
+    db: AsyncSession,
+    user_id: str,
+    attachments: list[Attachment],
+    *,
+    current_content: str,
+    prompt_budget_tokens: int,
+    configured_limit_tokens: int,
+) -> list[str]:
+    if not attachments or not current_content.strip():
+        return []
+
+    settings = get_settings()
+    attachment_ids = [attachment.id for attachment in attachments]
+    chunk_rows = (
+        await db.execute(
+            select(AttachmentChunk).where(
+                AttachmentChunk.user_id == user_id,
+                AttachmentChunk.attachment_id.in_(attachment_ids),
+                AttachmentChunk.status == "ready",
+                AttachmentChunk.embedding_json.is_not(None),
+            )
+        )
+    ).scalars().all()
+    usable_chunks = [chunk for chunk in chunk_rows if isinstance(chunk.embedding_json, list) and chunk.embedding_json]
+    if not usable_chunks:
+        return []
+
+    api_key = await get_active_api_key(db, user_id)
+    if not api_key:
+        return []
+
+    try:
+        provider = OpenAICompatibleProvider()
+        query_vector = (await provider.embeddings(decrypt_api_key(api_key.ciphertext), settings.embedding_model, [current_content]))[0]
+    except Exception:
+        return []
+
+    scored: list[tuple[float, AttachmentChunk]] = []
+    for chunk in usable_chunks:
+        score = cosine_similarity(query_vector, chunk.embedding_json or [])
+        if score > 0:
+            scored.append((score, chunk))
+    scored.sort(key=lambda item: item[0], reverse=True)
+    if not scored:
+        return []
+
+    filename_by_id = {attachment.id: attachment.filename for attachment in attachments}
+    total_budget = min(
+        configured_limit_tokens,
+        settings.rag_max_context_tokens,
+        max(2_000, int(prompt_budget_tokens * ATTACHMENT_CONTEXT_BUDGET_RATIO)),
+    )
+    remaining = total_budget
+    per_attachment_count: dict[str, int] = {}
+    blocks: list[str] = []
+
+    for score, chunk in scored:
+        count = per_attachment_count.get(chunk.attachment_id, 0)
+        if count >= settings.rag_top_k_per_attachment:
+            continue
+        if remaining < MIN_ATTACHMENT_TOKENS_PER_FILE:
+            break
+
+        metadata = (
+            f"attachment_id={chunk.attachment_id}\n"
+            f"filename={filename_by_id.get(chunk.attachment_id, 'uploaded file')}\n"
+            f"chunk_index={chunk.chunk_index}\n"
+            f"similarity={score:.4f}\n"
+            f"estimated_tokens={chunk.token_count}"
+        )
+        allowed_text_tokens = max(300, remaining - estimate_tokens_text(metadata, factor=1.0) - 80)
+        text = compact_attachment_text(chunk.content, allowed_text_tokens)
+        block = wrap_untrusted("user_uploaded_file", f"{metadata}\n{text}")
+        block_tokens = estimate_tokens_text(block, factor=1.0)
+        while block_tokens > remaining and allowed_text_tokens > 300:
+            allowed_text_tokens = max(300, int(allowed_text_tokens * 0.75))
+            text = compact_attachment_text(chunk.content, allowed_text_tokens)
+            block = wrap_untrusted("user_uploaded_file", f"{metadata}\n{text}")
+            block_tokens = estimate_tokens_text(block, factor=1.0)
+        if block_tokens > remaining:
+            continue
+
+        blocks.append(block)
+        remaining -= block_tokens
+        per_attachment_count[chunk.attachment_id] = count + 1
+
+    return blocks
+
+
 def message_to_context_item(message: Message, *, historical: bool = True) -> dict:
     role = "assistant" if message.role == "assistant" else "user"
     content = message.content
@@ -529,11 +622,20 @@ async def build_context_bundle(
         ).scalars().all()
         rows_by_id = {attachment.id: attachment for attachment in rows}
         ordered_rows = [rows_by_id[attachment_id] for attachment_id in referenced_attachment_ids if attachment_id in rows_by_id]
-        attachment_context = build_attachment_context_blocks(
+        attachment_context = await build_rag_attachment_context_blocks(
+            db,
+            user_id,
             ordered_rows,
+            current_content=current_content,
             prompt_budget_tokens=budget_tokens,
             configured_limit_tokens=settings.context_text_token_limit,
         )
+        if not attachment_context:
+            attachment_context = build_attachment_context_blocks(
+                ordered_rows,
+                prompt_budget_tokens=budget_tokens,
+                configured_limit_tokens=settings.context_text_token_limit,
+            )
 
     include_current = bool(current_content.strip() or attachment_context)
     if include_current:

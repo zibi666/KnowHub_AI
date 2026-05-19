@@ -187,6 +187,23 @@ class Attachment(Base, TimestampMixin):
     deleted_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=False), nullable=True)
 
 
+class AttachmentChunk(Base, TimestampMixin):
+    __tablename__ = "attachment_chunks"
+    __table_args__ = (UniqueConstraint("attachment_id", "chunk_index", name="uq_attachment_chunk_index"),)
+
+    id: Mapped[str] = mapped_column(String(36), primary_key=True, default=uuid_str)
+    attachment_id: Mapped[str] = mapped_column(ForeignKey("attachments.id", ondelete="CASCADE"), index=True, nullable=False)
+    user_id: Mapped[str] = mapped_column(ForeignKey("users.id", ondelete="CASCADE"), index=True, nullable=False)
+    chunk_index: Mapped[int] = mapped_column(Integer, nullable=False)
+    content: Mapped[str] = mapped_column(MediumText, nullable=False)
+    token_count: Mapped[int] = mapped_column(Integer, default=0, nullable=False)
+    embedding_json: Mapped[list | None] = mapped_column(JSON, nullable=True)
+    embedding_model: Mapped[str | None] = mapped_column(String(120), nullable=True)
+    content_hash: Mapped[str] = mapped_column(String(64), nullable=False)
+    status: Mapped[str] = mapped_column(String(20), default="pending", nullable=False)
+    error: Mapped[str | None] = mapped_column(Text, nullable=True)
+
+
 class FileCacheEntry(Base, TimestampMixin):
     __tablename__ = "file_cache_entries"
 

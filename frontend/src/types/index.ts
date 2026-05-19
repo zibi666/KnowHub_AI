@@ -48,6 +48,19 @@ export interface Attachment {
   parseStatus: string
   parseError?: string
   contextTextTokens: number
+  chunkCount?: number
+  embeddingStatus?: string | null
+  previewText?: string | null
+  createdAt?: string
+}
+
+export interface AttachmentChunkPreview {
+  chunkIndex: number
+  contentPreview: string
+  tokenCount: number
+  embeddingStatus: string
+  embeddingModel?: string | null
+  error?: string | null
 }
 
 export interface ApiKeyGroup {

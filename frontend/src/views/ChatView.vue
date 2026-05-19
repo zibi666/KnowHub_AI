@@ -1,12 +1,12 @@
 <script setup lang="ts">
 import { computed, nextTick, onMounted, ref, watch, type CSSProperties } from 'vue'
-import { ArrowDown, Maximize2, MessageCircle, Minimize2, PanelLeftClose, PanelLeftOpen, Paperclip, Pencil, Plus, Search, Send, Settings, X } from 'lucide-vue-next'
+import { ArrowDown, Download, FileText, Image as ImageIcon, Maximize2, MessageCircle, Minimize2, PanelLeftClose, PanelLeftOpen, Paperclip, Pencil, Plus, RefreshCw, Search, Send, Settings, X } from 'lucide-vue-next'
 import { useRouter } from 'vue-router'
 import { ApiError, apiFetch, localizeApiMessage, readCookie, streamJsonLines } from '../api/client'
 import AppSelect from '../components/AppSelect.vue'
 import ChatMessage from '../components/ChatMessage.vue'
 import { useAuthStore } from '../stores/auth'
-import type { ApiKeyEntry, ApiKeyGroup, Attachment, Conversation, ConversationSearchResult, Message, User } from '../types'
+import type { ApiKeyEntry, ApiKeyGroup, Attachment, AttachmentChunkPreview, Conversation, ConversationSearchResult, Message, User } from '../types'
 
 type ThemeMode = 'dark' | 'light'
 type SettingsTab = 'appearance' | 'api' | 'groups' | 'account'
@@ -64,6 +64,14 @@ const selectedModel = ref('')
 const reasoningEffort = ref<ReasoningEffort>('medium')
 const streaming = ref(false)
 const pendingAttachments = ref<Attachment[]>([])
+const uploadingAttachmentNames = ref<string[]>([])
+const attachmentPreviewOpen = ref(false)
+const attachmentPreview = ref<Attachment | null>(null)
+const attachmentPreviewText = ref('')
+const attachmentPreviewChunks = ref<AttachmentChunkPreview[]>([])
+const attachmentPreviewLoading = ref(false)
+const attachmentPreviewError = ref('')
+const reindexingAttachment = ref(false)
 const error = ref('')
 const contextStats = ref({
   promptTokensEstimated: 0,
@@ -148,6 +156,75 @@ function selectedModelSupportsVision() {
   const model = (selectedModel.value || '').toLowerCase()
   return VISION_MODEL_HINTS.some((hint) => model.includes(hint))
 }
+
+function attachmentPreviewUrl(id: string) {
+  return `/api/attachments/${id}/preview`
+}
+
+function attachmentDownloadUrl(id: string) {
+  return `/api/attachments/${id}/download`
+}
+
+function formatBytes(value: number) {
+  if (!Number.isFinite(value) || value <= 0) return '0 B'
+  const units = ['B', 'KB', 'MB', 'GB']
+  let size = value
+  let index = 0
+  while (size >= 1024 && index < units.length - 1) {
+    size /= 1024
+    index += 1
+  }
+  return `${size >= 10 || index === 0 ? size.toFixed(0) : size.toFixed(1)} ${units[index]}`
+}
+
+function removePendingAttachment(id: string) {
+  pendingAttachments.value = pendingAttachments.value.filter((item) => item.id !== id)
+}
+
+function closeAttachmentPreview() {
+  attachmentPreviewOpen.value = false
+  attachmentPreview.value = null
+  attachmentPreviewText.value = ''
+  attachmentPreviewChunks.value = []
+  attachmentPreviewError.value = ''
+  attachmentPreviewLoading.value = false
+}
+
+async function openAttachmentPreview(item: Attachment) {
+  attachmentPreview.value = item
+  attachmentPreviewOpen.value = true
+  attachmentPreviewText.value = ''
+  attachmentPreviewChunks.value = []
+  attachmentPreviewError.value = ''
+  attachmentPreviewLoading.value = true
+  try {
+    if (!isImageAttachment(item)) {
+      const preview = await apiFetch<{ attachmentId: string; filename: string; previewText: string }>(`/attachments/${item.id}/preview`)
+      attachmentPreviewText.value = preview.previewText || ''
+    }
+    attachmentPreviewChunks.value = await apiFetch<AttachmentChunkPreview[]>(`/attachments/${item.id}/chunks`)
+  } catch (err) {
+    attachmentPreviewError.value = err instanceof Error ? err.message : '附件预览加载失败'
+  } finally {
+    attachmentPreviewLoading.value = false
+  }
+}
+
+async function reindexPreviewAttachment() {
+  if (!attachmentPreview.value || reindexingAttachment.value) return
+  reindexingAttachment.value = true
+  attachmentPreviewError.value = ''
+  try {
+    const updated = await apiFetch<Attachment>(`/attachments/${attachmentPreview.value.id}/reindex`, { method: 'POST' })
+    attachmentPreview.value = updated
+    pendingAttachments.value = pendingAttachments.value.map((item) => (item.id === updated.id ? updated : item))
+    await openAttachmentPreview(updated)
+  } catch (err) {
+    attachmentPreviewError.value = err instanceof Error ? err.message : '重新索引失败'
+  } finally {
+    reindexingAttachment.value = false
+  }
+}
 const shellClass = computed(() => (themeMode.value === 'dark' ? 'theme-dark' : 'theme-light'))
 const selectedBubble = computed(() => bubbleOptions.find((item) => item.value === bubbleColor.value) || bubbleOptions[0])
 const shellStyle = computed(
@@ -167,6 +244,12 @@ const parseStatusText: Record<string, string> = {
   parsing: '解析中',
   success: '解析完成',
   failed: '解析失败'
+}
+
+const embeddingStatusText: Record<string, string> = {
+  pending: '向量等待中',
+  ready: '向量可用',
+  failed: '向量失败'
 }
 
 const MESSAGE_ROLE_ORDER: Record<Message['role'], number> = {
@@ -882,23 +965,33 @@ async function uploadFile(event: Event) {
   const inputEl = event.target as HTMLInputElement
   const file = inputEl.files?.[0]
   if (!file) return
-  const presign = await apiFetch<{ uploadId: string; uploadUrl: string; method: string }>('/attachments/presign', {
-    method: 'POST',
-    body: JSON.stringify({ filename: file.name, contentType: file.type, sizeBytes: file.size })
-  })
-  const csrf = readCookie('csrf_token')
-  await fetch(presign.uploadUrl, {
-    method: presign.method,
-    body: file,
-    credentials: 'include',
-    headers: csrf ? { 'X-CSRF-Token': csrf } : undefined
-  })
-  const attachment = await apiFetch<Attachment>('/attachments/commit', {
-    method: 'POST',
-    body: JSON.stringify({ uploadId: presign.uploadId, filename: file.name, contentType: file.type })
-  })
-  pendingAttachments.value.push(attachment)
-  inputEl.value = ''
+  uploadingAttachmentNames.value.push(file.name)
+  try {
+    const presign = await apiFetch<{ uploadId: string; uploadUrl: string; method: string }>('/attachments/presign', {
+      method: 'POST',
+      body: JSON.stringify({ filename: file.name, contentType: file.type, sizeBytes: file.size })
+    })
+    const csrf = readCookie('csrf_token')
+    const uploadResponse = await fetch(presign.uploadUrl, {
+      method: presign.method,
+      body: file,
+      credentials: 'include',
+      headers: csrf ? { 'X-CSRF-Token': csrf } : undefined
+    })
+    if (!uploadResponse.ok) {
+      throw new Error('附件上传失败')
+    }
+    const attachment = await apiFetch<Attachment>('/attachments/commit', {
+      method: 'POST',
+      body: JSON.stringify({ uploadId: presign.uploadId, filename: file.name, contentType: file.type })
+    })
+    pendingAttachments.value.push(attachment)
+  } catch (err) {
+    error.value = err instanceof Error ? err.message : '附件上传失败'
+  } finally {
+    uploadingAttachmentNames.value = uploadingAttachmentNames.value.filter((name) => name !== file.name)
+    inputEl.value = ''
+  }
 }
 
 async function send() {
@@ -1219,9 +1312,22 @@ onMounted(async () => {
           <ArrowDown :size="20" />
         </button>
 
-        <div v-if="pendingAttachments.length" class="composer-attachments mb-2 flex flex-wrap gap-2">
+        <div v-if="uploadingAttachmentNames.length || pendingAttachments.length" class="composer-attachments mb-2 flex flex-wrap gap-2">
+          <span v-for="name in uploadingAttachmentNames" :key="`uploading-${name}`" class="attachment-pill is-uploading">
+            <FileText :size="14" />
+            <span class="attachment-pill-text">{{ name }}</span>
+            <span class="attachment-pill-status">上传中</span>
+          </span>
           <span v-for="item in pendingAttachments" :key="item.id" class="attachment-pill">
-            {{ item.filename }} - {{ parseStatusText[item.parseStatus] || item.parseStatus }}
+            <button class="attachment-pill-main" type="button" @click="openAttachmentPreview(item)">
+              <ImageIcon v-if="isImageAttachment(item)" :size="14" />
+              <FileText v-else :size="14" />
+              <span class="attachment-pill-text">{{ item.filename }}</span>
+              <span class="attachment-pill-status">{{ parseStatusText[item.parseStatus] || item.parseStatus }}</span>
+            </button>
+            <button class="attachment-pill-remove" type="button" title="移除本次附件" aria-label="移除本次附件" @click.stop="removePendingAttachment(item.id)">
+              <X :size="13" />
+            </button>
           </span>
         </div>
 
@@ -1529,6 +1635,86 @@ onMounted(async () => {
                 </form>
               </section>
             </Transition>
+          </div>
+        </section>
+      </div>
+    </Transition>
+
+    <Transition name="dialog-pop">
+      <div v-if="attachmentPreviewOpen" class="attachment-preview-backdrop" @click.self="closeAttachmentPreview">
+        <section class="attachment-preview-modal" role="dialog" aria-modal="true" aria-label="附件预览">
+          <header class="attachment-preview-header">
+            <div class="attachment-preview-title">
+              <ImageIcon v-if="attachmentPreview && isImageAttachment(attachmentPreview)" :size="19" />
+              <FileText v-else :size="19" />
+              <div>
+                <h2>{{ attachmentPreview?.filename }}</h2>
+                <p v-if="attachmentPreview">
+                  {{ formatBytes(attachmentPreview.sizeBytes) }} · {{ parseStatusText[attachmentPreview.parseStatus] || attachmentPreview.parseStatus }}
+                </p>
+              </div>
+            </div>
+            <div class="attachment-preview-actions">
+              <a
+                v-if="attachmentPreview"
+                class="attachment-preview-action"
+                :href="attachmentDownloadUrl(attachmentPreview.id)"
+                target="_blank"
+                rel="noreferrer"
+              >
+                <Download :size="16" />
+                下载
+              </a>
+              <button class="attachment-preview-close" type="button" title="关闭" aria-label="关闭" @click="closeAttachmentPreview">
+                <X :size="20" />
+              </button>
+            </div>
+          </header>
+
+          <div class="attachment-preview-body">
+            <div v-if="attachmentPreviewLoading" class="attachment-preview-empty">正在加载附件...</div>
+            <div v-else-if="attachmentPreviewError" class="attachment-preview-empty error">{{ attachmentPreviewError }}</div>
+            <template v-else-if="attachmentPreview">
+              <div v-if="isImageAttachment(attachmentPreview)" class="attachment-preview-image-wrap">
+                <img class="attachment-preview-image" :src="attachmentPreviewUrl(attachmentPreview.id)" :alt="attachmentPreview.filename" />
+              </div>
+              <template v-else>
+                <section class="attachment-preview-section">
+                  <div class="attachment-preview-section-head">
+                    <h3>解析文本预览</h3>
+                    <button class="attachment-preview-action subtle" type="button" :disabled="reindexingAttachment" @click="reindexPreviewAttachment">
+                      <RefreshCw :size="15" />
+                      {{ reindexingAttachment ? '重新索引中' : '重新索引' }}
+                    </button>
+                  </div>
+                  <pre class="attachment-preview-text">{{ attachmentPreviewText || '暂无可预览文本' }}</pre>
+                </section>
+
+                <section class="attachment-preview-section">
+                  <div class="attachment-preview-section-head">
+                    <h3>RAG 分块状态</h3>
+                    <span>{{ attachmentPreviewChunks.length }} 个分块</span>
+                  </div>
+                  <div v-if="!attachmentPreviewChunks.length" class="attachment-preview-empty compact">暂无分块，可能是图片、空文档或 embedding 未开始。</div>
+                  <div v-else class="attachment-chunk-list">
+                    <article
+                      v-for="chunk in attachmentPreviewChunks"
+                      :key="chunk.chunkIndex"
+                      class="attachment-chunk-card"
+                      :class="`status-${chunk.embeddingStatus}`"
+                    >
+                      <div class="attachment-chunk-meta">
+                        <strong>#{{ chunk.chunkIndex + 1 }}</strong>
+                        <span>{{ chunk.tokenCount }} tokens</span>
+                        <em>{{ embeddingStatusText[chunk.embeddingStatus] || chunk.embeddingStatus }}</em>
+                      </div>
+                      <p>{{ chunk.contentPreview }}</p>
+                      <small v-if="chunk.error">{{ chunk.error }}</small>
+                    </article>
+                  </div>
+                </section>
+              </template>
+            </template>
           </div>
         </section>
       </div>

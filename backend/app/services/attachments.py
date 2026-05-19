@@ -5,16 +5,21 @@ import hashlib
 import io
 import os
 import shutil
+import math
+import re
 from pathlib import Path
 
 import chardet
 from PIL import Image
 from pypdf import PdfReader
+from sqlalchemy import delete
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.config import get_settings
-from app.models.entities import Attachment
-from app.providers.openai_compatible import estimate_tokens_text
+from app.models.entities import Attachment, AttachmentChunk
+from app.providers.openai_compatible import OpenAICompatibleProvider, estimate_tokens_text
+from app.security.crypto import decrypt_api_key
+from app.services.api_keys import get_active_api_key
 
 TEXT_EXTENSIONS = {
     ".txt",
@@ -134,6 +139,141 @@ def extract_text(path: Path, mime: str, filename: str) -> str:
     return raw.decode(encoding, errors="replace")
 
 
+def text_content_hash(text: str) -> str:
+    return hashlib.sha256(text.encode("utf-8", errors="ignore")).hexdigest()
+
+
+def split_attachment_text(text: str, max_chars: int | None = None, overlap_chars: int | None = None) -> list[str]:
+    settings = get_settings()
+    max_chars = max(400, max_chars or settings.embedding_max_chars_per_chunk)
+    overlap_chars = max(0, min(overlap_chars if overlap_chars is not None else settings.embedding_chunk_overlap_chars, max_chars // 2))
+    clean = re.sub(r"\n{3,}", "\n\n", (text or "").strip())
+    if not clean:
+        return []
+
+    raw_parts = [part.strip() for part in re.split(r"\n\s*\n", clean) if part.strip()]
+    if not raw_parts:
+        raw_parts = [clean]
+
+    chunks: list[str] = []
+    current = ""
+
+    def push_current() -> None:
+        nonlocal current
+        value = current.strip()
+        if value:
+            chunks.append(value)
+        current = ""
+
+    for part in raw_parts:
+        if len(part) > max_chars:
+            push_current()
+            start = 0
+            while start < len(part):
+                end = min(len(part), start + max_chars)
+                chunk = part[start:end].strip()
+                if chunk:
+                    chunks.append(chunk)
+                if end >= len(part):
+                    break
+                start = max(0, end - overlap_chars)
+            continue
+        candidate = f"{current}\n\n{part}".strip() if current else part
+        if len(candidate) > max_chars:
+            push_current()
+            current = part
+        else:
+            current = candidate
+    push_current()
+
+    if overlap_chars <= 0 or len(chunks) <= 1:
+        return chunks
+    overlapped: list[str] = [chunks[0]]
+    for previous, chunk in zip(chunks, chunks[1:]):
+        prefix = previous[-overlap_chars:].strip()
+        overlapped.append(f"{prefix}\n\n{chunk}".strip() if prefix else chunk)
+    return overlapped
+
+
+def cosine_similarity(left: list[float], right: list[float]) -> float:
+    if not left or not right:
+        return 0.0
+    size = min(len(left), len(right))
+    if size == 0:
+        return 0.0
+    dot = sum(float(left[index]) * float(right[index]) for index in range(size))
+    left_norm = math.sqrt(sum(float(value) * float(value) for value in left[:size]))
+    right_norm = math.sqrt(sum(float(value) * float(value) for value in right[:size]))
+    if left_norm <= 0 or right_norm <= 0:
+        return 0.0
+    return dot / (left_norm * right_norm)
+
+
+async def active_plain_api_key(db: AsyncSession, user_id: str) -> str | None:
+    api_key = await get_active_api_key(db, user_id)
+    if not api_key:
+        return None
+    return decrypt_api_key(api_key.ciphertext)
+
+
+async def rebuild_attachment_chunks(db: AsyncSession, attachment: Attachment, api_key: str | None = None) -> None:
+    await db.execute(delete(AttachmentChunk).where(AttachmentChunk.attachment_id == attachment.id))
+    if not attachment.parsed_text or is_image_attachment(attachment):
+        await db.flush()
+        return
+
+    settings = get_settings()
+    chunks = split_attachment_text(
+        attachment.parsed_text,
+        max_chars=settings.embedding_max_chars_per_chunk,
+        overlap_chars=settings.embedding_chunk_overlap_chars,
+    )
+    if not chunks:
+        await db.flush()
+        return
+
+    status = "ready"
+    error: str | None = None
+    vectors: list[list[float]] = []
+    try:
+        plain_api_key = api_key or await active_plain_api_key(db, attachment.user_id)
+    except Exception as exc:
+        plain_api_key = None
+        status = "failed"
+        error = str(exc)[:500]
+    if plain_api_key:
+        try:
+            provider = OpenAICompatibleProvider()
+            vectors = await provider.embeddings(plain_api_key, settings.embedding_model, chunks)
+        except Exception as exc:
+            status = "failed"
+            error = str(exc)[:500]
+            vectors = []
+    else:
+        status = "failed"
+        error = error or "embedding api key not configured"
+
+    for index, chunk in enumerate(chunks):
+        vector = vectors[index] if index < len(vectors) else None
+        db.add(
+            AttachmentChunk(
+                attachment_id=attachment.id,
+                user_id=attachment.user_id,
+                chunk_index=index,
+                content=chunk,
+                token_count=estimate_tokens_text(chunk, factor=1.0),
+                embedding_json=vector,
+                embedding_model=settings.embedding_model if vector else None,
+                content_hash=text_content_hash(chunk),
+                status="ready" if vector else status,
+                error=None if vector else error,
+            )
+        )
+    if error:
+        attachment.parse_error = f"embedding failed: {error}"[:500]
+    await db.flush()
+
+
 async def parse_attachment(db: AsyncSession, attachment: Attachment) -> None:
     path = Path(attachment.cos_key)
     try:
@@ -144,9 +284,11 @@ async def parse_attachment(db: AsyncSession, attachment: Attachment) -> None:
         attachment.context_text_tokens = tokens
         attachment.parse_status = "success"
         attachment.parse_error = None
+        await rebuild_attachment_chunks(db, attachment)
     except Exception as exc:
         attachment.parse_status = "failed"
         attachment.parse_error = str(exc)[:500]
+        await db.execute(delete(AttachmentChunk).where(AttachmentChunk.attachment_id == attachment.id))
     await db.flush()
 
 

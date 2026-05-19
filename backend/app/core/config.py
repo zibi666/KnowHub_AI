@@ -66,6 +66,11 @@ class Settings(BaseSettings):
     vision_image_max_edge: int = 1024
     vision_image_jpeg_quality: int = 82
     vision_image_max_count: int = 4
+    embedding_model: str = "text-embedding-3-small"
+    embedding_max_chars_per_chunk: int = 1800
+    embedding_chunk_overlap_chars: int = 200
+    rag_top_k_per_attachment: int = 5
+    rag_max_context_tokens: int = 12000
     default_user_storage_gb: int = 2
     local_cache_max_gb: int = 5
     local_cache_max_file_mb: int = 50

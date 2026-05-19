@@ -38,6 +38,39 @@ class OpenAICompatibleProvider:
         models = self.parse_models(payload)
         return sorted(set(models))
 
+    async def embeddings(
+        self,
+        api_key: str,
+        model: str,
+        input_texts: list[str],
+        timeout_seconds: float = 60.0,
+    ) -> list[list[float]]:
+        if not input_texts:
+            return []
+        headers = {"Authorization": f"Bearer {api_key}", "Content-Type": "application/json"}
+        payload = {"model": model, "input": input_texts}
+        async with httpx.AsyncClient(timeout=timeout_seconds) as client:
+            response = await client.post(f"{self.base_url}/embeddings", headers=headers, json=payload)
+        if response.status_code in {401, 403}:
+            raise api_error("API_KEY_INVALID", "涓婃父鎷掔粷浜嗚 API Key")
+        if response.status_code >= 400:
+            raise api_error("UPSTREAM_ERROR", response.text[:300], status_code=response.status_code)
+        payload_json = response.json()
+        items = payload_json.get("data")
+        if not isinstance(items, list):
+            raise api_error("UPSTREAM_ERROR", "embedding response missing data")
+        if all(isinstance(item, dict) and "index" in item for item in items):
+            items = sorted(items, key=lambda item: int(item.get("index") or 0))
+        vectors: list[list[float]] = []
+        for item in items:
+            embedding = item.get("embedding") if isinstance(item, dict) else None
+            if not isinstance(embedding, list):
+                continue
+            vectors.append([float(value) for value in embedding])
+        if len(vectors) != len(input_texts):
+            raise api_error("UPSTREAM_ERROR", "embedding response size mismatch")
+        return vectors
+
     def parse_models(self, payload: Any) -> list[str]:
         if isinstance(payload, list):
             items = payload

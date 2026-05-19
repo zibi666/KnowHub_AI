@@ -2,6 +2,7 @@ from datetime import datetime, timedelta
 
 from app.models.entities import Attachment, ConversationCompaction, Message
 from app.services.chat import attach_images_to_current_user_message, model_supports_vision, remaining_completed_text
+from app.services.attachments import cosine_similarity, split_attachment_text
 from app.services.context import (
     build_attachment_context_blocks,
     build_current_message_branch,
@@ -123,6 +124,20 @@ def test_attachment_context_blocks_are_budgeted_and_wrapped():
     assert blocks
     assert all('<untrusted_data type="user_uploaded_file">' in block for block in blocks)
     assert sum(len(block) for block in blocks) < 20_000
+
+
+def test_split_attachment_text_uses_overlap_and_budget():
+    text = "\n\n".join([f"section {index} " + ("A" * 120) for index in range(8)])
+
+    chunks = split_attachment_text(text, max_chars=240, overlap_chars=24)
+
+    assert len(chunks) > 1
+    assert all(len(chunk) <= 430 for chunk in split_attachment_text("A" * 900, max_chars=240, overlap_chars=24))
+    assert chunks[1].startswith(chunks[0][-24:].strip())
+
+
+def test_cosine_similarity_ranks_matching_vectors():
+    assert cosine_similarity([1.0, 0.0], [1.0, 0.0]) > cosine_similarity([1.0, 0.0], [0.0, 1.0])
 
 
 def test_remaining_completed_text_keeps_suffix_after_partial_delta():

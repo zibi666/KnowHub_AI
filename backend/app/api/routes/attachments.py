@@ -14,8 +14,15 @@ from app.core.config import get_settings
 from app.core.db import get_session
 from app.core.deps import get_current_user
 from app.core.errors import api_error
-from app.models.entities import Attachment, User, UserQuota
-from app.schemas.attachments import AttachmentOut, CommitAttachmentRequest, PresignRequest, PresignResponse, PreviewTextOut
+from app.models.entities import Attachment, AttachmentChunk, User, UserQuota
+from app.schemas.attachments import (
+    AttachmentChunkOut,
+    AttachmentOut,
+    CommitAttachmentRequest,
+    PresignRequest,
+    PresignResponse,
+    PreviewTextOut,
+)
 from app.services.attachments import (
     CODE_EXTENSIONS,
     ensure_parent,
@@ -133,6 +140,53 @@ async def commit_attachment(
         parse_status="parsing",
     )
     db.add(attachment)
+    await db.flush()
+    await parse_attachment(db, attachment)
+    await db.commit()
+    await db.refresh(attachment)
+    return attachment
+
+
+@router.get("/{attachment_id}/chunks", response_model=list[AttachmentChunkOut])
+async def list_attachment_chunks(
+    attachment_id: str,
+    user: User = Depends(get_current_user),
+    db: AsyncSession = Depends(get_session),
+) -> list[AttachmentChunkOut]:
+    attachment = await db.get(Attachment, attachment_id)
+    if not attachment or attachment.user_id != user.id or attachment.deleted_at is not None:
+        raise api_error("FORBIDDEN", "attachment not found")
+    chunks = (
+        await db.execute(
+            select(AttachmentChunk)
+            .where(AttachmentChunk.user_id == user.id, AttachmentChunk.attachment_id == attachment.id)
+            .order_by(AttachmentChunk.chunk_index.asc())
+        )
+    ).scalars().all()
+    return [
+        AttachmentChunkOut(
+            chunk_index=chunk.chunk_index,
+            content_preview=(chunk.content or "")[:700],
+            token_count=chunk.token_count,
+            embedding_status=chunk.status,
+            embedding_model=chunk.embedding_model,
+            error=chunk.error,
+        )
+        for chunk in chunks
+    ]
+
+
+@router.post("/{attachment_id}/reindex", response_model=AttachmentOut)
+async def reindex_attachment(
+    attachment_id: str,
+    user: User = Depends(get_current_user),
+    db: AsyncSession = Depends(get_session),
+) -> Attachment:
+    attachment = await db.get(Attachment, attachment_id)
+    if not attachment or attachment.user_id != user.id or attachment.deleted_at is not None:
+        raise api_error("FORBIDDEN", "attachment not found")
+    attachment.parse_status = "parsing"
+    attachment.parse_error = None
     await db.flush()
     await parse_attachment(db, attachment)
     await db.commit()
