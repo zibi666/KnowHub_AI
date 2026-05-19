@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import hashlib
 from dataclasses import dataclass
+from datetime import datetime
 
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -47,6 +48,40 @@ class TrimResult:
     messages: list[dict]
     messages_to_refine_count: int
     remaining_context_tokens: int
+
+
+MESSAGE_CHRONO_ROLE_ORDER = {"system": 0, "user": 1, "assistant": 2}
+
+
+def message_chrono_sort_key(message: Message) -> tuple[datetime, int, str]:
+    return (
+        message.created_at or datetime.min,
+        MESSAGE_CHRONO_ROLE_ORDER.get(message.role, 3),
+        message.id,
+    )
+
+
+def order_messages_chronologically(messages: list[Message]) -> list[Message]:
+    """Sort messages deterministically when SQLite timestamps land in the same second."""
+    return sorted(messages, key=message_chrono_sort_key)
+
+
+def find_latest_branch_head(messages: list[Message]) -> Message | None:
+    if not messages:
+        return None
+    child_parent_ids = {message.parent_message_id for message in messages if message.parent_message_id}
+    leaves = [message for message in messages if message.id not in child_parent_ids]
+    candidates = leaves or messages
+    return max(candidates, key=message_chrono_sort_key)
+
+
+def build_current_message_branch(messages: list[Message], head_message_id: str | None = None) -> list[Message]:
+    ordered = order_messages_chronologically(messages)
+    if not ordered:
+        return []
+    head = head_message_id or (find_latest_branch_head(ordered).id if find_latest_branch_head(ordered) else None)
+    branch = build_message_branch(ordered, head)
+    return branch or ordered
 
 
 @dataclass
@@ -292,10 +327,13 @@ async def build_context_bundle(
         query = query.where(Message.id != retry_of_message_id)
     if current_message_id:
         query = query.where(Message.id != current_message_id)
-    history = (await db.execute(query.order_by(Message.created_at.asc()))).scalars().all()
+    history = (
+        await db.execute(query.order_by(Message.created_at.asc(), Message.id.asc()))
+    ).scalars().all()
+    history = order_messages_chronologically(history)
 
     current_message = await db.get(Message, current_message_id) if current_message_id else None
-    latest_history_message = find_latest_message(history)
+    latest_history_message = find_latest_branch_head(history)
     if current_message:
         head_message_id = current_message.parent_message_id
     else:

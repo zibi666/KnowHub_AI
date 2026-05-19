@@ -22,7 +22,7 @@ from app.schemas.chat import (
 )
 from app.services.chat import stream_chat
 from app.services.compaction import compact_conversation
-from app.services.context import build_context_stats
+from app.services.context import build_current_message_branch, build_context_stats
 from app.services.ratelimit import check_fixed_window
 
 router = APIRouter(tags=["chat"])
@@ -116,11 +116,12 @@ async def list_messages(
     rows = (
         await db.execute(
             select(Message).where(Message.user_id == user.id, Message.conversation_id == conversation_id)
-            .order_by(Message.created_at.desc())
-            .limit(limit)
+            .order_by(Message.created_at.asc(), Message.id.asc())
         )
     ).scalars().all()
-    return list(reversed(rows))
+    branch_rows = build_current_message_branch(rows)
+    visible_rows = branch_rows[-limit:] if len(branch_rows) > limit else branch_rows
+    return visible_rows
 
 
 @router.get("/conversations/{conversation_id}/messages/{message_id}", response_model=MessageOut)

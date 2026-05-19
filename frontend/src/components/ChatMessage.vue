@@ -47,8 +47,8 @@ watch(
 </script>
 
 <template>
-  <article class="py-3">
-    <div class="message-row mx-auto flex w-full max-w-5xl" :class="message.role === 'user' ? 'message-row-user justify-end' : 'justify-start'">
+  <article class="chat-message py-3">
+    <div class="message-row chat-message-row mx-auto flex w-full" :class="message.role === 'user' ? 'message-row-user justify-end' : 'justify-start'">
       <div :class="message.role === 'user' ? 'message-bubble message-user' : 'message-assistant'">
         <template v-if="message.role === 'user'">
           <div class="message-collapsible" :class="collapsibleClasses">

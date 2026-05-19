@@ -167,6 +167,40 @@ function formatTokenCount(value: number) {
   return value.toLocaleString()
 }
 
+const MESSAGE_ROLE_ORDER: Record<Message['role'], number> = {
+  system: 0,
+  user: 1,
+  assistant: 2
+}
+
+function sortMessagesForDisplay(items: Message[]) {
+  const ordered = [...items].sort((a, b) => {
+    const timeDelta = new Date(a.createdAt || 0).getTime() - new Date(b.createdAt || 0).getTime()
+    if (timeDelta !== 0) return timeDelta
+    const roleDelta = (MESSAGE_ROLE_ORDER[a.role] ?? 3) - (MESSAGE_ROLE_ORDER[b.role] ?? 3)
+    if (roleDelta !== 0) return roleDelta
+    return a.id.localeCompare(b.id)
+  })
+  const byId = new Map(ordered.map((message) => [message.id, message]))
+  const parentIds = new Set(ordered.map((message) => message.parentMessageId).filter(Boolean) as string[])
+  const head = [...ordered].reverse().find((message) => !parentIds.has(message.id)) || ordered[ordered.length - 1]
+  const branch: Message[] = []
+  const seen = new Set<string>()
+  let current: Message | undefined = head
+  while (current && !seen.has(current.id)) {
+    branch.push(current)
+    seen.add(current.id)
+    current = current.parentMessageId ? byId.get(current.parentMessageId) : undefined
+  }
+  const branchChronological = branch.reverse()
+  if (branchChronological.length > 1 || branchChronological.length === ordered.length) {
+    const branchIds = new Set(branchChronological.map((message) => message.id))
+    const olderLegacyMessages = ordered.filter((message) => !branchIds.has(message.id))
+    return [...olderLegacyMessages, ...branchChronological]
+  }
+  return ordered
+}
+
 function updateContextStats(data: any, source: 'estimated' | 'actual' = 'estimated') {
   const promptTokens = data.prompt_tokens_estimated ?? data.promptTokensEstimated ?? data.prompt_tokens ?? data.promptTokens ?? 0
   const contextWindow = data.context_window_tokens ?? data.contextWindowTokens ?? contextStats.value.contextWindowTokens
@@ -664,7 +698,7 @@ async function openConversation(id: string) {
   cancelPendingScroll()
   cancelPendingStreamFlush()
   currentId.value = id
-  messages.value = await apiFetch<Message[]>(`/conversations/${id}/messages`)
+  messages.value = sortMessagesForDisplay(await apiFetch<Message[]>(`/conversations/${id}/messages`))
   await loadContextStats()
   await scrollMessagesToBottom('auto')
 }
@@ -966,28 +1000,30 @@ onMounted(async () => {
       </header>
 
       <section ref="messageScroller" class="chat-surface flex-1 min-h-0 overflow-y-auto overscroll-contain px-6 py-8" @scroll="handleScrollerScroll">
-        <div v-if="!messages.length" class="empty-chat-state flex items-center justify-center chat-muted">开始一个新问题吧</div>
-        <ChatMessage v-for="message in messages" :key="message.id" :message="message" />
-
-        <footer class="chat-footer p-4">
-        <button
-          v-if="showScrollToBottom"
-          class="scroll-bottom-button"
-          type="button"
-          title="返回底部"
-          aria-label="返回底部"
-          @click="returnToBottom"
-        >
-          <ArrowDown :size="20" />
-        </button>
-
-        <div v-if="pendingAttachments.length" class="max-w-3xl mx-auto mb-2 flex flex-wrap gap-2">
-          <span v-for="item in pendingAttachments" :key="item.id" class="attachment-pill">
-            {{ item.filename }} - {{ parseStatusText[item.parseStatus] || item.parseStatus }}
-          </span>
+        <div class="chat-flow mx-auto">
+          <div v-if="!messages.length" class="empty-chat-state flex items-center justify-center chat-muted">开始一个新问题吧</div>
+          <ChatMessage v-for="message in messages" :key="message.id" :message="message" />
         </div>
 
-        <form class="composer-card mx-auto" :class="{ 'is-expanded': composerExpanded }" @submit.prevent="send">
+        <footer class="chat-footer p-4">
+          <button
+            v-if="showScrollToBottom"
+            class="scroll-bottom-button"
+            type="button"
+            title="返回底部"
+            aria-label="返回底部"
+            @click="returnToBottom"
+          >
+            <ArrowDown :size="20" />
+          </button>
+
+          <div v-if="pendingAttachments.length" class="composer-attachments mb-2 flex flex-wrap gap-2">
+            <span v-for="item in pendingAttachments" :key="item.id" class="attachment-pill">
+              {{ item.filename }} - {{ parseStatusText[item.parseStatus] || item.parseStatus }}
+            </span>
+          </div>
+
+          <form class="composer-card" :class="{ 'is-expanded': composerExpanded }" @submit.prevent="send">
           <button
             class="composer-expand-button"
             type="button"
@@ -1028,7 +1064,7 @@ onMounted(async () => {
               </button>
             </div>
           </div>
-        </form>
+          </form>
         </footer>
       </section>
 

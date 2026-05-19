@@ -29,7 +29,7 @@ from app.schemas.chat import SendMessageRequest
 from app.security.crypto import decrypt_api_key
 from app.services.api_keys import get_active_api_key
 from app.services.compaction import compact_conversation
-from app.services.context import build_context_bundle, build_message_branch, context_window_tokens_for_model
+from app.services.context import build_context_bundle, build_current_message_branch, build_message_branch
 from app.services.dead_letters import push_dead_letter
 from app.services.usage import record_usage
 
@@ -62,18 +62,19 @@ def preferred_model(models: list[str], configured: str | None) -> str:
 
 
 async def _latest_completed_message_id(db, user_id: str, conversation_id: str) -> str | None:
-    return (
+    messages = (
         await db.execute(
-            select(Message.id)
+            select(Message)
             .where(
                 Message.user_id == user_id,
                 Message.conversation_id == conversation_id,
                 Message.status.in_(["completed", "interrupted"]),
             )
-            .order_by(Message.created_at.desc())
-            .limit(1)
+            .order_by(Message.created_at.asc(), Message.id.asc())
         )
-    ).scalar_one_or_none()
+    ).scalars().all()
+    branch = build_current_message_branch(messages)
+    return branch[-1].id if branch else None
 
 
 async def stream_chat(user_id: str, payload: SendMessageRequest, conversation_id: str | None = None) -> AsyncIterator[bytes]:
@@ -573,9 +574,10 @@ async def maybe_auto_compact(
                         Message.conversation_id == conversation_id,
                         Message.status.in_(["completed", "interrupted"]),
                     )
-                    .order_by(Message.created_at.asc())
+                    .order_by(Message.created_at.asc(), Message.id.asc())
                 )
             ).scalars().all()
+            rows = build_current_message_branch(rows, head_message_id)
             if head_message_id:
                 branch_rows = build_message_branch(rows, head_message_id)
                 if branch_rows:
