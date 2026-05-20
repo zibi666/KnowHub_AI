@@ -1,11 +1,14 @@
 from __future__ import annotations
 
+import asyncio
+import json
 from datetime import datetime, timedelta
 
 from fastapi import APIRouter, Depends, Query
 from fastapi.responses import StreamingResponse
 from sqlalchemy import func, or_, select, update
 from sqlalchemy.ext.asyncio import AsyncSession
+from arq import create_pool
 
 from app.core.db import get_session
 from app.core.deps import get_current_user
@@ -18,10 +21,11 @@ from app.schemas.chat import (
     ContextStatsOut,
     ManualCompactResponse,
     MessageOut,
+    SendMessageResponse,
     SendMessageRequest,
     UpdateConversationRequest,
 )
-from app.services.chat import stream_chat
+from app.services.chat import conversation_event_channel, create_queued_chat, redis_settings, sse_line
 from app.services.compaction import compact_conversation
 from app.services.context import build_current_message_branch, build_context_stats, build_message_branch
 from app.services.ratelimit import check_fixed_window
@@ -65,6 +69,14 @@ async def hydrate_message_attachments(db: AsyncSession, messages: list[Message],
         MessageOut.from_message(message, attachments=attachments_by_message_id.get(message.id, []))
         for message in messages
     ]
+
+
+async def hydrate_single_message(db: AsyncSession, message_id: str, user_id: str) -> MessageOut:
+    message = await db.get(Message, message_id)
+    if not message or message.user_id != user_id:
+        raise api_error("FORBIDDEN", "消息不存在")
+    rows = await hydrate_message_attachments(db, [message], user_id)
+    return rows[0]
 
 
 @router.get("/conversations", response_model=list[ConversationOut])
@@ -233,6 +245,71 @@ async def get_message(
     return rows[0]
 
 
+@router.get("/conversations/{conversation_id}/events")
+async def conversation_events(
+    conversation_id: str,
+    user: User = Depends(get_current_user),
+    db: AsyncSession = Depends(get_session),
+):
+    conversation = await db.get(Conversation, conversation_id)
+    if not conversation or conversation.user_id != user.id or conversation.deleted_at is not None:
+        raise api_error("FORBIDDEN", "会话不存在")
+    streaming_rows = (
+        await db.execute(
+            select(Message)
+            .where(
+                Message.user_id == user.id,
+                Message.conversation_id == conversation_id,
+                Message.role == "assistant",
+                Message.status == "streaming",
+            )
+            .order_by(Message.created_at.asc(), Message.id.asc())
+        )
+    ).scalars().all()
+    initial_snapshots = [
+        {
+            "conversation_id": conversation_id,
+            "message_id": message.id,
+            "content": message.content,
+            "status": message.status,
+            "model": message.model,
+        }
+        for message in streaming_rows
+    ]
+
+    async def event_stream():
+        for snapshot in initial_snapshots:
+            yield sse_line("message_snapshot", snapshot)
+        redis = await create_pool(redis_settings())
+        pubsub = redis.pubsub()
+        try:
+            await pubsub.subscribe(conversation_event_channel(conversation_id))
+            while True:
+                message = await pubsub.get_message(ignore_subscribe_messages=True, timeout=15)
+                if message and message.get("type") == "message":
+                    raw = message.get("data")
+                    if isinstance(raw, bytes):
+                        raw = raw.decode("utf-8")
+                    try:
+                        payload = json.loads(raw)
+                    except (TypeError, json.JSONDecodeError):
+                        continue
+                    yield sse_line(payload.get("event", "message"), payload.get("data") or {})
+                else:
+                    yield sse_line("ping", {"ts": datetime.utcnow().isoformat()})
+                await asyncio.sleep(0)
+        finally:
+            await pubsub.unsubscribe(conversation_event_channel(conversation_id))
+            await pubsub.close()
+            await redis.aclose()
+
+    return StreamingResponse(
+        event_stream(),
+        media_type="text/event-stream",
+        headers={"X-Accel-Buffering": "no", "Cache-Control": "no-cache"},
+    )
+
+
 @router.get("/conversations/{conversation_id}/context", response_model=ContextStatsOut)
 async def get_context_stats(
     conversation_id: str,
@@ -247,27 +324,30 @@ async def get_context_stats(
     return ContextStatsOut(**stats.event_data())
 
 
-@router.post("/conversations/new/messages")
-async def send_new_message(payload: SendMessageRequest, user: User = Depends(get_current_user)):
+@router.post("/conversations/new/messages", response_model=SendMessageResponse)
+async def send_new_message(payload: SendMessageRequest, user: User = Depends(get_current_user), db: AsyncSession = Depends(get_session)):
     await check_fixed_window(f"chat:{user.id}", limit=5, window_seconds=60)
-    return StreamingResponse(
-        stream_chat(user.id, payload, conversation_id=None),
-        media_type="application/x-ndjson",
-        headers={"X-Accel-Buffering": "no", "Cache-Control": "no-cache"},
+    prepared = await create_queued_chat(user.id, payload, conversation_id=None)
+    return SendMessageResponse(
+        conversation_id=prepared.conversation_id,
+        user_message=await hydrate_single_message(db, prepared.user_message_id, user.id),
+        assistant_message=await hydrate_single_message(db, prepared.assistant_message_id, user.id),
     )
 
 
-@router.post("/conversations/{conversation_id}/messages")
+@router.post("/conversations/{conversation_id}/messages", response_model=SendMessageResponse)
 async def send_message(
     conversation_id: str,
     payload: SendMessageRequest,
     user: User = Depends(get_current_user),
+    db: AsyncSession = Depends(get_session),
 ):
     await check_fixed_window(f"chat:{user.id}", limit=5, window_seconds=60)
-    return StreamingResponse(
-        stream_chat(user.id, payload, conversation_id=conversation_id),
-        media_type="application/x-ndjson",
-        headers={"X-Accel-Buffering": "no", "Cache-Control": "no-cache"},
+    prepared = await create_queued_chat(user.id, payload, conversation_id=conversation_id)
+    return SendMessageResponse(
+        conversation_id=prepared.conversation_id,
+        user_message=await hydrate_single_message(db, prepared.user_message_id, user.id),
+        assistant_message=await hydrate_single_message(db, prepared.assistant_message_id, user.id),
     )
 
 

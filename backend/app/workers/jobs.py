@@ -7,7 +7,7 @@ from arq.connections import RedisSettings
 from app.core.db import SessionLocal
 from app.core.config import get_settings
 from app.services.compaction import compact_conversation
-from app.services.chat import run_image_generation_job
+from app.services.chat import run_chat_generation_job, run_image_generation_job
 from app.services.maintenance import (
     cleanup_cache_job,
     cleanup_pending_cos_job,
@@ -60,6 +60,33 @@ async def image_generation_job(
     await run_image_generation_job(user_id, conversation_id, assistant_message_id, prompt, model)
 
 
+async def chat_generation_job(
+    ctx,
+    user_id: str,
+    conversation_id: str,
+    user_message_id: str,
+    assistant_message_id: str,
+    model: str | None,
+    attachment_ids: list[str] | None = None,
+    referenced_attachment_ids: list[str] | None = None,
+    retry_of_message_id: str | None = None,
+    reasoning_effort: str | None = None,
+    max_completion_tokens: int | None = None,
+) -> None:
+    await run_chat_generation_job(
+        user_id,
+        conversation_id,
+        user_message_id,
+        assistant_message_id,
+        model,
+        attachment_ids,
+        referenced_attachment_ids,
+        retry_of_message_id,
+        reasoning_effort,
+        max_completion_tokens,
+    )
+
+
 async def startup(ctx):
     return None
 
@@ -87,6 +114,7 @@ class WorkerSettings:
         zombie_scan_worker,
         compaction_watchdog_worker,
         purge_user_job,
+        chat_generation_job,
         image_generation_job,
     ]
     on_startup = startup

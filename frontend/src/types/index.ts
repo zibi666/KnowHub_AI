@@ -34,6 +34,25 @@ export interface Message {
   generatedImageSize?: string
   imageProgress?: ImageProgress
   image_progress?: ImageProgress
+  elapsedSeconds?: number
+  elapsed_seconds?: number
+  startedAt?: number
+  started_at?: number
+  progressDetail?: string
+  progress_detail?: string
+  progressPhase?: string
+  progress_phase?: string
+}
+
+export interface SendMessageResponse {
+  conversationId: string
+  conversation_id?: string
+  userMessage: Message
+  user_message?: Message
+  assistantMessage: Message
+  assistant_message?: Message
+  status: string
+  background: boolean
 }
 
 export interface ImageProgress {

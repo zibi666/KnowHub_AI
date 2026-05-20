@@ -49,6 +49,19 @@ def test_current_branch_ignores_failed_leaf_when_reopening_chat():
     assert [message.id for message in branch] == ["u1", "a1", "u2", "a2", "u3"]
 
 
+def test_current_branch_keeps_streaming_leaf_when_reopening_chat():
+    rows = [
+        make_message("u1", role="user", seconds=1),
+        make_message("a1", role="assistant", parent_message_id="u1", seconds=2),
+        make_message("u2", role="user", parent_message_id="a1", seconds=3),
+        make_message("streaming", role="assistant", parent_message_id="u2", status="streaming", seconds=4),
+    ]
+
+    branch = build_current_message_branch(rows)
+
+    assert [message.id for message in branch] == ["u1", "a1", "u2", "streaming"]
+
+
 def test_trim_keeps_system_summary_and_current_user_message_in_order():
     messages = [
         {"role": "system", "content": "main system rules"},
@@ -239,3 +252,26 @@ def test_message_out_can_be_built_without_reading_orm_attachments_relationship()
 
     assert result.id == "a1"
     assert result.attachments == [attachment]
+
+
+def test_message_out_includes_runtime_progress_for_streaming_text():
+    message = make_message("a1", role="assistant", status="streaming", seconds=1, content="partial")
+    message.model = "gpt-5.5"
+
+    result = MessageOut.from_message(message)
+
+    assert result.elapsed_seconds is not None
+    assert result.started_at is not None
+    assert result.progress_phase == "running"
+
+
+def test_message_out_includes_image_progress_for_streaming_image():
+    message = make_message("a1", role="assistant", status="streaming", seconds=1, content="Generating image")
+    message.model = "gpt-image-2"
+
+    result = MessageOut.from_message(message)
+
+    assert result.elapsed_seconds is not None
+    assert result.started_at is not None
+    assert result.image_progress is not None
+    assert result.image_progress["startedAt"] == result.started_at

@@ -6,6 +6,7 @@ import json
 import logging
 import time
 from collections.abc import AsyncIterator
+from dataclasses import dataclass
 from datetime import datetime, timezone
 from urllib.parse import urlparse
 
@@ -62,6 +63,14 @@ def json_line(event: str, data: dict) -> bytes:
     return (json.dumps({"event": event, "data": data}, ensure_ascii=False) + "\n\n").encode("utf-8")
 
 
+def sse_line(event: str, data: dict) -> bytes:
+    return f"event: {event}\ndata: {json.dumps(data, ensure_ascii=False)}\n\n".encode("utf-8")
+
+
+def conversation_event_channel(conversation_id: str) -> str:
+    return f"conversation-events:{conversation_id}"
+
+
 def redis_settings() -> RedisSettings:
     parsed = urlparse(get_settings().redis_url)
     return RedisSettings(
@@ -71,6 +80,25 @@ def redis_settings() -> RedisSettings:
         username=parsed.username,
         password=parsed.password,
     )
+
+
+def runtime_progress_from_message(message: Message) -> dict:
+    elapsed_seconds = 0
+    started_at_ms = None
+    if message.created_at:
+        created_at = message.created_at
+        if created_at.tzinfo is None:
+            created_at = created_at.replace(tzinfo=timezone.utc)
+        else:
+            created_at = created_at.astimezone(timezone.utc)
+        elapsed_seconds = max(0, int((datetime.now(timezone.utc) - created_at).total_seconds()))
+        started_at_ms = int(created_at.timestamp() * 1000)
+    return {
+        "elapsedSeconds": elapsed_seconds,
+        "startedAt": started_at_ms,
+        "phase": "running",
+        "detail": "回复正在后台生成，切换对话后会继续。",
+    }
 
 
 def image_progress_from_message(message: Message) -> dict:
@@ -104,6 +132,17 @@ def image_progress_from_message(message: Message) -> dict:
         "phase": phase,
         "size": None,
     }
+
+
+async def publish_conversation_event(conversation_id: str, event: str, data: dict) -> None:
+    try:
+        redis = await create_pool(redis_settings())
+        try:
+            await redis.publish(conversation_event_channel(conversation_id), json.dumps({"event": event, "data": data}, ensure_ascii=False))
+        finally:
+            await redis.aclose()
+    except Exception:
+        logger.exception("conversation_event_publish_failed conv=%s event=%s", conversation_id, event)
 
 
 def remaining_completed_text(completed_text: str, streamed_text: str) -> str:
@@ -190,6 +229,178 @@ async def _latest_completed_message_id(db, user_id: str, conversation_id: str) -
     ).scalars().all()
     branch = build_current_message_branch(messages)
     return branch[-1].id if branch else None
+
+
+@dataclass
+class PreparedChat:
+    conversation_id: str
+    created_conversation_id: str | None
+    user_message_id: str
+    assistant_message_id: str
+    model: str
+
+
+async def prepare_chat_messages(user_id: str, payload: SendMessageRequest, conversation_id: str | None = None) -> PreparedChat:
+    settings = get_settings()
+    model = payload.model
+    created_conversation_id: str | None = None
+    async with SessionLocal() as db:
+        quota = await db.get(UserQuota, user_id)
+        api_key_row = await get_active_api_key(db, user_id)
+        if not api_key_row:
+            raise HTTPException(status_code=400, detail={"code": "KEY_REQUIRED", "message": "请先绑定模型 API Key"})
+        available_models = api_key_row.available_models_json or []
+        available_models = filter_available_models_for_request(
+            available_models,
+            quota.model_whitelist_json if quota else None,
+        )
+        available_models = official_available_models(available_models, quota.model_whitelist_json if quota else None)
+        model = model or preferred_model(available_models, quota.default_model if quota else None)
+        if quota and quota.model_whitelist_json and not image_model_is_available(model, quota.model_whitelist_json):
+            raise HTTPException(status_code=400, detail={"code": "MODEL_NOT_AVAILABLE", "message": "当前模型不在管理员允许范围内"})
+        if api_key_row.available_models_json and not image_model_is_available(model, available_models):
+            raise HTTPException(status_code=400, detail={"code": "MODEL_NOT_AVAILABLE", "message": "当前 API Key 不支持该模型"})
+        if conversation_id is None:
+            title = (payload.content.strip() or "新对话")[:30]
+            conversation = Conversation(user_id=user_id, title=title)
+            db.add(conversation)
+            await db.flush()
+            conversation_id = conversation.id
+            created_conversation_id = conversation.id
+        else:
+            conversation = await db.get(Conversation, conversation_id)
+            if not conversation or conversation.user_id != user_id or conversation.deleted_at is not None:
+                raise HTTPException(status_code=403, detail={"code": "FORBIDDEN", "message": "会话不存在"})
+
+        attachments = []
+        if payload.attachment_ids:
+            rows = (
+                await db.execute(
+                    select(Attachment).where(
+                        Attachment.user_id == user_id,
+                        Attachment.id.in_(payload.attachment_ids),
+                        Attachment.deleted_at.is_(None),
+                    )
+                )
+            ).scalars().all()
+            image_count = sum(1 for attachment in rows if is_image_attachment(attachment))
+            if image_count and not model_supports_vision(model):
+                raise HTTPException(
+                    status_code=400,
+                    detail={
+                        "code": "VISION_MODEL_REQUIRED",
+                        "message": "当前模型不支持图片理解，请切换到支持视觉的模型后再发送图片。",
+                    },
+                )
+            if image_count > settings.vision_image_max_count:
+                raise HTTPException(
+                    status_code=400,
+                    detail={"code": "QUOTA_EXCEEDED", "message": f"每次最多发送 {settings.vision_image_max_count} 张图片"},
+                )
+            for attachment in rows:
+                if attachment.parse_status != "success":
+                    raise HTTPException(
+                        status_code=400,
+                        detail={"code": "ATTACHMENT_NOT_READY", "message": f"{attachment.filename} 尚未解析完成"},
+                    )
+            attachments = rows
+
+        parent_message_id = await _latest_completed_message_id(db, user_id, conversation_id)
+        if payload.retry_of_message_id:
+            retry_target = await db.get(Message, payload.retry_of_message_id)
+            if retry_target and retry_target.user_id == user_id and retry_target.conversation_id == conversation_id:
+                parent_message_id = retry_target.parent_message_id
+                if retry_target.role == "assistant" and retry_target.parent_message_id:
+                    retry_parent = await db.get(Message, retry_target.parent_message_id)
+                    if (
+                        retry_parent
+                        and retry_parent.user_id == user_id
+                        and retry_parent.conversation_id == conversation_id
+                    ):
+                        parent_message_id = retry_parent.parent_message_id
+
+        user_message = Message(
+            user_id=user_id,
+            conversation_id=conversation_id,
+            parent_message_id=parent_message_id,
+            role="user",
+            content=payload.content,
+            status="completed",
+        )
+        db.add(user_message)
+        await db.flush()
+        for attachment in attachments:
+            db.add(MessageAttachment(message_id=user_message.id, attachment_id=attachment.id))
+
+        assistant = Message(
+            user_id=user_id,
+            conversation_id=conversation_id,
+            parent_message_id=user_message.id,
+            retry_of_message_id=payload.retry_of_message_id,
+            role="assistant",
+            content="正在生成图片" if is_image_generation_model(model) else "",
+            status="streaming",
+            model=model,
+        )
+        db.add(assistant)
+        await db.flush()
+        prepared = PreparedChat(
+            conversation_id=conversation_id,
+            created_conversation_id=created_conversation_id,
+            user_message_id=user_message.id,
+            assistant_message_id=assistant.id,
+            model=model,
+        )
+        await db.commit()
+        return prepared
+
+
+async def enqueue_chat_generation(user_id: str, prepared: PreparedChat, payload: SendMessageRequest) -> None:
+    job_id = f"chat-generation:{prepared.assistant_message_id}"
+    redis = await create_pool(redis_settings())
+    try:
+        await redis.enqueue_job(
+            "chat_generation_job",
+            user_id,
+            prepared.conversation_id,
+            prepared.user_message_id,
+            prepared.assistant_message_id,
+            payload.model,
+            payload.attachment_ids,
+            payload.referenced_attachment_ids,
+            payload.retry_of_message_id,
+            payload.reasoning_effort,
+            payload.max_completion_tokens,
+            _job_id=job_id,
+        )
+    finally:
+        await redis.aclose()
+
+
+async def create_queued_chat(user_id: str, payload: SendMessageRequest, conversation_id: str | None = None) -> PreparedChat:
+    prepared = await prepare_chat_messages(user_id, payload, conversation_id)
+    try:
+        await enqueue_chat_generation(user_id, prepared, payload)
+    except Exception:
+        logger.exception("chat_generation_enqueue_failed user=%s conv=%s msg=%s", user_id, prepared.conversation_id, prepared.assistant_message_id)
+        async with SessionLocal() as db:
+            assistant = await db.get(Message, prepared.assistant_message_id)
+            if assistant:
+                assistant.content = "后台任务启动失败"
+                assistant.status = "failed_no_output"
+                await db.commit()
+        raise HTTPException(status_code=503, detail={"code": "QUEUE_ERROR", "message": "后台任务启动失败"})
+    await publish_conversation_event(
+        prepared.conversation_id,
+        "message_started",
+        {
+            "conversation_id": prepared.conversation_id,
+            "message_id": prepared.assistant_message_id,
+            "user_message_id": prepared.user_message_id,
+            "model": prepared.model,
+        },
+    )
+    return prepared
 
 
 async def stream_chat(user_id: str, payload: SendMessageRequest, conversation_id: str | None = None) -> AsyncIterator[bytes]:
@@ -1042,6 +1253,371 @@ async def run_image_generation_job(
                 assistant.content = str(exc)[:500]
                 assistant.status = "failed_no_output"
                 await db.commit()
+
+
+async def _persist_assistant_partial(
+    assistant_message_id: str,
+    content: str,
+    *,
+    status: str = "streaming",
+    completion_tokens: int | None = None,
+    total_tokens: int | None = None,
+    tokens_source: str | None = None,
+) -> None:
+    async with SessionLocal() as db:
+        assistant = await db.get(Message, assistant_message_id)
+        if not assistant:
+            return
+        assistant.content = content
+        assistant.status = status
+        if completion_tokens is not None:
+            assistant.completion_tokens = completion_tokens
+        if total_tokens is not None:
+            assistant.total_tokens = total_tokens
+        if tokens_source is not None:
+            assistant.tokens_source = tokens_source
+        await db.commit()
+
+
+async def run_chat_generation_job(
+    user_id: str,
+    conversation_id: str,
+    user_message_id: str,
+    assistant_message_id: str,
+    model: str | None,
+    attachment_ids: list[str] | None = None,
+    referenced_attachment_ids: list[str] | None = None,
+    retry_of_message_id: str | None = None,
+    reasoning_effort: str | None = None,
+    max_completion_tokens: int | None = None,
+) -> None:
+    request_started = time.perf_counter()
+    buffer: list[str] = []
+    usage: dict | None = None
+    context_event: dict | None = None
+    try:
+        async with SessionLocal() as db:
+            user_message = await db.get(Message, user_message_id)
+            assistant = await db.get(Message, assistant_message_id)
+            if (
+                not user_message
+                or not assistant
+                or user_message.user_id != user_id
+                or assistant.user_id != user_id
+                or user_message.conversation_id != conversation_id
+                or assistant.conversation_id != conversation_id
+            ):
+                return
+            model = assistant.model or model or DEFAULT_CHAT_MODEL
+            prompt = user_message.content or ""
+
+        await publish_conversation_event(
+            conversation_id,
+            "message_started",
+            {
+                "conversation_id": conversation_id,
+                "message_id": assistant_message_id,
+                "user_message_id": user_message_id,
+                "model": model,
+            },
+        )
+
+        if is_image_generation_model(model):
+            await run_image_generation_job(user_id, conversation_id, assistant_message_id, prompt, model)
+            async with SessionLocal() as db:
+                assistant = await db.get(Message, assistant_message_id)
+                status = assistant.status if assistant else "failed_no_output"
+            await publish_conversation_event(
+                conversation_id,
+                "message_completed" if status == "completed" else "message_failed",
+                {"conversation_id": conversation_id, "message_id": assistant_message_id, "status": status},
+            )
+            return
+
+        payload = SendMessageRequest(
+            content=prompt,
+            model=model,
+            attachment_ids=attachment_ids or [],
+            referenced_attachment_ids=referenced_attachment_ids or attachment_ids or [],
+            retry_of_message_id=retry_of_message_id,
+            reasoning_effort=reasoning_effort,
+            max_completion_tokens=max_completion_tokens,
+        )
+
+        settings = get_settings()
+        async with SessionLocal() as db:
+            context_bundle = await build_context_bundle(
+                db,
+                user_id,
+                conversation_id,
+                payload.content,
+                payload.referenced_attachment_ids or payload.attachment_ids,
+                retry_of_message_id=payload.retry_of_message_id,
+                current_message_id=user_message_id,
+                model=model,
+            )
+            context = context_bundle.messages
+            context_event = context_bundle.event_data()
+            image_attachments: list[Attachment] = []
+            if payload.referenced_attachment_ids or payload.attachment_ids:
+                referenced_ids = payload.referenced_attachment_ids or payload.attachment_ids
+                rows = (
+                    await db.execute(
+                        select(Attachment).where(
+                            Attachment.user_id == user_id,
+                            Attachment.id.in_(referenced_ids),
+                            Attachment.deleted_at.is_(None),
+                        )
+                    )
+                ).scalars().all()
+                rows_by_id = {attachment.id: attachment for attachment in rows}
+                ordered_rows = [rows_by_id[attachment_id] for attachment_id in referenced_ids if attachment_id in rows_by_id]
+                image_attachments = [
+                    attachment
+                    for attachment in ordered_rows
+                    if attachment.parse_status == "success" and is_image_attachment(attachment)
+                ][: settings.vision_image_max_count]
+            attach_images_to_current_user_message(context, image_attachments)
+            api_key_row = await get_active_api_key(db, user_id)
+            if not api_key_row:
+                raise HTTPException(status_code=400, detail={"code": "KEY_REQUIRED", "message": "璇峰厛缁戝畾妯″瀷 API Key"})
+            api_key = decrypt_api_key(api_key_row.ciphertext)
+
+        await publish_conversation_event(
+            conversation_id,
+            "context",
+            {"conversation_id": conversation_id, "message_id": assistant_message_id, **context_event},
+        )
+
+        current_input_tokens = estimate_tokens_text(payload.content or "", factor=1.0)
+        default_max_completion_tokens = (
+            settings.long_input_max_completion_tokens
+            if current_input_tokens >= settings.long_input_token_threshold
+            else settings.model_max_completion_tokens
+        )
+        ceiling = settings.model_max_completion_tokens_ceiling
+        if payload.max_completion_tokens and payload.max_completion_tokens > 0:
+            request_max_completion_tokens = min(payload.max_completion_tokens, ceiling)
+        else:
+            request_max_completion_tokens = default_max_completion_tokens
+
+        allowed_reasoning = settings.reasoning_effort_allowed_set
+        requested_effort = (payload.reasoning_effort or "").strip().lower() or None
+        request_reasoning_effort = requested_effort if requested_effort and requested_effort in allowed_reasoning else settings.model_reasoning_effort
+
+        provider = OpenAICompatibleProvider()
+        stream = provider.chat_stream(
+            api_key=api_key,
+            model=model,
+            messages=context,
+            include_usage=True,
+            max_completion_tokens=request_max_completion_tokens,
+            reasoning_effort=request_reasoning_effort,
+        ).__aiter__()
+        pending_next = asyncio.ensure_future(_safe_anext(stream))
+        last_persist = time.perf_counter()
+        try:
+            while True:
+                done, _ = await asyncio.wait({pending_next}, timeout=settings.stream_ping_interval_seconds)
+                if not done:
+                    content = "".join(buffer)
+                    await _persist_assistant_partial(assistant_message_id, content)
+                    await publish_conversation_event(
+                        conversation_id,
+                        "message_snapshot",
+                        {"conversation_id": conversation_id, "message_id": assistant_message_id, "content": content, "status": "streaming"},
+                    )
+                    continue
+
+                event = pending_next.result()
+                if event is _STREAM_END:
+                    break
+                pending_next = asyncio.ensure_future(_safe_anext(stream))
+
+                if event.event == "token":
+                    text = event.data["text"]
+                    buffer.append(text)
+                    content = "".join(buffer)
+                    now = time.perf_counter()
+                    if now - last_persist >= 0.35 or len(text) >= 80:
+                        await _persist_assistant_partial(assistant_message_id, content)
+                        last_persist = now
+                    await publish_conversation_event(
+                        conversation_id,
+                        "message_delta",
+                        {"conversation_id": conversation_id, "message_id": assistant_message_id, "text": text, "content": content},
+                    )
+                elif event.event == "completed_text":
+                    text = event.data.get("text") or ""
+                    current = "".join(buffer)
+                    remaining = remaining_completed_text(text, current)
+                    if remaining:
+                        buffer.append(remaining)
+                        content = "".join(buffer)
+                        await _persist_assistant_partial(assistant_message_id, content)
+                        await publish_conversation_event(
+                            conversation_id,
+                            "message_delta",
+                            {"conversation_id": conversation_id, "message_id": assistant_message_id, "text": remaining, "content": content},
+                        )
+                elif event.event == "usage":
+                    usage = event.data
+        finally:
+            if not pending_next.done():
+                pending_next.cancel()
+                with contextlib.suppress(asyncio.CancelledError):
+                    await pending_next
+
+        content = "".join(buffer)
+        if not content.strip():
+            await _persist_assistant_partial(assistant_message_id, "", status="failed_no_output")
+            await publish_conversation_event(
+                conversation_id,
+                "message_failed",
+                {
+                    "conversation_id": conversation_id,
+                    "message_id": assistant_message_id,
+                    "status": "failed_no_output",
+                    "code": "UPSTREAM_ERROR",
+                    "message": "妯″瀷杩斿洖浜嗙┖鍥炲",
+                },
+            )
+            return
+
+        if usage:
+            prompt_tokens = int(usage.get("prompt_tokens") or 0)
+            completion_tokens = int(usage.get("completion_tokens") or 0)
+            total_tokens = int(usage.get("total_tokens") or prompt_tokens + completion_tokens)
+            tokens_source = "actual"
+        else:
+            prompt_tokens = estimate_tokens_text(json.dumps(context, ensure_ascii=False))
+            completion_tokens = estimate_tokens_text(content)
+            total_tokens = prompt_tokens + completion_tokens
+            tokens_source = "estimated"
+
+        async with SessionLocal() as db:
+            assistant = await db.get(Message, assistant_message_id)
+            if not assistant:
+                raise RuntimeError(f"assistant message missing: {assistant_message_id}")
+            assistant.content = content
+            assistant.status = "completed"
+            assistant.prompt_tokens = prompt_tokens
+            assistant.completion_tokens = completion_tokens
+            assistant.total_tokens = total_tokens
+            assistant.tokens_source = tokens_source
+            await db.commit()
+
+        try:
+            async with SessionLocal() as db:
+                await record_usage(db, user_id, model, total_tokens, tokens_source)
+                await db.commit()
+        except Exception as exc:
+            logger.exception(
+                "chat_generation usage record failed user=%s conv=%s msg=%s model=%s total_tokens=%d",
+                user_id,
+                conversation_id,
+                assistant_message_id,
+                model,
+                total_tokens,
+            )
+            await push_dead_letter(
+                "usage_record",
+                {
+                    "user_id": user_id,
+                    "conversation_id": conversation_id,
+                    "message_id": assistant_message_id,
+                    "model": model,
+                    "total_tokens": total_tokens,
+                    "tokens_source": tokens_source,
+                },
+                str(exc),
+            )
+
+        await publish_conversation_event(
+            conversation_id,
+            "usage",
+            {
+                "conversation_id": conversation_id,
+                "message_id": assistant_message_id,
+                "prompt_tokens": prompt_tokens,
+                "completion_tokens": completion_tokens,
+                "total_tokens": total_tokens,
+                "model": model,
+                "tokens_source": tokens_source,
+            },
+        )
+        await publish_conversation_event(
+            conversation_id,
+            "message_completed",
+            {
+                "conversation_id": conversation_id,
+                "message_id": assistant_message_id,
+                "status": "completed",
+                "finished_at": datetime.utcnow().isoformat(),
+            },
+        )
+        asyncio.create_task(
+            maybe_auto_compact(
+                user_id,
+                conversation_id,
+                context_event,
+                head_message_id=assistant_message_id,
+            )
+        )
+        perf_logger.info(
+            "chat_timing background_chat_done user=%s conv=%s elapsed_ms=%d",
+            user_id,
+            conversation_id,
+            int((time.perf_counter() - request_started) * 1000),
+        )
+    except HTTPException as exc:
+        code = "UPSTREAM_ERROR"
+        message = str(exc.detail)
+        if isinstance(exc.detail, dict):
+            code = exc.detail.get("code", code)
+            message = exc.detail.get("message", message)
+        content = "".join(buffer)
+        await _persist_assistant_partial(
+            assistant_message_id,
+            content,
+            status="failed_partial" if content else "failed_no_output",
+            completion_tokens=estimate_tokens_text(content) if content else 0,
+            total_tokens=estimate_tokens_text(content) if content else 0,
+            tokens_source="estimated" if content else None,
+        )
+        await publish_conversation_event(
+            conversation_id,
+            "message_failed",
+            {
+                "conversation_id": conversation_id,
+                "message_id": assistant_message_id,
+                "status": "failed_partial" if content else "failed_no_output",
+                "code": code,
+                "message": message,
+            },
+        )
+    except Exception as exc:
+        logger.exception("chat_generation unexpected error user=%s conv=%s msg=%s", user_id, conversation_id, assistant_message_id)
+        content = "".join(buffer)
+        await _persist_assistant_partial(
+            assistant_message_id,
+            content,
+            status="failed_partial" if content else "failed_no_output",
+            completion_tokens=estimate_tokens_text(content) if content else 0,
+            total_tokens=estimate_tokens_text(content) if content else 0,
+            tokens_source="estimated" if content else None,
+        )
+        await publish_conversation_event(
+            conversation_id,
+            "message_failed",
+            {
+                "conversation_id": conversation_id,
+                "message_id": assistant_message_id,
+                "status": "failed_partial" if content else "failed_no_output",
+                "code": "UPSTREAM_ERROR",
+                "message": str(exc)[:500],
+            },
+        )
 
 
 async def maybe_auto_compact(

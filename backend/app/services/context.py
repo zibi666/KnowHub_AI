@@ -59,7 +59,7 @@ class TrimResult:
 
 
 MESSAGE_CHRONO_ROLE_ORDER = {"system": 0, "user": 1, "assistant": 2}
-CONTEXT_BRANCH_HEAD_STATUSES = {"completed", "interrupted"}
+CONTEXT_BRANCH_HEAD_STATUSES = {"completed", "interrupted", "streaming"}
 
 
 def message_chrono_sort_key(message: Message) -> tuple[datetime, int, str]:

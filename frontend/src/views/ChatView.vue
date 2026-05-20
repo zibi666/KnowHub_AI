@@ -2,7 +2,7 @@
 import { computed, nextTick, onMounted, onUnmounted, ref, watch, type CSSProperties } from 'vue'
 import { ArrowDown, Download, FileText, Image as ImageIcon, Maximize2, MessageCircle, Minimize2, PanelLeftClose, PanelLeftOpen, Paperclip, Pencil, Plus, RefreshCw, Search, Send, Settings, X } from 'lucide-vue-next'
 import { useRouter } from 'vue-router'
-import { ApiError, apiFetch, localizeApiMessage, readCookie, streamJsonLines } from '../api/client'
+import { ApiError, apiFetch, localizeApiMessage, readCookie } from '../api/client'
 import AppSelect from '../components/AppSelect.vue'
 import ChatMessage from '../components/ChatMessage.vue'
 import { useAuthStore } from '../stores/auth'
@@ -15,6 +15,7 @@ import type {
   ConversationSearchResult,
   ImageGenerationSettings,
   Message,
+  SendMessageResponse,
   User
 } from '../types'
 import { copyText } from '../utils/clipboard'
@@ -195,8 +196,11 @@ const imageSettings = ref<ImageGenerationSettings>({
 let scrollFrame: number | null = null
 let activeConversationLoad = 0
 let imagePollingTimer: number | null = null
+let conversationEventSource: EventSource | null = null
+let conversationEventSourceId: string | null = null
 
 const currentConversation = computed(() => conversations.value.find((item) => item.id === currentId.value))
+const currentConversationStreaming = computed(() => messages.value.some((message) => message.status === 'streaming'))
 const recentSearchConversations = computed(() => conversations.value.slice(0, 10))
 const conversationUsage = computed(() => {
   const assistantMessages = messages.value.filter((message) => message.role === 'assistant')
@@ -243,6 +247,8 @@ function messageIsImageGeneration(message: Message) {
 
 function normalizeLoadedMessage(message: Message): Message {
   const progress = message.imageProgress || message.image_progress
+  const startedAt = message.startedAt || message.started_at || undefined
+  const elapsedSeconds = message.elapsedSeconds ?? message.elapsed_seconds
   if (progress && message.status === 'streaming') {
     message.imageProgress = {
       b64Json: progress.b64Json || progress.b64_json || '',
@@ -251,12 +257,18 @@ function normalizeLoadedMessage(message: Message): Message {
       outputFormat: progress.outputFormat || progress.output_format || 'png',
       detail: progress.detail,
       elapsedSeconds: Number(progress.elapsedSeconds ?? progress.elapsed_seconds ?? 0),
-      startedAt: progress.startedAt || progress.started_at || new Date(message.createdAt).getTime(),
+      startedAt: progress.startedAt || progress.started_at || startedAt || new Date(message.createdAt).getTime(),
       phase: progress.phase || 'rendering',
       size: progress.size || imageSettings.value.size
     }
   } else {
     message.imageProgress = undefined
+  }
+  if (message.status === 'streaming') {
+    message.startedAt = startedAt || new Date(message.createdAt).getTime()
+    message.elapsedSeconds = Number(elapsedSeconds ?? 0)
+    message.progressDetail = message.progressDetail || message.progress_detail
+    message.progressPhase = message.progressPhase || message.progress_phase
   }
   return message
 }
@@ -1020,6 +1032,167 @@ function appendStreamText(message: Message, text: string) {
   scheduleScrollToBottom()
 }
 
+function findMessage(messageId?: string | null) {
+  if (!messageId) return undefined
+  return messages.value.find((message) => message.id === messageId)
+}
+
+function upsertMessage(message: Message) {
+  const normalized = normalizeLoadedMessage(message)
+  const existing = findMessage(normalized.id)
+  if (existing) {
+    Object.assign(existing, normalized)
+  } else {
+    messages.value = sortMessagesForDisplay([...messages.value, normalized])
+  }
+  scheduleScrollToBottom()
+}
+
+async function refreshMessageById(messageId?: string | null) {
+  const conversationId = currentId.value
+  if (!conversationId || !messageId) return
+  try {
+    const updated = await apiFetch<Message>(`/conversations/${conversationId}/messages/${messageId}`)
+    if (currentId.value !== conversationId) return
+    upsertMessage(updated)
+    syncActiveRequestState()
+  } catch {
+    // The event may arrive before the transaction is visible; the next snapshot reconciles it.
+  }
+}
+
+function applyConversationEvent(event: string, data: any) {
+  const conversationId = data?.conversation_id || data?.conversationId
+  if (conversationId && currentId.value && conversationId !== currentId.value) return
+  const messageId = data?.message_id || data?.messageId
+  const message = findMessage(messageId)
+  if (event === 'message_delta') {
+    if (!message) {
+      void refreshMessageById(messageId)
+      return
+    }
+    if (typeof data.content === 'string') {
+      message.content = data.content
+    } else {
+      appendStreamText(message, data.text || '')
+    }
+    message.status = 'streaming'
+    message.startedAt = message.startedAt || new Date(message.createdAt).getTime()
+    syncActiveRequestState()
+    scheduleScrollToBottom()
+    return
+  }
+  if (event === 'message_snapshot') {
+    if (!message) {
+      void refreshMessageById(messageId)
+      return
+    }
+    if (typeof data.content === 'string') message.content = data.content
+    if (data.status) message.status = data.status
+    message.startedAt = message.startedAt || new Date(message.createdAt).getTime()
+    message.elapsedSeconds = Number(data.elapsed_seconds ?? data.elapsedSeconds ?? message.elapsedSeconds ?? 0)
+    syncActiveRequestState()
+    return
+  }
+  if (event === 'message_started') {
+    if (message) {
+      message.status = 'streaming'
+      message.startedAt = message.startedAt || new Date(message.createdAt).getTime()
+      syncActiveRequestState()
+    } else {
+      void refreshMessageById(messageId)
+    }
+    return
+  }
+  if (event === 'usage') {
+    if (message) {
+      message.promptTokens = Number(data.prompt_tokens || data.promptTokens || message.promptTokens || 0)
+      message.completionTokens = Number(data.completion_tokens || data.completionTokens || message.completionTokens || 0)
+      message.totalTokens = Number(data.total_tokens || data.totalTokens || message.totalTokens || 0)
+      message.tokensSource = data.tokens_source || data.tokensSource || message.tokensSource
+    }
+    const actualPrompt = Number(data.prompt_tokens || data.promptTokens || 0)
+    if (actualPrompt > 0) {
+      contextStats.value = {
+        ...contextStats.value,
+        promptTokensEstimated: actualPrompt,
+        tokensSource: 'actual'
+      }
+    }
+    return
+  }
+  if (event === 'message_completed' || event === 'message_failed') {
+    if (message) {
+      message.status = data.status || (event === 'message_completed' ? 'completed' : 'failed_no_output')
+      if (typeof data.content === 'string') message.content = data.content
+      if (message.status !== 'streaming') message.imageProgress = undefined
+    }
+    syncActiveRequestState()
+    void refreshMessageById(messageId)
+    void loadConversations()
+    void loadContextStats()
+    return
+  }
+  if (event === 'context') {
+    updateContextStats(data, 'estimated')
+  }
+}
+
+function stopConversationEvents() {
+  if (!conversationEventSource) return
+  conversationEventSource.close()
+  conversationEventSource = null
+  conversationEventSourceId = null
+}
+
+async function reloadCurrentConversationMessages(conversationId: string) {
+  const loadId = ++activeConversationLoad
+  try {
+    const loadedMessages = sortMessagesForDisplay(
+      (await apiFetch<Message[]>(`/conversations/${conversationId}/messages`)).map(normalizeLoadedMessage)
+    )
+    if (loadId !== activeConversationLoad || currentId.value !== conversationId) return
+    messages.value = loadedMessages
+    syncActiveRequestState()
+    syncImagePolling()
+    syncConversationEvents()
+    await loadContextStats()
+  } catch {
+    // Keep the current view; EventSource reconnect and later snapshots can fix it.
+  }
+}
+
+function syncConversationEvents() {
+  const conversationId = currentId.value
+  if (!conversationId) {
+    stopConversationEvents()
+    return
+  }
+  if (conversationEventSource && conversationEventSourceId === conversationId) return
+  stopConversationEvents()
+  conversationEventSourceId = conversationId
+  const source = new EventSource(`/api/conversations/${conversationId}/events`, { withCredentials: true })
+  conversationEventSource = source
+  const eventNames = ['message_started', 'message_delta', 'message_snapshot', 'message_completed', 'message_failed', 'usage', 'context']
+  for (const eventName of eventNames) {
+    source.addEventListener(eventName, (event) => {
+      try {
+        applyConversationEvent(eventName, JSON.parse((event as MessageEvent).data || '{}'))
+      } catch {
+        // Ignore malformed event payloads; the next snapshot will reconcile.
+      }
+    })
+  }
+  source.onerror = () => {
+    if (conversationEventSource !== source) return
+    window.setTimeout(() => {
+      if (conversationEventSource === source && currentId.value === conversationId) {
+        void reloadCurrentConversationMessages(conversationId)
+      }
+    }, 5000)
+  }
+}
+
 function cancelPendingStreamFlush() {
   // Stream chunks are applied directly as they arrive; nothing is buffered.
 }
@@ -1032,6 +1205,10 @@ function cancelPendingScroll() {
   if (scrollFrame === null) return
   window.cancelAnimationFrame(scrollFrame)
   scrollFrame = null
+}
+
+function syncActiveRequestState() {
+  streaming.value = messages.value.some((message) => message.status === 'streaming')
 }
 
 function stopImagePolling() {
@@ -1087,6 +1264,7 @@ function newChat() {
   cancelPendingScroll()
   cancelPendingStreamFlush()
   stopImagePolling()
+  stopConversationEvents()
   currentId.value = null
   window.localStorage.removeItem(CURRENT_CONVERSATION_STORAGE_KEY)
   messages.value = []
@@ -1094,6 +1272,7 @@ function newChat() {
   showScrollToBottom.value = false
   userHasScrolledUp = false
   error.value = ''
+  streaming.value = false
 }
 
 async function loadConversations() {
@@ -1162,7 +1341,9 @@ async function openConversation(id: string, focusMessageId?: string | null) {
     )
     if (loadId !== activeConversationLoad) return
     messages.value = loadedMessages
+    syncActiveRequestState()
     syncImagePolling()
+    syncConversationEvents()
     await loadContextStats()
     if (focusMessageId) {
       await scrollToMessage(focusMessageId)
@@ -1202,7 +1383,7 @@ async function openRecentConversation(conversation: Conversation) {
 }
 
 function openRenameConversation(conversation: Conversation) {
-  if (streaming.value) return
+  if (conversation.id === currentId.value && currentConversationStreaming.value) return
   renamingConversationId.value = conversation.id
   renameDraft.value = conversation.title
   renameError.value = ''
@@ -1244,7 +1425,7 @@ async function saveConversationTitle() {
 }
 
 async function deleteConversation(conversation: Conversation) {
-  if (deletingConversationId.value || streaming.value) return
+  if (deletingConversationId.value || (conversation.id === currentId.value && currentConversationStreaming.value)) return
   deletingConversationId.value = conversation.id
   try {
     await apiFetch(`/conversations/${conversation.id}`, { method: 'DELETE' })
@@ -1369,164 +1550,95 @@ function handleComposerDrop(event: DragEvent) {
 }
 
 async function send() {
-  if ((!input.value.trim() && !pendingAttachments.value.length) || streaming.value) return
+  if ((!input.value.trim() && !pendingAttachments.value.length) || currentConversationStreaming.value) return
   const isImageGeneration = selectedModelIsImageGeneration()
   if (isImageGeneration && pendingAttachments.value.length) {
-    error.value = '图像生成模型暂不支持同时发送附件，请只输入提示词。'
+    error.value = '?????????????????????????'
     return
   }
   if (pendingAttachments.value.some(isImageAttachment) && !selectedModelSupportsVision()) {
-    error.value = '当前模型不支持图片理解，请切换到支持视觉的模型后再发送图片。'
+    error.value = '??????????????????????????????'
     return
   }
   cancelPendingScroll()
   userHasScrolledUp = false
   error.value = ''
-  streaming.value = true
   const userText = input.value
   const outgoingAttachments = [...pendingAttachments.value]
   const attachmentIds = pendingAttachments.value.map((item) => item.id)
   input.value = ''
   pendingAttachments.value = []
-  messages.value.push({
-    id: `local-${Date.now()}`,
-    conversationId: currentId.value || 'new',
+  const draftConversationId = currentId.value || 'new'
+  const draftUserId = `local-${Date.now()}`
+  const draftAssistantId = `stream-${Date.now()}`
+  const nowIso = new Date().toISOString()
+  const userDraft: Message = {
+    id: draftUserId,
+    conversationId: draftConversationId,
     role: 'user',
     content: userText,
     status: 'completed',
     totalTokens: 0,
     attachments: outgoingAttachments,
-    createdAt: new Date().toISOString()
-  })
+    createdAt: nowIso
+  }
   const assistantDraft: Message = {
-    id: `stream-${Date.now()}`,
-    conversationId: currentId.value || 'new',
+    id: draftAssistantId,
+    conversationId: draftConversationId,
     role: 'assistant',
-    content: isImageGeneration ? '正在生成图片' : '',
+    content: isImageGeneration ? '??????' : '',
     status: 'streaming',
     totalTokens: 0,
-    createdAt: new Date().toISOString()
+    createdAt: nowIso,
+    startedAt: Date.now(),
+    elapsedSeconds: 0
   }
-  messages.value.push(assistantDraft)
-  const assistant = messages.value[messages.value.length - 1]
+  messages.value = sortMessagesForDisplay([...messages.value, userDraft, assistantDraft])
+  syncActiveRequestState()
   await scrollMessagesToBottom('smooth')
   const path = currentId.value ? `/conversations/${currentId.value}/messages` : '/conversations/new/messages'
   try {
-    await streamJsonLines(
-      path,
-      {
+    const result = await apiFetch<SendMessageResponse>(path, {
+      method: 'POST',
+      body: JSON.stringify({
         content: userText,
         model: selectedModel.value,
         attachmentIds,
         referencedAttachmentIds: attachmentIds,
         reasoningEffort: reasoningEffort.value
-      },
-      async (event, data) => {
-        if (event === 'conversation_created') {
-          const newId = data.conversation_id || data.conversationId
-          currentId.value = newId
-          assistant.conversationId = newId
-          window.localStorage.setItem(CURRENT_CONVERSATION_STORAGE_KEY, newId)
-          await loadConversations()
-        } else if (event === 'token') {
-          appendStreamText(assistant, data.text || '')
-        } else if (event === 'image_status') {
-          assistant.content = data.text || '正在生成图片'
-          assistant.imageProgress = {
-            b64Json: assistant.imageProgress?.b64Json || '',
-            index: assistant.imageProgress?.index || 0,
-            total: assistant.imageProgress?.total || 1,
-            outputFormat: assistant.imageProgress?.outputFormat || 'png',
-            detail: data.detail || '正在等待模型返回图片进度。',
-            elapsedSeconds: Number(data.elapsed_seconds ?? data.elapsedSeconds ?? assistant.imageProgress?.elapsedSeconds ?? 0),
-            startedAt: assistant.imageProgress?.startedAt || Date.now(),
-            phase: data.phase || assistant.imageProgress?.phase || 'submitted',
-            size: data.size || assistant.imageProgress?.size || imageSettings.value.size
-          }
-          scheduleScrollToBottom()
-        } else if (event === 'image_progress') {
-          assistant.content = '正在生成图片'
-          assistant.imageProgress = {
-            b64Json: data.b64_json || data.b64Json || '',
-            index: Number(data.index || 1),
-            total: Number(data.total || 1),
-            outputFormat: data.output_format || data.outputFormat || 'png',
-            detail: `已收到图像结果 ${Number(data.index || 1)}/${Number(data.total || 1)}，继续等待最终保存。`,
-            elapsedSeconds: assistant.imageProgress?.elapsedSeconds,
-            startedAt: assistant.imageProgress?.startedAt || Date.now(),
-            phase: 'partial',
-            size: data.size || assistant.imageProgress?.size || imageSettings.value.size
-          }
-          scheduleScrollToBottom()
-        } else if (event === 'image_completed') {
-          if (data.attachment) {
-            assistant.attachments = [data.attachment]
-            assistant.generatedImageSize = assistant.imageProgress?.size || imageSettings.value.size
-            assistant.imageProgress = undefined
-            assistant.content = '已根据提示词生成图片。'
-          }
-          scheduleScrollToBottom()
-        } else if (event === 'context') {
-          updateContextStats(data, 'estimated')
-        } else if (event === 'usage') {
-          assistant.totalTokens = data.total_tokens || data.totalTokens || 0
-          // Prefer actual prompt tokens from API over the earlier estimate.
-          // This prevents the context meter from jumping when loadContextStats
-          // recalculates with a different token count after the stream ends.
-          const actualPrompt = Number(data.prompt_tokens || data.promptTokens || 0)
-          if (actualPrompt > 0) {
-            contextStats.value = {
-              ...contextStats.value,
-              promptTokensEstimated: actualPrompt,
-              tokensSource: 'actual'
-            }
-          }
-        } else if (event === 'done') {
-          await waitForStreamFlush()
-          assistant.id = data.message_id || data.messageId
-          if (currentId.value) {
-            const generatedImageSize = assistant.generatedImageSize || assistant.imageProgress?.size
-            const canonical = normalizeLoadedMessage(await apiFetch<Message>(`/conversations/${currentId.value}/messages/${assistant.id}`))
-            const typedContent = assistant.content
-            const canonicalContent = canonical.content || ''
-            Object.assign(assistant, { ...canonical, content: typedContent.trim() ? typedContent : canonicalContent })
-            if (generatedImageSize) assistant.generatedImageSize = generatedImageSize
-            if (assistant.status !== 'streaming') assistant.imageProgress = undefined
-          }
-          if (!assistant.content.trim() && typeof data.content === 'string') assistant.content = data.content
-          if (assistant.status === 'streaming' || data.status === 'completed') {
-            assistant.status = data.status || 'completed'
-          }
-          await scrollMessagesToBottom('smooth')
-          await loadConversations()
-          await loadContextStats()
-        } else if (event === 'error') {
-          cancelPendingStreamFlush()
-          cancelPendingScroll()
-          assistant.status = 'failed_partial'
-          error.value = localizeApiMessage(data.code, data.message || data.code)
-          assistant.content = error.value
-          await scrollMessagesToBottom('smooth')
-          await loadContextStats()
-        }
-      }
-    )
+      })
+    })
+    const newConversationId = result.conversationId || result.conversation_id
+    const userMessage = result.userMessage || result.user_message
+    const assistantMessage = result.assistantMessage || result.assistant_message
+    if (newConversationId) {
+      currentId.value = newConversationId
+      window.localStorage.setItem(CURRENT_CONVERSATION_STORAGE_KEY, newConversationId)
+    }
+    messages.value = messages.value.filter((message) => message.id !== draftUserId && message.id !== draftAssistantId)
+    if (userMessage) upsertMessage(userMessage)
+    if (assistantMessage) upsertMessage(assistantMessage)
+    syncActiveRequestState()
+    syncConversationEvents()
+    syncImagePolling()
+    await loadConversations()
+    await loadContextStats()
   } catch (err) {
-    cancelPendingStreamFlush()
     cancelPendingScroll()
     const apiErr = err instanceof ApiError ? err : null
     const message =
       apiErr?.code === 'INVALID_CREDENTIALS'
-        ? '登录已失效或密钥无效，请重新登录或到设置中更新密钥'
-        : apiErr?.message || (err instanceof Error ? err.message : '请求失败')
-    assistant.content = message
-    assistant.status = 'failed_no_output'
+        ? '?????????????????????????'
+        : apiErr?.message || (err instanceof Error ? err.message : '????')
+    const assistant = findMessage(draftAssistantId)
+    if (assistant) {
+      assistant.content = message
+      assistant.status = 'failed_no_output'
+    }
     error.value = message
+    syncActiveRequestState()
     await scrollMessagesToBottom('smooth')
     if (apiErr?.code === 'INVALID_CREDENTIALS') await auth.loadMe().catch(() => router.push('/login'))
-  } finally {
-    streaming.value = false
-    syncImagePolling()
   }
 }
 
@@ -1575,6 +1687,7 @@ onMounted(async () => {
 
 onUnmounted(() => {
   stopImagePolling()
+  stopConversationEvents()
   cancelPendingScroll()
 })
 </script>
@@ -1644,7 +1757,7 @@ onUnmounted(() => {
               type="button"
               title="修改名称"
               aria-label="修改名称"
-              :disabled="streaming"
+              :disabled="conversation.id === currentId && currentConversationStreaming"
               @click.stop="openRenameConversation(conversation)"
             >
               <Pencil :size="14" />
@@ -1654,7 +1767,7 @@ onUnmounted(() => {
               type="button"
               title="删除对话"
               aria-label="删除对话"
-              :disabled="deletingConversationId === conversation.id || streaming"
+              :disabled="deletingConversationId === conversation.id || (conversation.id === currentId && currentConversationStreaming)"
               @click.stop="deleteConversation(conversation)"
             >
               <X :size="15" />
@@ -1732,7 +1845,7 @@ onUnmounted(() => {
             type="button"
             title="修改对话名称"
             aria-label="修改对话名称"
-            :disabled="streaming"
+            :disabled="currentConversationStreaming"
             @click.stop="openRenameConversation(currentConversation)"
           >
             <Pencil :size="13" />
@@ -1858,7 +1971,7 @@ onUnmounted(() => {
             </div>
 
             <div class="composer-right-tools">
-              <button class="send-button" type="submit" :disabled="streaming || (!input.trim() && !pendingAttachments.length)" title="发送" aria-label="发送">
+              <button class="send-button" type="submit" :disabled="currentConversationStreaming || (!input.trim() && !pendingAttachments.length)" title="发送" aria-label="发送">
                 <Send :size="18" />
               </button>
             </div>

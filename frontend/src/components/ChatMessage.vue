@@ -64,6 +64,17 @@ const generatedImageElapsed = computed(() => {
   const rest = Math.floor(seconds % 60)
   return `${minutes} 分 ${String(rest).padStart(2, '0')} 秒`
 })
+const streamingElapsed = computed(() => {
+  if (props.message.status !== 'streaming' || props.message.imageProgress) return ''
+  const startedAt = props.message.startedAt || props.message.started_at
+  const baseElapsed = props.message.elapsedSeconds ?? props.message.elapsed_seconds ?? 0
+  const seconds = startedAt ? Math.max(baseElapsed || 0, Math.floor((nowMs.value - startedAt) / 1000)) : baseElapsed
+  if (!Number.isFinite(seconds) || seconds === undefined) return ''
+  if (seconds < 60) return `${Math.max(0, Math.floor(seconds))} 秒`
+  const minutes = Math.floor(seconds / 60)
+  const rest = Math.floor(seconds % 60)
+  return `${minutes} 分 ${String(rest).padStart(2, '0')} 秒`
+})
 const generatedImageProgressLabel = computed(() => {
   const progress = props.message.imageProgress
   if (!progress) return '等待模型响应'
@@ -187,7 +198,7 @@ watch(
 )
 
 watch(
-  () => Boolean(props.message.imageProgress && props.message.status === 'streaming'),
+  () => Boolean(props.message.status === 'streaming' && (props.message.imageProgress || props.message.startedAt || props.message.started_at)),
   (active) => {
     if (progressTimer !== null) {
       window.clearInterval(progressTimer)
@@ -329,6 +340,7 @@ onUnmounted(() => {
               <div v-if="shouldRenderStreamingPlainText" class="streaming-plain-message">{{ message.content }}</div>
               <MarkdownMessage v-else :content="message.content" />
               <span v-if="message.status === 'streaming'" class="typing-cursor" />
+              <div v-if="streamingElapsed" class="streaming-elapsed">已运行 {{ streamingElapsed }}</div>
             </div>
           </div>
         </template>
