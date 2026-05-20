@@ -1,6 +1,6 @@
 <script setup lang="ts">
 import { computed, ref, watch, type CSSProperties } from 'vue'
-import { ChevronDown, ChevronUp, FileText } from 'lucide-vue-next'
+import { ChevronDown, ChevronUp, Download, FileText } from 'lucide-vue-next'
 import MarkdownMessage from './MarkdownMessage.vue'
 import type { Attachment, Message } from '../types'
 
@@ -42,6 +42,13 @@ const collapsibleClasses = computed(() => ({
 }))
 const imageAttachments = computed(() => (props.message.attachments || []).filter(isImageAttachment))
 const fileAttachments = computed(() => (props.message.attachments || []).filter((attachment) => !isImageAttachment(attachment)))
+const showGeneratedImageProgress = computed(() => props.message.role === 'assistant' && props.message.status === 'streaming' && props.message.imageProgress)
+const generatedImageProgressSrc = computed(() => {
+  const progress = props.message.imageProgress
+  if (!progress?.b64Json) return ''
+  const format = progress.outputFormat === 'jpeg' ? 'jpeg' : progress.outputFormat || 'png'
+  return `data:image/${format};base64,${progress.b64Json}`
+})
 
 function isImageAttachment(item: Attachment) {
   return item.mimeSniffed?.startsWith('image/')
@@ -49,6 +56,10 @@ function isImageAttachment(item: Attachment) {
 
 function attachmentPreviewUrl(id: string) {
   return `/api/attachments/${id}/preview`
+}
+
+function attachmentDownloadUrl(id: string) {
+  return `/api/attachments/${id}/download`
 }
 
 function imageCardLayout(width: number, height: number) {
@@ -188,6 +199,35 @@ watch(
             </button>
           </div>
         </template>
+        <div v-else-if="showGeneratedImageProgress" class="generated-image-progress">
+          <button class="generated-image-preview" type="button">
+            <img v-if="generatedImageProgressSrc" :src="generatedImageProgressSrc" alt="生成中的图片" />
+            <span v-else class="generated-image-placeholder">正在生成图片</span>
+          </button>
+          <div class="generated-image-meta">
+            <strong>正在生成图片</strong>
+            <span>进度图 {{ message.imageProgress?.index || 1 }}/{{ message.imageProgress?.total || 2 }}</span>
+          </div>
+        </div>
+        <div v-else-if="imageAttachments.length" class="message-generated-images">
+          <div v-for="attachment in imageAttachments" :key="attachment.id" class="message-generated-image-stack">
+            <button
+              class="message-image-card is-large"
+              :class="imageCardClass(attachment)"
+              :style="imageCardStyle(attachment)"
+              type="button"
+              :title="`查看图片：${attachment.filename}`"
+              :aria-label="`查看图片：${attachment.filename}`"
+              @click="emit('previewAttachment', attachment)"
+            >
+              <img :src="attachmentPreviewUrl(attachment.id)" :alt="attachment.filename" @load="handleImageLoad(attachment, $event)" />
+            </button>
+            <a class="generated-image-download" :href="attachmentDownloadUrl(attachment.id)" target="_blank" rel="noreferrer">
+              <Download :size="15" />
+              下载
+            </a>
+          </div>
+        </div>
         <div v-else-if="isLiveDraft && !message.content" class="thinking-panel">
           <div class="thinking-label">正在思考</div>
           <div class="thinking-bars" aria-hidden="true">

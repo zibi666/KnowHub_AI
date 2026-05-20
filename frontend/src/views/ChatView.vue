@@ -6,11 +6,21 @@ import { ApiError, apiFetch, localizeApiMessage, readCookie, streamJsonLines } f
 import AppSelect from '../components/AppSelect.vue'
 import ChatMessage from '../components/ChatMessage.vue'
 import { useAuthStore } from '../stores/auth'
-import type { ApiKeyEntry, ApiKeyGroup, Attachment, AttachmentChunkPreview, Conversation, ConversationSearchResult, Message, User } from '../types'
+import type {
+  ApiKeyEntry,
+  ApiKeyGroup,
+  Attachment,
+  AttachmentChunkPreview,
+  Conversation,
+  ConversationSearchResult,
+  ImageGenerationSettings,
+  Message,
+  User
+} from '../types'
 import { copyText } from '../utils/clipboard'
 
 type ThemeMode = 'dark' | 'light'
-type SettingsTab = 'appearance' | 'api' | 'groups' | 'account'
+type SettingsTab = 'appearance' | 'image' | 'api' | 'groups' | 'account'
 
 const bubbleOptions = [
   { value: 'blue', label: '蓝色', bg: '#075a9f', hover: '#0b65b8', shadow: 'rgba(0,78,150,0.25)' },
@@ -53,6 +63,32 @@ const themeOptions: Array<{ value: ThemeMode; label: string }> = [
 const textSizeMenuOptions = textSizeOptions.map((size) => ({ value: size, label: `${size} px` }))
 const codeSizeMenuOptions = codeSizeOptions.map((size) => ({ value: size, label: `${size} px` }))
 const welcomeSizeMenuOptions = welcomeSizeOptions.map((size) => ({ value: size, label: `${size} px` }))
+const imageSizeOptions = [
+  { value: '1024x1024', label: '1024 x 1024' },
+  { value: '1024x1536', label: '1024 x 1536' },
+  { value: '1536x1024', label: '1536 x 1024' },
+  { value: 'auto', label: '自动' }
+]
+const imageQualityOptions = [
+  { value: 'high', label: '高' },
+  { value: 'medium', label: '中' },
+  { value: 'low', label: '低' },
+  { value: 'auto', label: '自动' }
+]
+const imageBackgroundOptions = [
+  { value: 'auto', label: '自动' },
+  { value: 'opaque', label: '不透明' },
+  { value: 'transparent', label: '透明' }
+]
+const imageFormatOptions = [
+  { value: 'png', label: 'PNG' },
+  { value: 'jpeg', label: 'JPEG' },
+  { value: 'webp', label: 'WebP' }
+]
+const imageModerationOptions = [
+  { value: 'auto', label: '自动' },
+  { value: 'low', label: '低' }
+]
 
 const auth = useAuthStore()
 const router = useRouter()
@@ -144,6 +180,16 @@ const profilePassword = ref('')
 const currentPassword = ref('')
 const replacementPassword = ref('')
 const avatarUploading = ref(false)
+const imageSettingsLoading = ref(false)
+const imageSettingsSaving = ref(false)
+const imageSettings = ref<ImageGenerationSettings>({
+  size: '1024x1024',
+  quality: 'high',
+  background: 'auto',
+  outputFormat: 'png',
+  outputCompression: 100,
+  moderation: 'auto'
+})
 
 let scrollFrame: number | null = null
 let activeConversationLoad = 0
@@ -181,6 +227,23 @@ function isImageAttachment(item: Attachment) {
 function selectedModelSupportsVision() {
   const model = (selectedModel.value || '').toLowerCase()
   return VISION_MODEL_HINTS.some((hint) => model.includes(hint))
+}
+
+function selectedModelIsImageGeneration() {
+  return ['image-2', 'image-1.5', 'image-1', 'gpt-image-2', 'gpt-image-1.5', 'gpt-image-1'].includes(
+    (selectedModel.value || '').toLowerCase()
+  )
+}
+
+function normalizeImageSettings(data: any): ImageGenerationSettings {
+  return {
+    size: data?.size || '1024x1024',
+    quality: data?.quality || 'high',
+    background: data?.background || 'auto',
+    outputFormat: data?.outputFormat || data?.output_format || 'png',
+    outputCompression: Number(data?.outputCompression ?? data?.output_compression ?? 100),
+    moderation: data?.moderation || 'auto'
+  }
 }
 
 function attachmentPreviewUrl(id: string) {
@@ -602,6 +665,33 @@ async function loadApiSettings() {
   }
 }
 
+async function loadImageSettings() {
+  imageSettingsLoading.value = true
+  try {
+    imageSettings.value = normalizeImageSettings(await apiFetch('/settings/image-generation'))
+  } catch (err) {
+    settingsError.value = err instanceof Error ? err.message : '加载图像生成设置失败'
+  } finally {
+    imageSettingsLoading.value = false
+  }
+}
+
+async function saveImageSettings() {
+  resetSettingsMessages()
+  imageSettingsSaving.value = true
+  try {
+    imageSettings.value = normalizeImageSettings(await apiFetch('/settings/image-generation', {
+      method: 'PATCH',
+      body: JSON.stringify(imageSettings.value)
+    }))
+    settingsNotice.value = '图像生成设置已保存'
+  } catch (err) {
+    settingsError.value = err instanceof Error ? err.message : '保存图像生成设置失败'
+  } finally {
+    imageSettingsSaving.value = false
+  }
+}
+
 async function openSettings(tab: SettingsTab = 'appearance') {
   const targetTab = tab === 'groups' && auth.user?.role !== 'admin' ? 'appearance' : tab
   settingsMenuOpen.value = false
@@ -610,6 +700,7 @@ async function openSettings(tab: SettingsTab = 'appearance') {
   profileUsername.value = auth.user?.username || ''
   resetSettingsMessages()
   if (targetTab === 'api' || targetTab === 'groups') await loadApiSettings()
+  if (targetTab === 'image') await loadImageSettings()
 }
 
 function toggleSettingsMenu() {
@@ -660,6 +751,7 @@ async function selectSettingsTab(tab: SettingsTab) {
   resetSettingsMessages()
   if ((tab === 'api' || tab === 'groups') && !apiKeys.value.length && !apiKeyGroups.value.length) await loadApiSettings()
   if (tab === 'groups') await loadGroupKeys(selectedGroupId.value)
+  if (tab === 'image') await loadImageSettings()
 }
 
 async function createApiKey() {
@@ -1197,6 +1289,11 @@ function handleComposerDrop(event: DragEvent) {
 
 async function send() {
   if ((!input.value.trim() && !pendingAttachments.value.length) || streaming.value) return
+  const isImageGeneration = selectedModelIsImageGeneration()
+  if (isImageGeneration && pendingAttachments.value.length) {
+    error.value = '图像生成模型暂不支持同时发送附件，请只输入提示词。'
+    return
+  }
   if (pendingAttachments.value.some(isImageAttachment) && !selectedModelSupportsVision()) {
     error.value = '当前模型不支持图片理解，请切换到支持视觉的模型后再发送图片。'
     return
@@ -1224,7 +1321,7 @@ async function send() {
     id: `stream-${Date.now()}`,
     conversationId: currentId.value || 'new',
     role: 'assistant',
-    content: '',
+    content: isImageGeneration ? '正在生成图片' : '',
     status: 'streaming',
     totalTokens: 0,
     createdAt: new Date().toISOString()
@@ -1251,6 +1348,24 @@ async function send() {
           await loadConversations()
         } else if (event === 'token') {
           appendStreamText(assistant, data.text || '')
+        } else if (event === 'image_status') {
+          assistant.content = data.text || '正在生成图片'
+        } else if (event === 'image_progress') {
+          assistant.content = '正在生成图片'
+          assistant.imageProgress = {
+            b64Json: data.b64_json || data.b64Json || '',
+            index: Number(data.index || 1),
+            total: Number(data.total || 2),
+            outputFormat: data.output_format || data.outputFormat || 'png'
+          }
+          scheduleScrollToBottom()
+        } else if (event === 'image_completed') {
+          if (data.attachment) {
+            assistant.attachments = [data.attachment]
+            assistant.imageProgress = undefined
+            assistant.content = '已根据提示词生成图片。'
+          }
+          scheduleScrollToBottom()
         } else if (event === 'context') {
           updateContextStats(data, 'estimated')
         } else if (event === 'usage') {
@@ -1274,6 +1389,7 @@ async function send() {
             const typedContent = assistant.content
             const canonicalContent = canonical.content || ''
             Object.assign(assistant, { ...canonical, content: typedContent.trim() ? typedContent : canonicalContent })
+            assistant.imageProgress = undefined
           }
           if (!assistant.content.trim() && typeof data.content === 'string') assistant.content = data.content
           assistant.status = data.status || 'completed'
@@ -1647,6 +1763,7 @@ onMounted(async () => {
               <div class="settings-modal-user">{{ auth.user?.username }}</div>
             </div>
             <button class="settings-tab-button" :class="{ active: settingsTab === 'appearance' }" @click="selectSettingsTab('appearance')">个性化</button>
+            <button class="settings-tab-button" :class="{ active: settingsTab === 'image' }" @click="selectSettingsTab('image')">图像生成</button>
             <button class="settings-tab-button" :class="{ active: settingsTab === 'api' }" @click="selectSettingsTab('api')">API 管理</button>
             <button v-if="auth.user?.role === 'admin'" class="settings-tab-button" :class="{ active: settingsTab === 'groups' }" @click="selectSettingsTab('groups')">分组管理</button>
             <button class="settings-tab-button" :class="{ active: settingsTab === 'account' }" @click="selectSettingsTab('account')">账号安全</button>
@@ -1742,6 +1859,87 @@ onMounted(async () => {
                     />
                   </label>
                 </div>
+              </section>
+
+              <section v-else-if="settingsTab === 'image'" key="image" class="settings-pane">
+                <div class="settings-pane-heading">
+                  <h2>图像生成</h2>
+                  <p>配置 image-2、image-1.5、image-1 的默认生成参数。</p>
+                </div>
+                <form class="settings-card" @submit.prevent="saveImageSettings">
+                  <div v-if="imageSettingsLoading" class="settings-empty">正在加载图像设置...</div>
+                  <div v-else class="settings-grid">
+                    <label class="settings-field">
+                      <span>尺寸</span>
+                      <AppSelect
+                        v-model="imageSettings.size"
+                        class="settings-select"
+                        button-class="settings-select-button"
+                        menu-class="settings-select-menu"
+                        option-class="settings-select-option"
+                        :options="imageSizeOptions"
+                      />
+                    </label>
+                    <label class="settings-field">
+                      <span>质量</span>
+                      <AppSelect
+                        v-model="imageSettings.quality"
+                        class="settings-select"
+                        button-class="settings-select-button"
+                        menu-class="settings-select-menu"
+                        option-class="settings-select-option"
+                        :options="imageQualityOptions"
+                      />
+                    </label>
+                    <label class="settings-field">
+                      <span>背景</span>
+                      <AppSelect
+                        v-model="imageSettings.background"
+                        class="settings-select"
+                        button-class="settings-select-button"
+                        menu-class="settings-select-menu"
+                        option-class="settings-select-option"
+                        :options="imageBackgroundOptions"
+                      />
+                    </label>
+                    <label class="settings-field">
+                      <span>格式</span>
+                      <AppSelect
+                        v-model="imageSettings.outputFormat"
+                        class="settings-select"
+                        button-class="settings-select-button"
+                        menu-class="settings-select-menu"
+                        option-class="settings-select-option"
+                        :options="imageFormatOptions"
+                      />
+                    </label>
+                    <label class="settings-field">
+                      <span>压缩质量</span>
+                      <input
+                        v-model.number="imageSettings.outputCompression"
+                        class="settings-input"
+                        type="number"
+                        min="0"
+                        max="100"
+                        :disabled="imageSettings.outputFormat === 'png'"
+                      />
+                    </label>
+                    <label class="settings-field">
+                      <span>审核强度</span>
+                      <AppSelect
+                        v-model="imageSettings.moderation"
+                        class="settings-select"
+                        button-class="settings-select-button"
+                        menu-class="settings-select-menu"
+                        option-class="settings-select-option"
+                        :options="imageModerationOptions"
+                      />
+                    </label>
+                  </div>
+                  <button class="settings-primary" type="submit" :disabled="imageSettingsLoading || imageSettingsSaving">
+                    {{ imageSettingsSaving ? '保存中...' : '保存图像设置' }}
+                  </button>
+                </form>
               </section>
 
               <section v-else-if="settingsTab === 'api'" key="api" class="settings-pane">

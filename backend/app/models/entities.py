@@ -99,6 +99,7 @@ class UserQuota(Base, TimestampMixin):
     allow_code_upload: Mapped[bool] = mapped_column(Boolean, default=True, nullable=False)
     model_whitelist_json: Mapped[list | None] = mapped_column(JSON, nullable=True)
     default_model: Mapped[str | None] = mapped_column(String(100), nullable=True)
+    image_settings_json: Mapped[dict | None] = mapped_column(JSON, nullable=True)
     auto_compaction_enabled: Mapped[bool] = mapped_column(Boolean, default=True, nullable=False)
 
     user: Mapped[User] = relationship(back_populates="quota")

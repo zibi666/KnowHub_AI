@@ -31,6 +31,12 @@ export interface Message {
   tokensSource?: string
   createdAt: string
   attachments?: Attachment[]
+  imageProgress?: {
+    b64Json: string
+    index: number
+    total: number
+    outputFormat: string
+  }
 }
 
 export interface ConversationSearchResult {
@@ -54,6 +60,15 @@ export interface Attachment {
   embeddingStatus?: string | null
   previewText?: string | null
   createdAt?: string
+}
+
+export interface ImageGenerationSettings {
+  size: string
+  quality: string
+  background: string
+  outputFormat: string
+  outputCompression: number
+  moderation: string
 }
 
 export interface AttachmentChunkPreview {

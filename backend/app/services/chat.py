@@ -32,6 +32,13 @@ from app.services.api_keys import get_active_api_key
 from app.services.compaction import compact_conversation
 from app.services.context import build_context_bundle, build_current_message_branch, build_message_branch
 from app.services.dead_letters import push_dead_letter
+from app.services.image_generation import (
+    filter_available_models_for_request,
+    image_generation_stream,
+    image_model_is_available,
+    is_image_generation_model,
+    save_generated_image_attachment,
+)
 from app.services.usage import record_usage
 
 DEFAULT_CHAT_MODEL = "gpt-5.5"
@@ -76,6 +83,22 @@ def preferred_model(models: list[str], configured: str | None) -> str:
         if DEFAULT_CHAT_MODEL.lower() in model.lower():
             return model
     return models[0] if models else DEFAULT_CHAT_MODEL
+
+
+def attachment_event_data(attachment: Attachment) -> dict:
+    return {
+        "id": attachment.id,
+        "filename": attachment.filename,
+        "mimeSniffed": attachment.mime_sniffed,
+        "sizeBytes": attachment.size_bytes,
+        "parseStatus": attachment.parse_status,
+        "parseError": attachment.parse_error,
+        "contextTextTokens": attachment.context_text_tokens,
+        "chunkCount": 0,
+        "embeddingStatus": None,
+        "previewText": None,
+        "createdAt": attachment.created_at.isoformat() if attachment.created_at else datetime.utcnow().isoformat(),
+    }
 
 
 def model_supports_vision(model: str | None) -> bool:
@@ -146,13 +169,15 @@ async def stream_chat(user_id: str, payload: SendMessageRequest, conversation_id
             yield json_line("error", {"code": "KEY_REQUIRED", "message": "请先绑定模型 API Key", "retryable": False})
             return
         available_models = api_key_row.available_models_json or []
-        if quota and quota.model_whitelist_json:
-            available_models = [item for item in available_models if item in quota.model_whitelist_json]
+        available_models = filter_available_models_for_request(
+            available_models,
+            quota.model_whitelist_json if quota else None,
+        )
         model = model or preferred_model(available_models, quota.default_model if quota else None)
-        if quota and quota.model_whitelist_json and model not in quota.model_whitelist_json:
+        if quota and quota.model_whitelist_json and not image_model_is_available(model, quota.model_whitelist_json):
             yield json_line("error", {"code": "MODEL_NOT_AVAILABLE", "message": "当前模型不在管理员允许范围内", "retryable": False})
             return
-        if api_key_row.available_models_json and model not in available_models:
+        if api_key_row.available_models_json and not image_model_is_available(model, available_models):
             yield json_line("error", {"code": "MODEL_NOT_AVAILABLE", "message": "当前 API Key 不支持该模型", "retryable": False})
             return
         if conversation_id is None:
@@ -260,6 +285,18 @@ async def stream_chat(user_id: str, payload: SendMessageRequest, conversation_id
 
     if created_conversation_id:
         yield json_line("conversation_created", {"conversation_id": created_conversation_id})
+
+    if is_image_generation_model(model):
+        async for chunk in stream_image_generation_chat(
+            user_id=user_id,
+            conversation_id=conversation_id,
+            assistant_message_id=assistant_message_id,
+            payload=payload,
+            model=model,
+            request_started=request_started,
+        ):
+            yield chunk
+        return
 
     try:
         context_started = time.perf_counter()
@@ -601,6 +638,169 @@ async def stream_chat(user_id: str, payload: SendMessageRequest, conversation_id
                 assistant.completion_tokens = estimate_tokens_text(assistant.content)
                 assistant.total_tokens = assistant.completion_tokens
                 assistant.tokens_source = "estimated" if buffer else None
+                await db.commit()
+        yield json_line("error", {"code": "UPSTREAM_ERROR", "message": str(exc)[:500], "retryable": True})
+
+
+async def stream_image_generation_chat(
+    user_id: str,
+    conversation_id: str | None,
+    assistant_message_id: str | None,
+    payload: SendMessageRequest,
+    model: str,
+    request_started: float,
+) -> AsyncIterator[bytes]:
+    if not conversation_id or not assistant_message_id:
+        yield json_line("error", {"code": "UPSTREAM_ERROR", "message": "图像生成消息初始化失败", "retryable": True})
+        return
+
+    prompt = (payload.content or "").strip()
+    if not prompt:
+        yield json_line("error", {"code": "VALIDATION_ERROR", "message": "请输入图像提示词", "retryable": False})
+        return
+
+    final_b64 = ""
+    final_format = "png"
+    prompt_tokens = estimate_tokens_text(prompt)
+    try:
+        async with SessionLocal() as db:
+            quota = await db.get(UserQuota, user_id)
+            api_key_row = await get_active_api_key(db, user_id)
+            if not api_key_row:
+                yield json_line("error", {"code": "KEY_REQUIRED", "message": "请先绑定模型 API Key", "retryable": False})
+                return
+            api_key = decrypt_api_key(api_key_row.ciphertext)
+            image_settings = quota.image_settings_json if quota else None
+
+        yield json_line("image_status", {"text": "正在生成图片", "model": model})
+        stream = image_generation_stream(
+            api_key=api_key,
+            model=model,
+            prompt=prompt,
+            user_id=user_id,
+            image_settings=image_settings,
+            partial_images=2,
+        ).__aiter__()
+        pending_next = asyncio.ensure_future(_safe_anext(stream))
+        try:
+            while True:
+                done, _ = await asyncio.wait({pending_next}, timeout=get_settings().stream_ping_interval_seconds)
+                if not done:
+                    yield json_line("ping", {"ts": datetime.utcnow().isoformat()})
+                    continue
+                event = pending_next.result()
+                if event is _STREAM_END:
+                    break
+                pending_next = asyncio.ensure_future(_safe_anext(stream))
+                if event.event == "image_progress":
+                    yield json_line("image_progress", event.data)
+                elif event.event == "image_completed":
+                    final_b64 = event.data.get("b64_json") or ""
+                    final_format = event.data.get("output_format") or "png"
+        finally:
+            if not pending_next.done():
+                pending_next.cancel()
+                with contextlib.suppress(asyncio.CancelledError):
+                    await pending_next
+
+        if not final_b64:
+            raise RuntimeError("image generation completed without image data")
+
+        async with SessionLocal() as db:
+            attachment = await save_generated_image_attachment(db, user_id, final_b64, final_format)
+            assistant = await db.get(Message, assistant_message_id)
+            if not assistant:
+                raise RuntimeError(f"assistant message missing: {assistant_message_id}")
+            assistant.content = "已根据提示词生成图片。"
+            assistant.status = "completed"
+            assistant.prompt_tokens = prompt_tokens
+            assistant.completion_tokens = 0
+            assistant.total_tokens = prompt_tokens
+            assistant.tokens_source = "estimated"
+            db.add(MessageAttachment(message_id=assistant.id, attachment_id=attachment.id))
+            await db.commit()
+            await db.refresh(attachment)
+
+        try:
+            async with SessionLocal() as db:
+                await record_usage(db, user_id, model, prompt_tokens, "estimated")
+                await db.commit()
+        except Exception as exc:
+            logger.exception(
+                "stream_image_generation_chat usage record failed user=%s conv=%s msg=%s model=%s total_tokens=%d",
+                user_id,
+                conversation_id,
+                assistant_message_id,
+                model,
+                prompt_tokens,
+            )
+            await push_dead_letter(
+                "usage_record",
+                {
+                    "user_id": user_id,
+                    "conversation_id": conversation_id,
+                    "message_id": assistant_message_id,
+                    "model": model,
+                    "total_tokens": prompt_tokens,
+                    "tokens_source": "estimated",
+                },
+                str(exc),
+            )
+
+        yield json_line("image_completed", {"attachment": attachment_event_data(attachment)})
+        yield json_line(
+            "usage",
+            {
+                "prompt_tokens": prompt_tokens,
+                "completion_tokens": 0,
+                "total_tokens": prompt_tokens,
+                "model": model,
+                "tokens_source": "estimated",
+            },
+        )
+        yield json_line(
+            "done",
+            {
+                "message_id": assistant_message_id,
+                "conversation_id": conversation_id,
+                "status": "completed",
+                "finished_at": datetime.utcnow().isoformat(),
+            },
+        )
+        perf_logger.info(
+            "chat_timing image_generation_done user=%s conv=%s elapsed_ms=%d",
+            user_id,
+            conversation_id,
+            int((time.perf_counter() - request_started) * 1000),
+        )
+    except asyncio.CancelledError:
+        async with SessionLocal() as db:
+            assistant = await db.get(Message, assistant_message_id)
+            if assistant:
+                assistant.content = ""
+                assistant.status = "interrupted"
+                await db.commit()
+        raise
+    except HTTPException as exc:
+        code = "UPSTREAM_ERROR"
+        message = str(exc.detail)
+        if isinstance(exc.detail, dict):
+            code = exc.detail.get("code", code)
+            message = exc.detail.get("message", message)
+        async with SessionLocal() as db:
+            assistant = await db.get(Message, assistant_message_id)
+            if assistant:
+                assistant.content = ""
+                assistant.status = "failed_no_output"
+                await db.commit()
+        yield json_line("error", {"code": code, "message": message, "retryable": True})
+    except Exception as exc:
+        logger.exception("stream_image_generation_chat unexpected error user=%s conv=%s", user_id, conversation_id)
+        async with SessionLocal() as db:
+            assistant = await db.get(Message, assistant_message_id)
+            if assistant:
+                assistant.content = ""
+                assistant.status = "failed_no_output"
                 await db.commit()
         yield json_line("error", {"code": "UPSTREAM_ERROR", "message": str(exc)[:500], "retryable": True})
 

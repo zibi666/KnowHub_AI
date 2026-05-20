@@ -8,9 +8,15 @@ from app.core.deps import get_current_user
 from app.core.errors import api_error
 from app.models.entities import User, UserApiKey, UserQuota
 from app.providers.openai_compatible import OpenAICompatibleProvider
-from app.schemas.settings import ModelsOut, UpdateCompactionRequest, UpdateModelRequest
+from app.schemas.settings import ImageGenerationSettings, ModelsOut, UpdateCompactionRequest, UpdateModelRequest
 from app.security.crypto import decrypt_api_key
 from app.services.api_keys import get_active_api_key
+from app.services.image_generation import (
+    expand_image_model_aliases,
+    filter_available_models_for_request,
+    image_model_is_available,
+    normalize_image_settings,
+)
 
 router = APIRouter(tags=["models"])
 settings_router = APIRouter(prefix="/settings", tags=["settings"])
@@ -20,9 +26,8 @@ DEFAULT_CHAT_MODEL = "gpt-5.5"
 def allowed_models(api_key: UserApiKey, quota: UserQuota | None) -> list[str]:
     models = list(api_key.available_models_json or [])
     whitelist = quota.model_whitelist_json if quota else None
-    if whitelist:
-        models = [item for item in models if item in whitelist]
-    return models
+    models = filter_available_models_for_request(models, whitelist)
+    return expand_image_model_aliases(models)
 
 
 def preferred_model(models: list[str], configured: str | None) -> str | None:
@@ -67,11 +72,35 @@ async def update_model(
     if not api_key or not quota:
         raise api_error("KEY_REQUIRED", "API key binding required")
     models = allowed_models(api_key, quota)
-    if models and payload.model not in models:
+    if models and not image_model_is_available(payload.model, models):
         raise api_error("MODEL_NOT_AVAILABLE", "Model is not available for this user")
     quota.default_model = payload.model
     await db.commit()
     return {"ok": True, "model": payload.model}
+
+
+@settings_router.get("/image-generation", response_model=ImageGenerationSettings)
+async def get_image_generation_settings(
+    user: User = Depends(get_current_user),
+    db: AsyncSession = Depends(get_session),
+) -> ImageGenerationSettings:
+    quota = await db.get(UserQuota, user.id)
+    return ImageGenerationSettings(**normalize_image_settings(quota.image_settings_json if quota else None))
+
+
+@settings_router.patch("/image-generation", response_model=ImageGenerationSettings)
+async def update_image_generation_settings(
+    payload: ImageGenerationSettings,
+    user: User = Depends(get_current_user),
+    db: AsyncSession = Depends(get_session),
+) -> ImageGenerationSettings:
+    quota = await db.get(UserQuota, user.id)
+    if not quota:
+        raise api_error("FORBIDDEN", "Quota not found")
+    normalized = normalize_image_settings(payload.model_dump())
+    quota.image_settings_json = normalized
+    await db.commit()
+    return ImageGenerationSettings(**normalized)
 
 
 @settings_router.patch("/compaction")

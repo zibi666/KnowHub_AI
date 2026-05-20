@@ -50,6 +50,9 @@ async def ensure_lightweight_migrations(conn) -> None:
         result = await conn.execute(text("SHOW COLUMNS FROM users LIKE 'avatar_updated_at'"))
         if result.first() is None:
             await conn.execute(text("ALTER TABLE users ADD COLUMN avatar_updated_at DATETIME NULL"))
+        result = await conn.execute(text("SHOW COLUMNS FROM user_quotas LIKE 'image_settings_json'"))
+        if result.first() is None:
+            await conn.execute(text("ALTER TABLE user_quotas ADD COLUMN image_settings_json JSON NULL"))
         return
 
     if settings.database_url.startswith("sqlite"):
@@ -59,3 +62,7 @@ async def ensure_lightweight_migrations(conn) -> None:
             await conn.execute(text("ALTER TABLE users ADD COLUMN avatar_path VARCHAR(500)"))
         if "avatar_updated_at" not in existing:
             await conn.execute(text("ALTER TABLE users ADD COLUMN avatar_updated_at DATETIME"))
+        result = await conn.execute(text("PRAGMA table_info(user_quotas)"))
+        existing_quota = {row[1] for row in result.fetchall()}
+        if "image_settings_json" not in existing_quota:
+            await conn.execute(text("ALTER TABLE user_quotas ADD COLUMN image_settings_json JSON"))
