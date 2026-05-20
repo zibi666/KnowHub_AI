@@ -2485,8 +2485,18 @@ body,
   pointer-events: none;
   content: "";
   background:
-    radial-gradient(ellipse at 50% 46%, rgba(35, 67, 153, 0.48) 0%, rgba(18, 35, 92, 0.36) 36%, rgba(8, 13, 30, 0) 76%),
-    linear-gradient(180deg, rgba(15, 23, 42, 0.04), rgba(16, 31, 78, 0.2) 42%, rgba(5, 5, 5, 0));
+    radial-gradient(
+      ellipse at 50% 46%,
+      color-mix(in srgb, var(--bubble-bg) 46%, transparent) 0%,
+      color-mix(in srgb, var(--bubble-hover) 26%, transparent) 38%,
+      transparent 78%
+    ),
+    linear-gradient(
+      180deg,
+      transparent,
+      color-mix(in srgb, var(--bubble-bg) 14%, transparent) 44%,
+      transparent
+    );
   filter: blur(32px);
   opacity: 0;
   transform: translateY(1.4rem) scale(0.96);
@@ -2504,8 +2514,18 @@ body,
   inset: 7vh -6vw auto -6vw;
   height: min(70vh, 660px);
   background:
-    radial-gradient(ellipse at 50% 48%, rgba(188, 225, 255, 0.86) 0%, rgba(213, 236, 255, 0.6) 42%, rgba(247, 247, 248, 0) 80%),
-    linear-gradient(180deg, rgba(247, 247, 248, 0), rgba(225, 241, 255, 0.38) 52%, rgba(247, 247, 248, 0));
+    radial-gradient(
+      ellipse at 50% 48%,
+      color-mix(in srgb, var(--bubble-bg) 22%, #ffffff 58%) 0%,
+      color-mix(in srgb, var(--bubble-hover) 14%, #ffffff 56%) 42%,
+      transparent 80%
+    ),
+    linear-gradient(
+      180deg,
+      transparent,
+      color-mix(in srgb, var(--bubble-bg) 10%, transparent) 52%,
+      transparent
+    );
   filter: blur(36px);
 }
 
@@ -3096,7 +3116,7 @@ body,
 .composer-card.is-empty-composer::before {
   inset: -20px -42px;
   border-radius: 999px;
-  background: color-mix(in srgb, var(--surface-bg) 20%, transparent);
+  background: color-mix(in srgb, var(--bubble-bg) 14%, transparent);
   filter: blur(18px);
   opacity: 0.42;
   backdrop-filter: none;
@@ -3121,7 +3141,7 @@ body,
 .chat-shell.theme-light .composer-card.is-empty-composer::before {
   inset: -14px -30px -26px;
   border-radius: 999px;
-  background: rgba(255, 255, 255, 0.44);
+  background: color-mix(in srgb, var(--bubble-bg) 12%, #ffffff 48%);
   filter: blur(18px);
   opacity: 0.52;
   backdrop-filter: none;
