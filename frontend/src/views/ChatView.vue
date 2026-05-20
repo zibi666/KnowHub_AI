@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { computed, nextTick, onMounted, ref, watch, type CSSProperties } from 'vue'
+import { computed, nextTick, onMounted, onUnmounted, ref, watch, type CSSProperties } from 'vue'
 import { ArrowDown, Download, FileText, Image as ImageIcon, Maximize2, MessageCircle, Minimize2, PanelLeftClose, PanelLeftOpen, Paperclip, Pencil, Plus, RefreshCw, Search, Send, Settings, X } from 'lucide-vue-next'
 import { useRouter } from 'vue-router'
 import { ApiError, apiFetch, localizeApiMessage, readCookie, streamJsonLines } from '../api/client'
@@ -43,6 +43,7 @@ const REASONING_STORAGE_KEY = 'private-gpt-reasoning-effort'
 const SIDEBAR_STORAGE_KEY = 'private-gpt-sidebar-collapsed'
 const WELCOME_STORAGE_KEY = 'private-gpt-welcome-message'
 const WELCOME_SIZE_STORAGE_KEY = 'private-gpt-welcome-font-size'
+const CURRENT_CONVERSATION_STORAGE_KEY = 'private-gpt-current-conversation'
 
 type ReasoningEffort = 'low' | 'medium' | 'high' | 'xhigh'
 const reasoningOptions: Array<{ value: ReasoningEffort; label: string; hint: string }> = [
@@ -193,6 +194,7 @@ const imageSettings = ref<ImageGenerationSettings>({
 
 let scrollFrame: number | null = null
 let activeConversationLoad = 0
+let imagePollingTimer: number | null = null
 
 const currentConversation = computed(() => conversations.value.find((item) => item.id === currentId.value))
 const recentSearchConversations = computed(() => conversations.value.slice(0, 10))
@@ -233,6 +235,30 @@ function selectedModelIsImageGeneration() {
   return ['image-2', 'image-1.5', 'image-1', 'gpt-image-2', 'gpt-image-1.5', 'gpt-image-1'].includes(
     (selectedModel.value || '').toLowerCase()
   )
+}
+
+function messageIsImageGeneration(message: Message) {
+  return ['image-2', 'image-1.5', 'image-1', 'gpt-image-2', 'gpt-image-1.5', 'gpt-image-1'].includes((message.model || '').toLowerCase())
+}
+
+function normalizeLoadedMessage(message: Message): Message {
+  const progress = message.imageProgress || message.image_progress
+  if (progress && message.status === 'streaming') {
+    message.imageProgress = {
+      b64Json: progress.b64Json || progress.b64_json || '',
+      index: Number(progress.index || 0),
+      total: Number(progress.total || 1),
+      outputFormat: progress.outputFormat || progress.output_format || 'png',
+      detail: progress.detail,
+      elapsedSeconds: Number(progress.elapsedSeconds ?? progress.elapsed_seconds ?? 0),
+      startedAt: progress.startedAt || progress.started_at || new Date(message.createdAt).getTime(),
+      phase: progress.phase || 'rendering',
+      size: progress.size || imageSettings.value.size
+    }
+  } else {
+    message.imageProgress = undefined
+  }
+  return message
 }
 
 function normalizeImageSettings(data: any): ImageGenerationSettings {
@@ -1008,11 +1034,61 @@ function cancelPendingScroll() {
   scrollFrame = null
 }
 
+function stopImagePolling() {
+  if (imagePollingTimer === null) return
+  window.clearInterval(imagePollingTimer)
+  imagePollingTimer = null
+}
+
+async function refreshStreamingImages() {
+  const conversationId = currentId.value
+  if (!conversationId) return
+  const streamingImages = messages.value.filter(
+    (message) => message.role === 'assistant' && message.status === 'streaming' && messageIsImageGeneration(message)
+  )
+  if (!streamingImages.length) {
+    stopImagePolling()
+    return
+  }
+  await Promise.all(
+    streamingImages.map(async (message) => {
+      try {
+        const updated = normalizeLoadedMessage(await apiFetch<Message>(`/conversations/${conversationId}/messages/${message.id}`))
+        if (currentId.value !== conversationId) return
+        Object.assign(message, updated)
+      } catch {
+        // Keep the local timer alive; the next poll may succeed.
+      }
+    })
+  )
+  if (!messages.value.some((message) => message.role === 'assistant' && message.status === 'streaming' && messageIsImageGeneration(message))) {
+    stopImagePolling()
+    await loadConversations()
+    await loadContextStats()
+  }
+}
+
+function syncImagePolling() {
+  const hasStreamingImage = messages.value.some(
+    (message) => message.role === 'assistant' && message.status === 'streaming' && messageIsImageGeneration(message)
+  )
+  if (!hasStreamingImage) {
+    stopImagePolling()
+    return
+  }
+  if (imagePollingTimer !== null) return
+  imagePollingTimer = window.setInterval(() => {
+    void refreshStreamingImages()
+  }, 3000)
+}
+
 function newChat() {
   activeConversationLoad++
   cancelPendingScroll()
   cancelPendingStreamFlush()
+  stopImagePolling()
   currentId.value = null
+  window.localStorage.removeItem(CURRENT_CONVERSATION_STORAGE_KEY)
   messages.value = []
   messagesLoading.value = false
   showScrollToBottom.value = false
@@ -1074,14 +1150,19 @@ async function openConversation(id: string, focusMessageId?: string | null) {
   const loadId = ++activeConversationLoad
   cancelPendingScroll()
   cancelPendingStreamFlush()
+  stopImagePolling()
   currentId.value = id
+  window.localStorage.setItem(CURRENT_CONVERSATION_STORAGE_KEY, id)
   messages.value = []
   messagesLoading.value = true
   try {
     const params = focusMessageId ? `?aroundMessageId=${encodeURIComponent(focusMessageId)}&limit=120` : ''
-    const loadedMessages = sortMessagesForDisplay(await apiFetch<Message[]>(`/conversations/${id}/messages${params}`))
+    const loadedMessages = sortMessagesForDisplay(
+      (await apiFetch<Message[]>(`/conversations/${id}/messages${params}`)).map(normalizeLoadedMessage)
+    )
     if (loadId !== activeConversationLoad) return
     messages.value = loadedMessages
+    syncImagePolling()
     await loadContextStats()
     if (focusMessageId) {
       await scrollToMessage(focusMessageId)
@@ -1345,6 +1426,7 @@ async function send() {
           const newId = data.conversation_id || data.conversationId
           currentId.value = newId
           assistant.conversationId = newId
+          window.localStorage.setItem(CURRENT_CONVERSATION_STORAGE_KEY, newId)
           await loadConversations()
         } else if (event === 'token') {
           appendStreamText(assistant, data.text || '')
@@ -1404,15 +1486,17 @@ async function send() {
           assistant.id = data.message_id || data.messageId
           if (currentId.value) {
             const generatedImageSize = assistant.generatedImageSize || assistant.imageProgress?.size
-            const canonical = await apiFetch<Message>(`/conversations/${currentId.value}/messages/${assistant.id}`)
+            const canonical = normalizeLoadedMessage(await apiFetch<Message>(`/conversations/${currentId.value}/messages/${assistant.id}`))
             const typedContent = assistant.content
             const canonicalContent = canonical.content || ''
             Object.assign(assistant, { ...canonical, content: typedContent.trim() ? typedContent : canonicalContent })
             if (generatedImageSize) assistant.generatedImageSize = generatedImageSize
-            assistant.imageProgress = undefined
+            if (assistant.status !== 'streaming') assistant.imageProgress = undefined
           }
           if (!assistant.content.trim() && typeof data.content === 'string') assistant.content = data.content
-          assistant.status = data.status || 'completed'
+          if (assistant.status === 'streaming' || data.status === 'completed') {
+            assistant.status = data.status || 'completed'
+          }
           await scrollMessagesToBottom('smooth')
           await loadConversations()
           await loadContextStats()
@@ -1442,6 +1526,7 @@ async function send() {
     if (apiErr?.code === 'INVALID_CREDENTIALS') await auth.loadMe().catch(() => router.push('/login'))
   } finally {
     streaming.value = false
+    syncImagePolling()
   }
 }
 
@@ -1480,8 +1565,17 @@ watch(searchQuery, () => {
 onMounted(async () => {
   loadAppearance()
   await Promise.all([loadModels(), loadConversations()])
+  const storedConversationId = window.localStorage.getItem(CURRENT_CONVERSATION_STORAGE_KEY)
+  if (storedConversationId && conversations.value.some((conversation) => conversation.id === storedConversationId)) {
+    await openConversation(storedConversationId)
+  }
   await nextTick()
   resizeComposerInput()
+})
+
+onUnmounted(() => {
+  stopImagePolling()
+  cancelPendingScroll()
 })
 </script>
 

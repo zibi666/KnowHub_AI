@@ -32,17 +32,24 @@ export interface Message {
   createdAt: string
   attachments?: Attachment[]
   generatedImageSize?: string
-  imageProgress?: {
-    b64Json: string
-    index: number
-    total: number
-    outputFormat: string
-    detail?: string
-    elapsedSeconds?: number
-    startedAt?: number
-    phase?: string
-    size?: string
-  }
+  imageProgress?: ImageProgress
+  image_progress?: ImageProgress
+}
+
+export interface ImageProgress {
+  b64Json?: string
+  b64_json?: string
+  index: number
+  total: number
+  outputFormat?: string
+  output_format?: string
+  detail?: string
+  elapsedSeconds?: number
+  elapsed_seconds?: number
+  startedAt?: number
+  started_at?: number
+  phase?: string
+  size?: string
 }
 
 export interface ConversationSearchResult {

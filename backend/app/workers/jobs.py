@@ -7,6 +7,7 @@ from arq.connections import RedisSettings
 from app.core.db import SessionLocal
 from app.core.config import get_settings
 from app.services.compaction import compact_conversation
+from app.services.chat import run_image_generation_job
 from app.services.maintenance import (
     cleanup_cache_job,
     cleanup_pending_cos_job,
@@ -48,6 +49,17 @@ async def purge_user_job(ctx, user_id: str) -> None:
         await db.commit()
 
 
+async def image_generation_job(
+    ctx,
+    user_id: str,
+    conversation_id: str,
+    assistant_message_id: str,
+    prompt: str,
+    model: str,
+) -> None:
+    await run_image_generation_job(user_id, conversation_id, assistant_message_id, prompt, model)
+
+
 async def startup(ctx):
     return None
 
@@ -75,6 +87,7 @@ class WorkerSettings:
         zombie_scan_worker,
         compaction_watchdog_worker,
         purge_user_job,
+        image_generation_job,
     ]
     on_startup = startup
     on_shutdown = shutdown

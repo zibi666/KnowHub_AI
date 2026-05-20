@@ -4,6 +4,7 @@ from datetime import datetime
 
 from app.schemas.attachments import AttachmentOut
 from app.schemas.base import ApiModel
+from app.services.image_generation import is_image_generation_model
 
 
 class ConversationOut(ApiModel):
@@ -38,9 +39,19 @@ class MessageOut(ApiModel):
     tokens_source: str | None = None
     created_at: datetime
     attachments: list[AttachmentOut] = []
+    image_progress: dict | None = None
 
     @classmethod
     def from_message(cls, message: object, attachments: list[AttachmentOut] | None = None) -> "MessageOut":
+        image_progress = None
+        if (
+            getattr(message, "role") == "assistant"
+            and getattr(message, "status") == "streaming"
+            and is_image_generation_model(getattr(message, "model", None))
+        ):
+            from app.services.chat import image_progress_from_message
+
+            image_progress = image_progress_from_message(message)
         return cls(
             id=getattr(message, "id"),
             conversation_id=getattr(message, "conversation_id"),
@@ -56,6 +67,7 @@ class MessageOut(ApiModel):
             tokens_source=getattr(message, "tokens_source", None),
             created_at=getattr(message, "created_at"),
             attachments=attachments or [],
+            image_progress=image_progress,
         )
 
 

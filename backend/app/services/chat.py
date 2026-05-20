@@ -6,9 +6,12 @@ import json
 import logging
 import time
 from collections.abc import AsyncIterator
-from datetime import datetime
+from datetime import datetime, timezone
+from urllib.parse import urlparse
 
 from fastapi import HTTPException
+from arq import create_pool
+from arq.connections import RedisSettings
 from sqlalchemy import select
 
 logger = logging.getLogger("app.services.chat")
@@ -57,6 +60,50 @@ async def _safe_anext(gen: AsyncIterator) -> object:
 
 def json_line(event: str, data: dict) -> bytes:
     return (json.dumps({"event": event, "data": data}, ensure_ascii=False) + "\n\n").encode("utf-8")
+
+
+def redis_settings() -> RedisSettings:
+    parsed = urlparse(get_settings().redis_url)
+    return RedisSettings(
+        host=parsed.hostname or "localhost",
+        port=parsed.port or 6379,
+        database=int((parsed.path or "/0").lstrip("/") or "0"),
+        username=parsed.username,
+        password=parsed.password,
+    )
+
+
+def image_progress_from_message(message: Message) -> dict:
+    elapsed_seconds = 0
+    started_at_ms = None
+    if message.created_at:
+        created_at = message.created_at
+        if created_at.tzinfo is None:
+            created_at = created_at.replace(tzinfo=timezone.utc)
+        else:
+            created_at = created_at.astimezone(timezone.utc)
+        elapsed_seconds = max(0, int((datetime.now(timezone.utc) - created_at).total_seconds()))
+        started_at_ms = int(created_at.timestamp() * 1000)
+    if elapsed_seconds < 15:
+        phase = "queued"
+        detail = "模型正在排队和构图，图像生成通常比文字回复更慢。"
+    elif elapsed_seconds < 45:
+        phase = "rendering"
+        detail = "模型正在绘制主图，收到终稿后会自动刷新。"
+    else:
+        phase = "rendering_long"
+        detail = "仍在生成中，高质量图片可能需要更久；你可以切换对话或刷新页面。"
+    return {
+        "b64Json": "",
+        "index": 0,
+        "total": 1,
+        "outputFormat": "png",
+        "detail": detail,
+        "elapsedSeconds": elapsed_seconds,
+        "startedAt": started_at_ms,
+        "phase": phase,
+        "size": None,
+    }
 
 
 def remaining_completed_text(completed_text: str, streamed_text: str) -> str:
@@ -289,15 +336,50 @@ async def stream_chat(user_id: str, payload: SendMessageRequest, conversation_id
         yield json_line("conversation_created", {"conversation_id": created_conversation_id})
 
     if is_image_generation_model(model):
-        async for chunk in stream_image_generation_chat(
-            user_id=user_id,
-            conversation_id=conversation_id,
-            assistant_message_id=assistant_message_id,
-            payload=payload,
-            model=model,
-            request_started=request_started,
-        ):
-            yield chunk
+        try:
+            redis = await create_pool(redis_settings())
+            try:
+                await redis.enqueue_job(
+                    "image_generation_job",
+                    user_id,
+                    conversation_id,
+                    assistant_message_id,
+                    payload.content,
+                    model,
+                    _job_id=f"image-generation:{assistant_message_id}",
+                )
+            finally:
+                await redis.aclose()
+        except Exception as exc:
+            logger.exception("image_generation_enqueue_failed user=%s conv=%s msg=%s", user_id, conversation_id, assistant_message_id)
+            async with SessionLocal() as db:
+                assistant = await db.get(Message, assistant_message_id)
+                if assistant:
+                    assistant.content = "图片生成任务启动失败"
+                    assistant.status = "failed_no_output"
+                    await db.commit()
+            yield json_line("error", {"code": "QUEUE_ERROR", "message": str(exc)[:500], "retryable": True})
+            return
+        yield json_line(
+            "image_status",
+            {
+                "text": "正在生成图片",
+                "detail": "生成任务已在服务器后台运行；刷新或切换对话后仍会继续。",
+                "elapsed_seconds": 0,
+                "phase": "queued",
+                "model": model,
+            },
+        )
+        yield json_line(
+            "done",
+            {
+                "message_id": assistant_message_id,
+                "conversation_id": conversation_id,
+                "status": "streaming",
+                "background": True,
+                "finished_at": datetime.utcnow().isoformat(),
+            },
+        )
         return
 
     try:
@@ -852,6 +934,114 @@ async def stream_image_generation_chat(
                 assistant.status = "failed_no_output"
                 await db.commit()
         yield json_line("error", {"code": "UPSTREAM_ERROR", "message": str(exc)[:500], "retryable": True})
+
+
+async def run_image_generation_job(
+    user_id: str,
+    conversation_id: str,
+    assistant_message_id: str,
+    prompt: str,
+    model: str,
+) -> None:
+    if not prompt.strip():
+        async with SessionLocal() as db:
+            assistant = await db.get(Message, assistant_message_id)
+            if assistant:
+                assistant.content = "请输入图像提示词"
+                assistant.status = "failed_no_output"
+                await db.commit()
+        return
+
+    final_b64 = ""
+    final_format = "png"
+    prompt_tokens = estimate_tokens_text(prompt)
+    request_started = time.perf_counter()
+    try:
+        async with SessionLocal() as db:
+            assistant = await db.get(Message, assistant_message_id)
+            if not assistant or assistant.user_id != user_id or assistant.conversation_id != conversation_id:
+                return
+            assistant.content = "正在生成图片"
+            assistant.status = "streaming"
+            quota = await db.get(UserQuota, user_id)
+            api_key_row = await get_active_api_key(db, user_id)
+            if not api_key_row:
+                assistant.content = "请先绑定模型 API Key"
+                assistant.status = "failed_no_output"
+                await db.commit()
+                return
+            api_key = decrypt_api_key(api_key_row.ciphertext)
+            image_settings = quota.image_settings_json if quota else None
+            await db.commit()
+
+        async for event in image_generation_stream(
+            api_key=api_key,
+            model=model,
+            prompt=prompt,
+            user_id=user_id,
+            image_settings=image_settings,
+            partial_images=1,
+        ):
+            if event.event == "image_completed":
+                final_b64 = event.data.get("b64_json") or ""
+                final_format = event.data.get("output_format") or "png"
+                break
+
+        if not final_b64:
+            raise RuntimeError("image generation completed without image data")
+
+        async with SessionLocal() as db:
+            attachment = await save_generated_image_attachment(db, user_id, final_b64, final_format)
+            assistant = await db.get(Message, assistant_message_id)
+            if not assistant:
+                return
+            assistant.content = "已根据提示词生成图片。"
+            assistant.status = "completed"
+            assistant.prompt_tokens = prompt_tokens
+            assistant.completion_tokens = 0
+            assistant.total_tokens = prompt_tokens
+            assistant.tokens_source = "estimated"
+            db.add(MessageAttachment(message_id=assistant.id, attachment_id=attachment.id))
+            await db.commit()
+        try:
+            async with SessionLocal() as db:
+                await record_usage(db, user_id, model, prompt_tokens, "estimated")
+                await db.commit()
+        except Exception as exc:
+            logger.exception(
+                "image_generation_background usage record failed user=%s conv=%s msg=%s model=%s total_tokens=%d",
+                user_id,
+                conversation_id,
+                assistant_message_id,
+                model,
+                prompt_tokens,
+            )
+            await push_dead_letter(
+                "usage_record",
+                {
+                    "user_id": user_id,
+                    "conversation_id": conversation_id,
+                    "message_id": assistant_message_id,
+                    "model": model,
+                    "total_tokens": prompt_tokens,
+                    "tokens_source": "estimated",
+                },
+                str(exc),
+            )
+        perf_logger.info(
+            "chat_timing image_generation_background_done user=%s conv=%s elapsed_ms=%d",
+            user_id,
+            conversation_id,
+            int((time.perf_counter() - request_started) * 1000),
+        )
+    except Exception as exc:
+        logger.exception("image_generation_background_failed user=%s conv=%s msg=%s", user_id, conversation_id, assistant_message_id)
+        async with SessionLocal() as db:
+            assistant = await db.get(Message, assistant_message_id)
+            if assistant:
+                assistant.content = str(exc)[:500]
+                assistant.status = "failed_no_output"
+                await db.commit()
 
 
 async def maybe_auto_compact(

@@ -181,7 +181,7 @@ async def list_messages(
     if not conversation or conversation.user_id != user.id:
         raise api_error("FORBIDDEN", "会话不存在")
     limit = max(1, min(limit, 200))
-    stale_before = datetime.utcnow() - timedelta(minutes=5)
+    stale_before = datetime.utcnow() - timedelta(hours=2)
     await db.execute(
         update(Message)
         .where(
