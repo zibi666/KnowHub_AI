@@ -2703,15 +2703,16 @@ body,
 .message-image-attachments {
   display: grid;
   justify-items: end;
-  gap: 0.5rem;
+  gap: 0.58rem;
   width: auto;
   max-width: min(100%, 70vw);
 }
 
 .message-image-card {
   display: grid;
-  width: clamp(116px, 18vw, 168px);
-  height: clamp(86px, 13vw, 124px);
+  width: 168px;
+  height: 124px;
+  max-width: min(44vw, 330px);
   place-items: center;
   overflow: hidden;
   border: 1px solid color-mix(in srgb, var(--text) 10%, transparent);
@@ -2719,6 +2720,23 @@ body,
   background: color-mix(in srgb, var(--control-bg) 82%, #000 18%);
   box-shadow: 0 10px 24px rgba(0, 0, 0, 0.2);
   transition: border-color var(--motion-fast) ease, transform var(--motion-fast) ease, box-shadow var(--motion-fast) ease;
+}
+
+.message-image-card.is-loading {
+  width: clamp(116px, 18vw, 168px);
+  height: clamp(86px, 13vw, 124px);
+}
+
+.message-image-card.is-small {
+  border-radius: 12px;
+}
+
+.message-image-card.is-medium {
+  border-radius: 14px;
+}
+
+.message-image-card.is-large {
+  border-radius: 16px;
 }
 
 .message-image-card:hover {
@@ -2730,7 +2748,8 @@ body,
 .message-image-card img {
   width: 100%;
   height: 100%;
-  object-fit: cover;
+  object-fit: contain;
+  background: color-mix(in srgb, var(--control-bg) 82%, #000 18%);
 }
 
 .message-attachments {

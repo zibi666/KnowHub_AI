@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { computed, ref, watch } from 'vue'
+import { computed, ref, watch, type CSSProperties } from 'vue'
 import { ChevronDown, ChevronUp, FileText } from 'lucide-vue-next'
 import MarkdownMessage from './MarkdownMessage.vue'
 import type { Attachment, Message } from '../types'
@@ -11,6 +11,7 @@ const USER_COLLAPSE_CHARACTER_LIMIT = 120
 const USER_COLLAPSE_LINE_LIMIT = 3
 
 const isExpanded = ref(false)
+const imageLayouts = ref<Record<string, { className: string; style: CSSProperties }>>({})
 const lineCount = computed(() => props.message.content.split(/\r\n|\n|\r/).length)
 const isStreaming = computed(() => props.message.status === 'streaming')
 const isUserMessage = computed(() => props.message.role === 'user')
@@ -50,6 +51,62 @@ function attachmentPreviewUrl(id: string) {
   return `/api/attachments/${id}/preview`
 }
 
+function imageCardLayout(width: number, height: number) {
+  const naturalWidth = Math.max(1, width)
+  const naturalHeight = Math.max(1, height)
+  const aspectRatio = naturalWidth / naturalHeight
+  const area = naturalWidth * naturalHeight
+  const longEdge = Math.max(naturalWidth, naturalHeight)
+
+  const tier =
+    longEdge <= 260 || area <= 45_000
+      ? { className: 'is-small', maxWidth: 156, maxHeight: 126 }
+      : aspectRatio >= 1.55 || longEdge >= 700 || area >= 240_000
+        ? { className: 'is-large', maxWidth: 330, maxHeight: 230 }
+        : { className: 'is-medium', maxWidth: 230, maxHeight: 178 }
+
+  let scale = Math.min(tier.maxWidth / naturalWidth, tier.maxHeight / naturalHeight, 1)
+  let displayWidth = Math.round(naturalWidth * scale)
+  let displayHeight = Math.round(naturalHeight * scale)
+
+  if (displayWidth < 96 && displayHeight * (96 / displayWidth) <= tier.maxHeight) {
+    scale *= 96 / displayWidth
+    displayWidth = Math.round(naturalWidth * scale)
+    displayHeight = Math.round(naturalHeight * scale)
+  }
+
+  if (displayHeight < 72 && displayWidth * (72 / displayHeight) <= tier.maxWidth) {
+    scale *= 72 / displayHeight
+    displayWidth = Math.round(naturalWidth * scale)
+    displayHeight = Math.round(naturalHeight * scale)
+  }
+
+  return {
+    className: tier.className,
+    style: {
+      width: `${displayWidth}px`,
+      height: `${displayHeight}px`
+    } as CSSProperties
+  }
+}
+
+function handleImageLoad(attachment: Attachment, event: Event) {
+  const image = event.target as HTMLImageElement | null
+  if (!image?.naturalWidth || !image?.naturalHeight) return
+  imageLayouts.value = {
+    ...imageLayouts.value,
+    [attachment.id]: imageCardLayout(image.naturalWidth, image.naturalHeight)
+  }
+}
+
+function imageCardClass(attachment: Attachment) {
+  return imageLayouts.value[attachment.id]?.className || 'is-loading'
+}
+
+function imageCardStyle(attachment: Attachment): CSSProperties | undefined {
+  return imageLayouts.value[attachment.id]?.style
+}
+
 function attachmentKindLabel(item: Attachment) {
   const filename = item.filename || ''
   const mime = item.mimeSniffed || ''
@@ -87,12 +144,14 @@ watch(
               v-for="attachment in imageAttachments"
               :key="attachment.id"
               class="message-image-card"
+              :class="imageCardClass(attachment)"
+              :style="imageCardStyle(attachment)"
               type="button"
               :title="`查看图片：${attachment.filename}`"
               :aria-label="`查看图片：${attachment.filename}`"
               @click="emit('previewAttachment', attachment)"
             >
-              <img :src="attachmentPreviewUrl(attachment.id)" :alt="attachment.filename" />
+              <img :src="attachmentPreviewUrl(attachment.id)" :alt="attachment.filename" @load="handleImageLoad(attachment, $event)" />
             </button>
           </div>
           <div v-if="message.content.trim()" class="message-bubble message-user">
