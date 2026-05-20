@@ -18,7 +18,13 @@ if settings.database_url.startswith("sqlite"):
     db_path = settings.database_url.rsplit("///", 1)[-1]
     if db_path and db_path != ":memory:":
         Path(db_path).parent.mkdir(parents=True, exist_ok=True)
-engine = create_async_engine(settings.database_url, pool_pre_ping=True)
+engine_options = {
+    "pool_pre_ping": not settings.database_url.startswith("mysql+aiomysql"),
+}
+if settings.database_url.startswith("mysql"):
+    engine_options["pool_recycle"] = 1800
+
+engine = create_async_engine(settings.database_url, **engine_options)
 SessionLocal = async_sessionmaker(engine, expire_on_commit=False, class_=AsyncSession)
 
 
