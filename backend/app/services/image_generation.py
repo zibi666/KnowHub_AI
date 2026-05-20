@@ -31,6 +31,17 @@ IMAGE_MODEL_ALIASES = {
 
 IMAGE_MODEL_CANONICAL_TO_ALIAS = {value: key for key, value in IMAGE_MODEL_ALIASES.items()}
 
+OFFICIAL_MODEL_CATALOG = [
+    "gpt-5.2",
+    "gpt-5.3-codex",
+    "gpt-5.4",
+    "gpt-5.4-mini",
+    "gpt-5.5",
+    "gpt-image-1",
+    "gpt-image-1.5",
+    "gpt-image-2",
+]
+
 DEFAULT_IMAGE_SETTINGS = {
     "size": "1024x1024",
     "quality": "high",
@@ -94,6 +105,13 @@ def filter_available_models_for_request(models: list[str], whitelist: list[str] 
     if not whitelist:
         return models
     return [model for model in models if model in whitelist or image_model_is_available(model, whitelist)]
+
+
+def official_available_models(models: list[str], whitelist: list[str] | None = None) -> list[str]:
+    allowed_source = whitelist or models
+    if not allowed_source:
+        return list(OFFICIAL_MODEL_CATALOG)
+    return [model for model in OFFICIAL_MODEL_CATALOG if image_model_is_available(model, allowed_source)]
 
 
 def normalize_image_settings(raw: dict[str, Any] | None) -> dict[str, Any]:

@@ -12,10 +12,10 @@ from app.schemas.settings import ImageGenerationSettings, ModelsOut, UpdateCompa
 from app.security.crypto import decrypt_api_key
 from app.services.api_keys import get_active_api_key
 from app.services.image_generation import (
-    expand_image_model_aliases,
     filter_available_models_for_request,
     image_model_is_available,
     normalize_image_settings,
+    official_available_models,
 )
 
 router = APIRouter(tags=["models"])
@@ -26,12 +26,11 @@ DEFAULT_CHAT_MODEL = "gpt-5.5"
 def allowed_models(api_key: UserApiKey, quota: UserQuota | None) -> list[str]:
     models = list(api_key.available_models_json or [])
     whitelist = quota.model_whitelist_json if quota else None
-    models = filter_available_models_for_request(models, whitelist)
-    return expand_image_model_aliases(models)
+    return official_available_models(models, whitelist)
 
 
 def preferred_model(models: list[str], configured: str | None) -> str | None:
-    if configured:
+    if configured and image_model_is_available(configured, models):
         return configured
     if DEFAULT_CHAT_MODEL in models:
         return DEFAULT_CHAT_MODEL

@@ -37,6 +37,7 @@ from app.services.image_generation import (
     image_generation_stream,
     image_model_is_available,
     is_image_generation_model,
+    official_available_models,
     save_generated_image_attachment,
 )
 from app.services.usage import record_usage
@@ -75,7 +76,7 @@ def remaining_completed_text(completed_text: str, streamed_text: str) -> str:
 
 
 def preferred_model(models: list[str], configured: str | None) -> str:
-    if configured:
+    if configured and image_model_is_available(configured, models):
         return configured
     if DEFAULT_CHAT_MODEL in models:
         return DEFAULT_CHAT_MODEL
@@ -173,6 +174,7 @@ async def stream_chat(user_id: str, payload: SendMessageRequest, conversation_id
             available_models,
             quota.model_whitelist_json if quota else None,
         )
+        available_models = official_available_models(available_models, quota.model_whitelist_json if quota else None)
         model = model or preferred_model(available_models, quota.default_model if quota else None)
         if quota and quota.model_whitelist_json and not image_model_is_available(model, quota.model_whitelist_json):
             yield json_line("error", {"code": "MODEL_NOT_AVAILABLE", "message": "当前模型不在管理员允许范围内", "retryable": False})
