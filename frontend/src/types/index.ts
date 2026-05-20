@@ -38,6 +38,7 @@ export interface Message {
     outputFormat: string
     detail?: string
     elapsedSeconds?: number
+    startedAt?: number
     phase?: string
   }
 }

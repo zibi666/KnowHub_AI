@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { computed, ref, watch, type CSSProperties } from 'vue'
+import { computed, onUnmounted, ref, watch, type CSSProperties } from 'vue'
 import { ChevronDown, ChevronUp, Download, FileText } from 'lucide-vue-next'
 import MarkdownMessage from './MarkdownMessage.vue'
 import type { Attachment, Message } from '../types'
@@ -11,7 +11,9 @@ const USER_COLLAPSE_CHARACTER_LIMIT = 120
 const USER_COLLAPSE_LINE_LIMIT = 3
 
 const isExpanded = ref(false)
+const nowMs = ref(Date.now())
 const imageLayouts = ref<Record<string, { className: string; style: CSSProperties }>>({})
+let progressTimer: number | null = null
 const lineCount = computed(() => props.message.content.split(/\r\n|\n|\r/).length)
 const isStreaming = computed(() => props.message.status === 'streaming')
 const isUserMessage = computed(() => props.message.role === 'user')
@@ -50,7 +52,11 @@ const generatedImageProgressSrc = computed(() => {
   return `data:image/${format};base64,${progress.b64Json}`
 })
 const generatedImageElapsed = computed(() => {
-  const seconds = props.message.imageProgress?.elapsedSeconds
+  const progress = props.message.imageProgress
+  const seconds =
+    progress?.startedAt && props.message.status === 'streaming'
+      ? Math.max(progress.elapsedSeconds || 0, Math.floor((nowMs.value - progress.startedAt) / 1000))
+      : progress?.elapsedSeconds
   if (!Number.isFinite(seconds) || seconds === undefined) return ''
   if (seconds < 60) return `${Math.max(0, Math.floor(seconds))} 秒`
   const minutes = Math.floor(seconds / 60)
@@ -161,6 +167,27 @@ watch(
     isExpanded.value = false
   }
 )
+
+watch(
+  () => Boolean(props.message.imageProgress && props.message.status === 'streaming'),
+  (active) => {
+    if (progressTimer !== null) {
+      window.clearInterval(progressTimer)
+      progressTimer = null
+    }
+    if (active) {
+      nowMs.value = Date.now()
+      progressTimer = window.setInterval(() => {
+        nowMs.value = Date.now()
+      }, 1000)
+    }
+  },
+  { immediate: true }
+)
+
+onUnmounted(() => {
+  if (progressTimer !== null) window.clearInterval(progressTimer)
+})
 </script>
 
 <template>
@@ -234,15 +261,13 @@ watch(
         <div v-else-if="imageAttachments.length" class="message-generated-images">
           <div v-for="attachment in imageAttachments" :key="attachment.id" class="message-generated-image-stack">
             <button
-              class="message-image-card is-large"
-              :class="imageCardClass(attachment)"
-              :style="imageCardStyle(attachment)"
+              class="generated-image-final-card"
               type="button"
               :title="`查看图片：${attachment.filename}`"
               :aria-label="`查看图片：${attachment.filename}`"
               @click="emit('previewAttachment', attachment)"
             >
-              <img :src="attachmentPreviewUrl(attachment.id)" :alt="attachment.filename" @load="handleImageLoad(attachment, $event)" />
+              <img :src="attachmentPreviewUrl(attachment.id)" :alt="attachment.filename" />
             </button>
             <a class="generated-image-download" :href="attachmentDownloadUrl(attachment.id)" target="_blank" rel="noreferrer">
               <Download :size="15" />

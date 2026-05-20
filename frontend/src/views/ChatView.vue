@@ -1357,6 +1357,7 @@ async function send() {
             outputFormat: assistant.imageProgress?.outputFormat || 'png',
             detail: data.detail || '正在等待模型返回图片进度。',
             elapsedSeconds: Number(data.elapsed_seconds ?? data.elapsedSeconds ?? assistant.imageProgress?.elapsedSeconds ?? 0),
+            startedAt: assistant.imageProgress?.startedAt || Date.now(),
             phase: data.phase || assistant.imageProgress?.phase || 'submitted'
           }
           scheduleScrollToBottom()
@@ -1369,6 +1370,7 @@ async function send() {
             outputFormat: data.output_format || data.outputFormat || 'png',
             detail: `已收到进度图 ${Number(data.index || 1)}/${Number(data.total || 2)}，继续等待最终图片。`,
             elapsedSeconds: assistant.imageProgress?.elapsedSeconds,
+            startedAt: assistant.imageProgress?.startedAt || Date.now(),
             phase: 'partial'
           }
           scheduleScrollToBottom()
