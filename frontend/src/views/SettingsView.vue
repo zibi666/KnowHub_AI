@@ -1,7 +1,7 @@
 <script setup lang="ts">
 import { ref } from 'vue'
 import { useRouter } from 'vue-router'
-import { apiFetch } from '../api/client'
+import { apiFetch, readCookie } from '../api/client'
 import { useAuthStore } from '../stores/auth'
 import type { User } from '../types'
 
@@ -14,6 +14,7 @@ const oldPassword = ref('')
 const newPassword = ref('')
 const notice = ref('')
 const error = ref('')
+const avatarUploading = ref(false)
 
 function resetMessages() {
   notice.value = ''
@@ -46,6 +47,49 @@ async function savePassword() {
     error.value = err instanceof Error ? err.message : '保存失败'
   }
 }
+
+async function uploadAvatar(event: Event) {
+  resetMessages()
+  const input = event.target as HTMLInputElement
+  const file = input.files?.[0]
+  if (!file) return
+  avatarUploading.value = true
+  try {
+    const form = new FormData()
+    form.append('file', file)
+    const csrf = readCookie('csrf_token')
+    const response = await fetch('/api/settings/avatar', {
+      method: 'POST',
+      body: form,
+      credentials: 'include',
+      headers: csrf ? { 'X-CSRF-Token': csrf } : undefined
+    })
+    if (!response.ok) {
+      const payload = await response.json().catch(() => null)
+      throw new Error(payload?.detail?.message || '头像上传失败')
+    }
+    auth.user = await response.json()
+    notice.value = '头像已更新'
+  } catch (err) {
+    error.value = err instanceof Error ? err.message : '头像上传失败'
+  } finally {
+    avatarUploading.value = false
+    input.value = ''
+  }
+}
+
+async function deleteAvatar() {
+  resetMessages()
+  avatarUploading.value = true
+  try {
+    auth.user = await apiFetch<User>('/settings/avatar', { method: 'DELETE' })
+    notice.value = '头像已删除'
+  } catch (err) {
+    error.value = err instanceof Error ? err.message : '头像删除失败'
+  } finally {
+    avatarUploading.value = false
+  }
+}
 </script>
 
 <template>
@@ -59,6 +103,33 @@ async function savePassword() {
     <section class="max-w-3xl mx-auto p-5 space-y-5">
       <div v-if="notice" class="app-card rounded-lg p-3 text-sm text-green-700">{{ notice }}</div>
       <div v-if="error" class="app-card rounded-lg p-3 text-sm text-red-600">{{ error }}</div>
+
+      <div class="app-card rounded-lg p-5 space-y-3">
+        <div>
+          <h2 class="font-semibold">更换头像</h2>
+          <p class="app-muted text-sm mt-1">支持 PNG、JPG、WebP，最大 2MB，会自动裁切为方形头像。</p>
+        </div>
+        <div class="settings-avatar-editor">
+          <div class="settings-avatar-preview" aria-hidden="true">
+            <img v-if="auth.user?.avatarUrl" :src="auth.user.avatarUrl" :alt="auth.user.username" />
+            <span v-else>{{ auth.user?.username?.slice(0, 1).toUpperCase() || 'U' }}</span>
+          </div>
+          <div class="settings-avatar-actions">
+            <label class="app-primary-button rounded-md px-4 py-2">
+              {{ avatarUploading ? '上传中...' : '上传头像' }}
+              <input class="hidden" type="file" accept="image/png,image/jpeg,image/webp" :disabled="avatarUploading" @change="uploadAvatar" />
+            </label>
+            <button
+              class="app-secondary-button rounded-md px-4 py-2"
+              type="button"
+              :disabled="avatarUploading || !auth.user?.avatarUrl"
+              @click="deleteAvatar"
+            >
+              删除头像
+            </button>
+          </div>
+        </div>
+      </div>
 
       <form class="app-card rounded-lg p-5 space-y-3" @submit.prevent="saveProfile">
         <div>

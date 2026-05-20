@@ -48,6 +48,8 @@ class User(Base, TimestampMixin):
     status: Mapped[str] = mapped_column(String(20), default="active", nullable=False)
     must_change_password: Mapped[bool] = mapped_column(Boolean, default=False, nullable=False)
     last_login_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=False), nullable=True)
+    avatar_path: Mapped[str | None] = mapped_column(String(500), nullable=True)
+    avatar_updated_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=False), nullable=True)
 
     api_keys: Mapped[list[UserApiKey]] = relationship(back_populates="user", cascade="all, delete-orphan")
     quota: Mapped[UserQuota | None] = relationship(back_populates="user", uselist=False)

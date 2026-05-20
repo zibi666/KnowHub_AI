@@ -3,6 +3,7 @@ from __future__ import annotations
 from collections.abc import AsyncGenerator
 from pathlib import Path
 
+from sqlalchemy import text
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker, create_async_engine
 from sqlalchemy.orm import DeclarativeBase
 
@@ -38,3 +39,23 @@ async def create_all() -> None:
 
     async with engine.begin() as conn:
         await conn.run_sync(Base.metadata.create_all)
+        await ensure_lightweight_migrations(conn)
+
+
+async def ensure_lightweight_migrations(conn) -> None:
+    if settings.database_url.startswith("mysql"):
+        result = await conn.execute(text("SHOW COLUMNS FROM users LIKE 'avatar_path'"))
+        if result.first() is None:
+            await conn.execute(text("ALTER TABLE users ADD COLUMN avatar_path VARCHAR(500) NULL"))
+        result = await conn.execute(text("SHOW COLUMNS FROM users LIKE 'avatar_updated_at'"))
+        if result.first() is None:
+            await conn.execute(text("ALTER TABLE users ADD COLUMN avatar_updated_at DATETIME NULL"))
+        return
+
+    if settings.database_url.startswith("sqlite"):
+        result = await conn.execute(text("PRAGMA table_info(users)"))
+        existing = {row[1] for row in result.fetchall()}
+        if "avatar_path" not in existing:
+            await conn.execute(text("ALTER TABLE users ADD COLUMN avatar_path VARCHAR(500)"))
+        if "avatar_updated_at" not in existing:
+            await conn.execute(text("ALTER TABLE users ADD COLUMN avatar_updated_at DATETIME"))

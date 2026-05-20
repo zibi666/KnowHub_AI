@@ -874,6 +874,17 @@ body,
   font-size: 0.82rem;
   font-weight: 800;
   box-shadow: inset 0 1px 0 color-mix(in srgb, #ffffff 18%, transparent);
+  overflow: hidden;
+}
+
+.sidebar-avatar img {
+  width: 100%;
+  height: 100%;
+  object-fit: cover;
+}
+
+.sidebar-avatar span {
+  line-height: 1;
 }
 
 .sidebar-account-main {
@@ -1333,11 +1344,62 @@ body,
   font-weight: 750;
 }
 
+.settings-card-note {
+  margin: 0.28rem 0 0;
+  color: var(--muted);
+  font-size: 0.86rem;
+}
+
 .settings-card-header {
   display: flex;
   align-items: center;
   justify-content: space-between;
   gap: 1rem;
+}
+
+.settings-avatar-editor {
+  display: flex;
+  align-items: center;
+  gap: 1rem;
+}
+
+.settings-avatar-preview {
+  display: grid;
+  width: 4.4rem;
+  height: 4.4rem;
+  flex: 0 0 auto;
+  place-items: center;
+  overflow: hidden;
+  border: 1px solid color-mix(in srgb, var(--input-border) 72%, transparent);
+  border-radius: 18px;
+  background: var(--bubble-bg);
+  color: var(--bubble-text);
+  font-size: 1.45rem;
+  font-weight: 800;
+  box-shadow: inset 0 1px 0 color-mix(in srgb, #ffffff 18%, transparent);
+}
+
+.settings-avatar-preview img {
+  width: 100%;
+  height: 100%;
+  object-fit: cover;
+}
+
+.settings-avatar-actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.55rem;
+}
+
+.settings-avatar-actions label {
+  display: inline-flex;
+  cursor: pointer;
+  align-items: center;
+}
+
+.settings-avatar-actions label.disabled {
+  cursor: not-allowed;
+  opacity: 0.55;
 }
 
 .settings-check {

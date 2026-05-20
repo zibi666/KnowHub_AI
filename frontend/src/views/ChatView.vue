@@ -141,6 +141,7 @@ const profileUsername = ref('')
 const profilePassword = ref('')
 const currentPassword = ref('')
 const replacementPassword = ref('')
+const avatarUploading = ref(false)
 
 let scrollFrame: number | null = null
 let activeConversationLoad = 0
@@ -207,6 +208,8 @@ function attachmentKindClass(item: Attachment | { filename: string; mimeSniffed?
 function attachmentDownloadUrl(id: string) {
   return `/api/attachments/${id}/download`
 }
+
+const userInitial = computed(() => auth.user?.username?.slice(0, 1).toUpperCase() || 'U')
 
 function formatBytes(value: number) {
   if (!Number.isFinite(value) || value <= 0) return '0 B'
@@ -807,6 +810,49 @@ async function savePassword() {
   }
 }
 
+async function uploadAvatar(event: Event) {
+  resetSettingsMessages()
+  const input = event.target as HTMLInputElement
+  const file = input.files?.[0]
+  if (!file) return
+  avatarUploading.value = true
+  try {
+    const form = new FormData()
+    form.append('file', file)
+    const csrf = readCookie('csrf_token')
+    const response = await fetch('/api/settings/avatar', {
+      method: 'POST',
+      body: form,
+      credentials: 'include',
+      headers: csrf ? { 'X-CSRF-Token': csrf } : undefined
+    })
+    if (!response.ok) {
+      const payload = await response.json().catch(() => null)
+      throw new Error(payload?.detail?.message || '头像上传失败')
+    }
+    auth.user = await response.json()
+    settingsNotice.value = '头像已更新'
+  } catch (err) {
+    settingsError.value = err instanceof Error ? err.message : '头像上传失败'
+  } finally {
+    avatarUploading.value = false
+    input.value = ''
+  }
+}
+
+async function deleteAvatar() {
+  resetSettingsMessages()
+  avatarUploading.value = true
+  try {
+    auth.user = await apiFetch<User>('/settings/avatar', { method: 'DELETE' })
+    settingsNotice.value = '头像已删除'
+  } catch (err) {
+    settingsError.value = err instanceof Error ? err.message : '头像删除失败'
+  } finally {
+    avatarUploading.value = false
+  }
+}
+
 function isNearBottom(threshold = 80): boolean {
   const scroller = messageScroller.value
   if (!scroller) return true
@@ -1368,7 +1414,10 @@ onMounted(async () => {
 
       <div class="chat-sidebar-footer">
         <div class="sidebar-account-card">
-          <div class="sidebar-avatar" aria-hidden="true">{{ auth.user?.username?.slice(0, 1).toUpperCase() || 'U' }}</div>
+          <div class="sidebar-avatar" aria-hidden="true">
+            <img v-if="auth.user?.avatarUrl" :src="auth.user.avatarUrl" :alt="auth.user.username" />
+            <span v-else>{{ userInitial }}</span>
+          </div>
           <div class="sidebar-account-main">
             <span class="sidebar-username">{{ auth.user?.username }}</span>
             <span class="sidebar-account-role">{{ auth.user?.role === 'admin' ? '管理员' : '用户' }}</span>
@@ -1842,6 +1891,33 @@ onMounted(async () => {
                 <div class="settings-pane-heading">
                   <h2>账号安全</h2>
                   <p>修改用户名和密码。修改用户名只需要输入当前密码确认。</p>
+                </div>
+                <div class="settings-card">
+                  <div>
+                    <h3>更换头像</h3>
+                    <p class="settings-card-note">支持 PNG、JPG、WebP，最大 2MB，会自动裁切为方形头像。</p>
+                  </div>
+                  <div class="settings-avatar-editor">
+                    <div class="settings-avatar-preview" aria-hidden="true">
+                      <img v-if="auth.user?.avatarUrl" :src="auth.user.avatarUrl" :alt="auth.user.username" />
+                      <span v-else>{{ userInitial }}</span>
+                    </div>
+                    <div class="settings-avatar-actions">
+                      <label class="settings-primary" :class="{ disabled: avatarUploading }">
+                        {{ avatarUploading ? '上传中...' : '上传头像' }}
+                        <input
+                          class="hidden"
+                          type="file"
+                          accept="image/png,image/jpeg,image/webp"
+                          :disabled="avatarUploading"
+                          @change="uploadAvatar"
+                        />
+                      </label>
+                      <button class="settings-secondary" type="button" :disabled="avatarUploading || !auth.user?.avatarUrl" @click="deleteAvatar">
+                        删除头像
+                      </button>
+                    </div>
+                  </div>
                 </div>
                 <form class="settings-card" @submit.prevent="saveProfile">
                   <h3>修改用户名</h3>

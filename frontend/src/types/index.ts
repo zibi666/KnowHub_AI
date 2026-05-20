@@ -5,6 +5,7 @@ export interface User {
   status: string
   mustChangePassword: boolean
   hasApiKey: boolean
+  avatarUrl?: string | null
 }
 
 export interface Conversation {
