@@ -2831,7 +2831,7 @@ body,
 .generated-image-preview {
   display: grid;
   width: min(330px, 78vw);
-  aspect-ratio: 1;
+  height: min(330px, 78vw);
   place-items: center;
   overflow: hidden;
   border: 1px solid color-mix(in srgb, var(--text) 12%, transparent);
@@ -2840,10 +2840,18 @@ body,
   box-shadow: 0 16px 34px rgba(0, 0, 0, 0.24);
 }
 
+.generated-image-preview:disabled {
+  cursor: default;
+}
+
+.generated-image-preview.is-saving {
+  border-color: color-mix(in srgb, var(--bubble-bg) 36%, var(--input-border));
+}
+
 .generated-image-final-card {
   display: grid;
   width: min(330px, 78vw);
-  aspect-ratio: 1;
+  height: min(330px, 78vw);
   place-items: center;
   overflow: hidden;
   border: 1px solid color-mix(in srgb, var(--text) 12%, transparent);

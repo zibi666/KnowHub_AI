@@ -31,6 +31,7 @@ export interface Message {
   tokensSource?: string
   createdAt: string
   attachments?: Attachment[]
+  generatedImageSize?: string
   imageProgress?: {
     b64Json: string
     index: number
@@ -40,6 +41,7 @@ export interface Message {
     elapsedSeconds?: number
     startedAt?: number
     phase?: string
+    size?: string
   }
 }
 

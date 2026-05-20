@@ -45,6 +45,7 @@ const collapsibleClasses = computed(() => ({
 const imageAttachments = computed(() => (props.message.attachments || []).filter(isImageAttachment))
 const fileAttachments = computed(() => (props.message.attachments || []).filter((attachment) => !isImageAttachment(attachment)))
 const showGeneratedImageProgress = computed(() => props.message.role === 'assistant' && props.message.status === 'streaming' && props.message.imageProgress)
+const generatedImageFrameStyle = computed(() => generatedImageFrameFromSize(props.message.imageProgress?.size || props.message.generatedImageSize))
 const generatedImageProgressSrc = computed(() => {
   const progress = props.message.imageProgress
   if (!progress?.b64Json) return ''
@@ -66,8 +67,8 @@ const generatedImageElapsed = computed(() => {
 const generatedImageProgressLabel = computed(() => {
   const progress = props.message.imageProgress
   if (!progress) return '等待模型响应'
+  if (progress.phase === 'saving') return progress.b64Json ? '图片生成完成，正在保存' : '正在保存图片'
   if (progress.b64Json) return `进度图 ${progress.index || 1}/${progress.total || 1}`
-  if (progress.phase === 'saving') return '正在保存图片'
   if (progress.phase === 'rendering_long') return '高质量生成中'
   if (progress.phase === 'rendering') return '正在绘制'
   if (progress.phase === 'queued') return '排队与构图'
@@ -84,6 +85,21 @@ function attachmentPreviewUrl(id: string) {
 
 function attachmentDownloadUrl(id: string) {
   return `/api/attachments/${id}/download`
+}
+
+function generatedImageFrameFromSize(size?: string): CSSProperties {
+  const parsed = parseImageSize(size)
+  return imageCardLayout(parsed.width, parsed.height).style
+}
+
+function parseImageSize(size?: string) {
+  if (!size || size === 'auto') return { width: 1024, height: 1024 }
+  const match = size.match(/^(\d+)x(\d+)$/)
+  if (!match) return { width: 1024, height: 1024 }
+  return {
+    width: Number(match[1]) || 1024,
+    height: Number(match[2]) || 1024
+  }
 }
 
 function imageCardLayout(width: number, height: number) {
@@ -139,7 +155,7 @@ function imageCardClass(attachment: Attachment) {
 }
 
 function imageCardStyle(attachment: Attachment): CSSProperties | undefined {
-  return imageLayouts.value[attachment.id]?.style
+  return imageLayouts.value[attachment.id]?.style || generatedImageFrameFromSize(props.message.generatedImageSize)
 }
 
 function attachmentKindLabel(item: Attachment) {
@@ -245,7 +261,13 @@ onUnmounted(() => {
           </div>
         </template>
         <div v-else-if="showGeneratedImageProgress" class="generated-image-progress">
-          <button class="generated-image-preview" type="button">
+          <button
+            class="generated-image-preview"
+            :class="{ 'is-saving': message.imageProgress?.phase === 'saving' }"
+            :style="generatedImageFrameStyle"
+            type="button"
+            disabled
+          >
             <img v-if="generatedImageProgressSrc" :src="generatedImageProgressSrc" alt="生成中的图片" />
             <span v-else class="generated-image-placeholder">
               <span class="generated-image-loader" aria-hidden="true"></span>

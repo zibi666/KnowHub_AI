@@ -213,6 +213,7 @@ async def image_generation_stream(
                             "index": progress_index,
                             "total": partial_images,
                             "output_format": generation_settings["output_format"],
+                            "size": generation_settings["size"],
                         },
                     )
                 elif event_type.endswith("completed") or event_type == "image.completed":

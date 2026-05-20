@@ -1358,7 +1358,8 @@ async function send() {
             detail: data.detail || '正在等待模型返回图片进度。',
             elapsedSeconds: Number(data.elapsed_seconds ?? data.elapsedSeconds ?? assistant.imageProgress?.elapsedSeconds ?? 0),
             startedAt: assistant.imageProgress?.startedAt || Date.now(),
-            phase: data.phase || assistant.imageProgress?.phase || 'submitted'
+            phase: data.phase || assistant.imageProgress?.phase || 'submitted',
+            size: data.size || assistant.imageProgress?.size || imageSettings.value.size
           }
           scheduleScrollToBottom()
         } else if (event === 'image_progress') {
@@ -1371,12 +1372,14 @@ async function send() {
             detail: `已收到图像结果 ${Number(data.index || 1)}/${Number(data.total || 1)}，继续等待最终保存。`,
             elapsedSeconds: assistant.imageProgress?.elapsedSeconds,
             startedAt: assistant.imageProgress?.startedAt || Date.now(),
-            phase: 'partial'
+            phase: 'partial',
+            size: data.size || assistant.imageProgress?.size || imageSettings.value.size
           }
           scheduleScrollToBottom()
         } else if (event === 'image_completed') {
           if (data.attachment) {
             assistant.attachments = [data.attachment]
+            assistant.generatedImageSize = assistant.imageProgress?.size || imageSettings.value.size
             assistant.imageProgress = undefined
             assistant.content = '已根据提示词生成图片。'
           }

@@ -671,6 +671,7 @@ async def stream_image_generation_chat(
                 return
             api_key = decrypt_api_key(api_key_row.ciphertext)
             image_settings = quota.image_settings_json if quota else None
+        image_size = image_settings.get("size", "1024x1024") if isinstance(image_settings, dict) else "1024x1024"
 
         generation_started = time.perf_counter()
         status_tick = 0
@@ -682,6 +683,7 @@ async def stream_image_generation_chat(
                 "elapsed_seconds": 0,
                 "phase": "submitted",
                 "model": model,
+                "size": image_size,
             },
         )
         stream = image_generation_stream(
@@ -717,6 +719,7 @@ async def stream_image_generation_chat(
                             "phase": phase,
                             "tick": status_tick,
                             "model": model,
+                            "size": image_size,
                         },
                     )
                     continue
@@ -746,6 +749,7 @@ async def stream_image_generation_chat(
                 "elapsed_seconds": int(time.perf_counter() - generation_started),
                 "phase": "saving",
                 "model": model,
+                "size": image_size,
             },
         )
 
