@@ -2361,7 +2361,8 @@ body,
 }
 
 .chat-header {
-  display: flex;
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto;
   position: absolute;
   top: 1rem;
   left: 1.45rem;
@@ -2381,6 +2382,8 @@ body,
   align-items: center;
   gap: 0.28rem;
   min-width: 0;
+  max-width: 100%;
+  overflow: visible;
 }
 
 .top-icon-button {
@@ -2428,15 +2431,31 @@ body,
 }
 
 .chat-header-info {
-  margin-left: auto;
   display: inline-flex;
   align-items: center;
   gap: 0.85rem;
+  justify-self: end;
+  max-width: min(34rem, 46vw);
   border-radius: 999px;
   color: var(--muted);
   font-size: 0.88rem;
   padding: 0.42rem 0.85rem;
+  overflow: hidden;
   white-space: nowrap;
+}
+
+.chat-header-info span {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.chat-header-info span:first-child {
+  flex: 0 0 auto;
+}
+
+.chat-header-info span:last-child {
+  flex: 1 1 auto;
 }
 
 .chat-main {
@@ -3039,7 +3058,7 @@ body,
 }
 
 .composer-card.is-empty-composer {
-  min-height: 4.65rem;
+  min-height: 4.7rem;
   border-radius: 999px;
   background: color-mix(in srgb, var(--input-bg) 92%, #ffffff 2%);
   box-shadow:
@@ -3258,9 +3277,12 @@ body,
 }
 
 .composer-card.is-empty-composer .composer-input {
-  height: 1.65rem;
-  padding: 1.18rem 11.8rem 0.15rem 3.4rem;
-  line-height: 1.4;
+  height: 4.65rem;
+  min-height: 4.65rem;
+  padding: 1.56rem 4.65rem 1.05rem 3.4rem;
+  overflow: hidden;
+  line-height: 1.45;
+  white-space: nowrap;
 }
 
 .composer-card:has(.composer-attachments) .composer-input {
@@ -3314,19 +3336,14 @@ body,
 
 .composer-card.is-empty-composer .composer-right-tools {
   position: absolute;
-  right: 0.82rem;
+  right: 0.74rem;
   top: 50%;
   display: flex;
   transform: translateY(-50%);
 }
 
 .composer-card.is-empty-composer .composer-right-tools::before {
-  align-self: center;
-  margin-right: 0.62rem;
-  color: var(--text);
-  content: "Flash⌄";
-  font-size: 0.9rem;
-  opacity: 0.82;
+  content: none;
 }
 
 .composer-left-tools,
@@ -3897,11 +3914,16 @@ body,
   }
 
   .chat-header {
-    flex-wrap: wrap;
+    grid-template-columns: 1fr;
     height: auto;
     left: 0.7rem;
     right: 0.7rem;
     top: 0.7rem;
+  }
+
+  .chat-header-info {
+    justify-self: start;
+    max-width: 100%;
   }
 
   .composer-toolbar {
@@ -3914,12 +3936,7 @@ body,
   }
 
   .composer-card.is-empty-composer .composer-input {
-    padding-right: 7.3rem;
-  }
-
-  .composer-card.is-empty-composer .composer-right-tools::before {
-    content: "";
-    margin-right: 0;
+    padding-right: 4.45rem;
   }
 
   .composer-left-tools,
