@@ -1353,7 +1353,7 @@ async function send() {
           assistant.imageProgress = {
             b64Json: assistant.imageProgress?.b64Json || '',
             index: assistant.imageProgress?.index || 0,
-            total: assistant.imageProgress?.total || 2,
+            total: assistant.imageProgress?.total || 1,
             outputFormat: assistant.imageProgress?.outputFormat || 'png',
             detail: data.detail || '正在等待模型返回图片进度。',
             elapsedSeconds: Number(data.elapsed_seconds ?? data.elapsedSeconds ?? assistant.imageProgress?.elapsedSeconds ?? 0),
@@ -1366,9 +1366,9 @@ async function send() {
           assistant.imageProgress = {
             b64Json: data.b64_json || data.b64Json || '',
             index: Number(data.index || 1),
-            total: Number(data.total || 2),
+            total: Number(data.total || 1),
             outputFormat: data.output_format || data.outputFormat || 'png',
-            detail: `已收到进度图 ${Number(data.index || 1)}/${Number(data.total || 2)}，继续等待最终图片。`,
+            detail: `已收到图像结果 ${Number(data.index || 1)}/${Number(data.total || 1)}，继续等待最终保存。`,
             elapsedSeconds: assistant.imageProgress?.elapsedSeconds,
             startedAt: assistant.imageProgress?.startedAt || Date.now(),
             phase: 'partial'

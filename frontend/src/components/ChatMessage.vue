@@ -66,7 +66,7 @@ const generatedImageElapsed = computed(() => {
 const generatedImageProgressLabel = computed(() => {
   const progress = props.message.imageProgress
   if (!progress) return '等待模型响应'
-  if (progress.b64Json) return `进度图 ${progress.index || 1}/${progress.total || 2}`
+  if (progress.b64Json) return `进度图 ${progress.index || 1}/${progress.total || 1}`
   if (progress.phase === 'saving') return '正在保存图片'
   if (progress.phase === 'rendering_long') return '高质量生成中'
   if (progress.phase === 'rendering') return '正在绘制'

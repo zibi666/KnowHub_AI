@@ -690,7 +690,7 @@ async def stream_image_generation_chat(
             prompt=prompt,
             user_id=user_id,
             image_settings=image_settings,
-            partial_images=2,
+            partial_images=1,
         ).__aiter__()
         pending_next = asyncio.ensure_future(_safe_anext(stream))
         try:

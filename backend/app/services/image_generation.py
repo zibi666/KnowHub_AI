@@ -123,7 +123,7 @@ async def image_generation_stream(
     prompt: str,
     user_id: str,
     image_settings: dict[str, Any] | None = None,
-    partial_images: int = 2,
+    partial_images: int = 1,
 ) -> AsyncIterator[StreamEvent]:
     settings = get_settings()
     upstream_model = to_upstream_image_model(model)
