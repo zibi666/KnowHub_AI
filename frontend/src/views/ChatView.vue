@@ -1614,6 +1614,7 @@ onMounted(async () => {
           />
 
           <AppSelect
+            v-if="!selectedModelIsImageGeneration()"
             v-model="reasoningEffort"
             class="model-picker model-picker-reasoning"
             button-class="model-picker-button"
