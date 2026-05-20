@@ -30,6 +30,7 @@ const TEXT_SIZE_STORAGE_KEY = 'private-gpt-text-size'
 const CODE_SIZE_STORAGE_KEY = 'private-gpt-code-size'
 const REASONING_STORAGE_KEY = 'private-gpt-reasoning-effort'
 const SIDEBAR_STORAGE_KEY = 'private-gpt-sidebar-collapsed'
+const WELCOME_STORAGE_KEY = 'private-gpt-welcome-message'
 
 type ReasoningEffort = 'low' | 'medium' | 'high' | 'xhigh'
 const reasoningOptions: Array<{ value: ReasoningEffort; label: string; hint: string }> = [
@@ -96,6 +97,7 @@ const themeMode = ref<ThemeMode>('dark')
 const bubbleColor = ref<BubbleColor>('blue')
 const textSize = ref(15)
 const codeSize = ref(12)
+const welcomeMessage = ref('')
 const settingsMenuOpen = ref(false)
 const settingsOpen = ref(false)
 const sidebarCollapsed = ref(false)
@@ -148,6 +150,22 @@ const conversationUsage = computed(() => {
     requests: assistantMessages.length
   }
 })
+const defaultWelcomeMessage = computed(() => {
+  const name = auth.user?.username?.trim()
+  return name ? `Hi ${name}, what can we work on?` : 'What can we work on?'
+})
+const effectiveWelcomeMessage = computed(() => welcomeMessage.value.trim() || defaultWelcomeMessage.value)
+const isEmptyChat = computed(() => !currentId.value && !messagesLoading.value && messages.value.length === 0)
+const hasConversationFrame = computed(() => Boolean(currentId.value) || messagesLoading.value || messages.value.length > 0)
+const composerClasses = computed(() => ({
+  'is-expanded': composerExpanded.value,
+  'is-drag-active': composerDragActive.value,
+  'is-empty-composer':
+    isEmptyChat.value &&
+    !composerExpanded.value &&
+    pendingAttachments.value.length === 0 &&
+    uploadingAttachmentNames.value.length === 0
+}))
 
 function isImageAttachment(item: Attachment) {
   return item.mimeSniffed?.startsWith('image/')
@@ -369,6 +387,9 @@ function loadAppearance() {
   const storedCodeSize = Number(window.localStorage.getItem(CODE_SIZE_STORAGE_KEY))
   if (storedCodeSize >= 11 && storedCodeSize <= 16) codeSize.value = storedCodeSize
 
+  const storedWelcomeMessage = window.localStorage.getItem(WELCOME_STORAGE_KEY)
+  if (storedWelcomeMessage !== null) welcomeMessage.value = storedWelcomeMessage.slice(0, 90)
+
   const storedReasoning = window.localStorage.getItem(REASONING_STORAGE_KEY)
   if (reasoningOptions.some((item) => item.value === storedReasoning)) {
     reasoningEffort.value = storedReasoning as ReasoningEffort
@@ -410,6 +431,25 @@ function setTextSize(size: number) {
 function setCodeSize(size: number) {
   codeSize.value = size
   window.localStorage.setItem(CODE_SIZE_STORAGE_KEY, String(size))
+}
+
+function setWelcomeMessage(value: string) {
+  const normalized = value.slice(0, 90)
+  if (welcomeMessage.value !== normalized) welcomeMessage.value = normalized
+  if (normalized.trim()) {
+    window.localStorage.setItem(WELCOME_STORAGE_KEY, normalized)
+  } else {
+    window.localStorage.removeItem(WELCOME_STORAGE_KEY)
+  }
+}
+
+function handleWelcomeMessageInput(event: Event) {
+  setWelcomeMessage((event.target as HTMLInputElement).value)
+}
+
+function resetWelcomeMessage() {
+  welcomeMessage.value = ''
+  window.localStorage.removeItem(WELCOME_STORAGE_KEY)
 }
 
 function setNewApiKeyGroup(groupId: string | number) {
@@ -830,7 +870,6 @@ async function loadConversations() {
   conversationsLoading.value = conversations.value.length === 0
   try {
     conversations.value = await apiFetch<Conversation[]>('/conversations')
-    if (!currentId.value && conversations.value[0]) await openConversation(conversations.value[0].id)
   } catch (err) {
     if (err instanceof ApiError && err.code === 'INVALID_CREDENTIALS') {
       await router.push('/login')
@@ -1339,7 +1378,7 @@ onMounted(async () => {
 
     <main
       class="chat-main flex flex-col min-w-0 min-h-0 overflow-hidden"
-      :class="{ 'has-messages': messages.length > 0, 'composer-open': composerExpanded }"
+      :class="{ 'has-messages': hasConversationFrame, 'is-empty-chat': isEmptyChat, 'composer-open': composerExpanded }"
     >
       <header class="chat-header">
         <div class="top-model-controls" @click.stop>
@@ -1409,6 +1448,11 @@ onMounted(async () => {
       </section>
 
       <footer class="chat-footer p-4">
+        <Transition name="welcome-rise">
+          <div v-if="isEmptyChat" class="empty-welcome">
+            {{ effectiveWelcomeMessage }}
+          </div>
+        </Transition>
         <button
           v-if="showScrollToBottom"
           class="scroll-bottom-button"
@@ -1422,7 +1466,7 @@ onMounted(async () => {
 
         <form
           class="composer-card"
-          :class="{ 'is-expanded': composerExpanded, 'is-drag-active': composerDragActive }"
+          :class="composerClasses"
           @submit.prevent="send"
           @paste="handleComposerPaste"
           @dragenter.prevent="handleComposerDragEnter"
@@ -1528,6 +1572,19 @@ onMounted(async () => {
                   <p>调整主题、气泡颜色、正文和代码字号。</p>
                 </div>
                 <div class="settings-grid">
+                  <label class="settings-field settings-field-wide">
+                    <span>新对话顶部文字</span>
+                    <div class="settings-inline-field">
+                      <input
+                        v-model="welcomeMessage"
+                        class="settings-input"
+                        maxlength="90"
+                        :placeholder="defaultWelcomeMessage"
+                        @input="handleWelcomeMessageInput"
+                      />
+                      <button class="settings-secondary" type="button" @click="resetWelcomeMessage">恢复默认</button>
+                    </div>
+                  </label>
                   <label class="settings-field">
                     <span>主题</span>
                     <AppSelect

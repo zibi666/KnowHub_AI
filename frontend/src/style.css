@@ -1268,6 +1268,17 @@ body,
   gap: 0.8rem;
 }
 
+.settings-field-wide {
+  grid-column: 1 / -1;
+}
+
+.settings-inline-field {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto;
+  align-items: center;
+  gap: 0.55rem;
+}
+
 .settings-field {
   display: grid;
   gap: 0.35rem;
@@ -2433,6 +2444,34 @@ body,
   isolation: isolate;
 }
 
+.chat-main::before {
+  position: absolute;
+  inset: auto 10% 14% 10%;
+  z-index: 0;
+  height: min(44vh, 420px);
+  pointer-events: none;
+  content: "";
+  background:
+    radial-gradient(ellipse at center, color-mix(in srgb, var(--bubble-bg) 24%, transparent) 0%, transparent 62%),
+    radial-gradient(ellipse at center, rgba(30, 58, 138, 0.18) 0%, transparent 68%);
+  filter: blur(28px);
+  opacity: 0;
+  transform: translateY(2rem) scale(0.94);
+  transition:
+    opacity 520ms var(--ease-out-soft),
+    transform 620ms var(--ease-out-soft);
+}
+
+.chat-main.is-empty-chat::before {
+  opacity: 1;
+  transform: translateY(0) scale(1);
+}
+
+.chat-main > * {
+  position: relative;
+  z-index: 1;
+}
+
 .chat-muted {
   color: var(--muted);
 }
@@ -2442,6 +2481,13 @@ body,
   padding-top: 5.2rem !important;
   padding-bottom: 2.4rem !important;
   scrollbar-color: var(--scroll-thumb) transparent;
+  opacity: 1;
+  transition: opacity 260ms ease;
+}
+
+.chat-main.is-empty-chat .chat-surface {
+  pointer-events: none;
+  opacity: 0;
 }
 
 .chat-main.has-messages .chat-surface {
@@ -2502,6 +2548,18 @@ body,
 
 .empty-chat-state {
   min-height: calc(100vh - 18rem);
+}
+
+.empty-welcome {
+  width: min(760px, calc(100vw - 4rem));
+  margin: 0 auto 2.2rem;
+  color: color-mix(in srgb, var(--text) 86%, transparent);
+  font-size: clamp(2rem, 4vw, 3.3rem);
+  font-weight: 420;
+  letter-spacing: 0;
+  line-height: 1.12;
+  text-align: center;
+  text-wrap: balance;
 }
 
 .message-user-stack {
@@ -2870,7 +2928,7 @@ body,
 .chat-footer {
   pointer-events: auto;
   position: absolute;
-  top: 50%;
+  top: calc(50% + 1.8rem);
   left: 50%;
   z-index: 18;
   display: flex;
@@ -2880,13 +2938,21 @@ body,
   border-top: 0;
   background: transparent;
   transform: translate(-50%, -50%);
-  transition: top 180ms ease, bottom 180ms ease, transform 180ms ease;
+  transition:
+    top 420ms var(--ease-out-soft),
+    bottom 420ms var(--ease-out-soft),
+    width 420ms var(--ease-out-soft),
+    transform 420ms var(--ease-out-soft);
 }
 
 .chat-main.has-messages .chat-footer {
   top: auto;
   bottom: 0;
   transform: translateX(-50%);
+}
+
+.chat-main.is-empty-chat .chat-footer {
+  width: min(820px, calc(100vw - 4rem));
 }
 
 .scroll-bottom-button {
@@ -2937,7 +3003,12 @@ body,
   background: var(--input-bg);
   box-shadow: 0 18px 52px rgba(0, 0, 0, 0.34);
   overflow: visible;
-  transition: border-radius 180ms ease, box-shadow 180ms ease;
+  transition:
+    min-height 320ms var(--ease-out-soft),
+    border-radius 320ms var(--ease-out-soft),
+    box-shadow 320ms var(--ease-out-soft),
+    background 220ms ease,
+    border-color 220ms ease;
 }
 
 .composer-card::before {
@@ -2967,6 +3038,28 @@ body,
   border-radius: 22px;
 }
 
+.composer-card.is-empty-composer {
+  min-height: 4.65rem;
+  border-radius: 999px;
+  background: color-mix(in srgb, var(--input-bg) 92%, #ffffff 2%);
+  box-shadow:
+    0 20px 64px rgba(0, 0, 0, 0.34),
+    inset 0 1px 0 color-mix(in srgb, #ffffff 8%, transparent);
+}
+
+.composer-card.is-empty-composer::before {
+  inset: -34px -80px;
+  border-radius: 999px;
+  background:
+    radial-gradient(ellipse at center, color-mix(in srgb, var(--bubble-bg) 18%, transparent) 0%, transparent 68%),
+    color-mix(in srgb, var(--surface-bg) 32%, transparent);
+  filter: blur(2px);
+}
+
+.composer-card.is-empty-composer::after {
+  box-shadow: 0 0 0 1px color-mix(in srgb, var(--text) 6%, transparent);
+}
+
 .composer-card.is-drag-active {
   border-color: color-mix(in srgb, var(--bubble-bg) 72%, var(--input-border));
   box-shadow:
@@ -2993,6 +3086,10 @@ body,
   background: transparent;
   cursor: pointer;
   transition: background 150ms ease, color 150ms ease, transform 150ms ease;
+}
+
+.composer-card.is-empty-composer .composer-expand-button {
+  display: none;
 }
 
 .composer-expand-button:hover {
@@ -3155,7 +3252,15 @@ body,
   font-size: 0.92rem;
   line-height: 1.55;
   scrollbar-width: none;
-  transition: height 180ms ease;
+  transition:
+    height 320ms var(--ease-out-soft),
+    padding 320ms var(--ease-out-soft);
+}
+
+.composer-card.is-empty-composer .composer-input {
+  height: 1.65rem;
+  padding: 1.18rem 11.8rem 0.15rem 3.4rem;
+  line-height: 1.4;
 }
 
 .composer-card:has(.composer-attachments) .composer-input {
@@ -3185,6 +3290,43 @@ body,
   gap: 0.45rem 0.6rem;
   border-top: 0;
   padding: 0.3rem 0.7rem 0.62rem;
+}
+
+.composer-card.is-empty-composer .composer-toolbar {
+  position: absolute;
+  inset: 0;
+  pointer-events: none;
+  padding: 0 0.82rem;
+}
+
+.composer-card.is-empty-composer .composer-left-tools,
+.composer-card.is-empty-composer .composer-right-tools {
+  pointer-events: auto;
+}
+
+.composer-card.is-empty-composer .composer-left-tools {
+  position: absolute;
+  left: 0.72rem;
+  top: 50%;
+  flex: none;
+  transform: translateY(-50%);
+}
+
+.composer-card.is-empty-composer .composer-right-tools {
+  position: absolute;
+  right: 0.82rem;
+  top: 50%;
+  display: flex;
+  transform: translateY(-50%);
+}
+
+.composer-card.is-empty-composer .composer-right-tools::before {
+  align-self: center;
+  margin-right: 0.62rem;
+  color: var(--text);
+  content: "Flash⌄";
+  font-size: 0.9rem;
+  opacity: 0.82;
 }
 
 .composer-left-tools,
@@ -3419,6 +3561,28 @@ body,
 .send-button:disabled {
   cursor: not-allowed;
   opacity: 0.5;
+}
+
+.welcome-rise-enter-active,
+.welcome-rise-leave-active {
+  transition:
+    opacity 360ms var(--ease-out-soft),
+    transform 420ms var(--ease-out-soft),
+    filter 420ms var(--ease-out-soft);
+}
+
+.welcome-rise-enter-from,
+.welcome-rise-leave-to {
+  opacity: 0;
+  filter: blur(8px);
+  transform: translate3d(0, 1rem, 0) scale(0.985);
+}
+
+.welcome-rise-enter-to,
+.welcome-rise-leave-from {
+  opacity: 1;
+  filter: blur(0);
+  transform: translate3d(0, 0, 0) scale(1);
 }
 
 .code-block {
@@ -3745,10 +3909,28 @@ body,
     flex-direction: column;
   }
 
+  .composer-card.is-empty-composer {
+    min-height: 4.2rem;
+  }
+
+  .composer-card.is-empty-composer .composer-input {
+    padding-right: 7.3rem;
+  }
+
+  .composer-card.is-empty-composer .composer-right-tools::before {
+    content: "";
+    margin-right: 0;
+  }
+
   .composer-left-tools,
   .composer-right-tools {
     width: 100%;
     justify-content: space-between;
+  }
+
+  .composer-card.is-empty-composer .composer-left-tools,
+  .composer-card.is-empty-composer .composer-right-tools {
+    width: auto;
   }
 
   .model-picker {
