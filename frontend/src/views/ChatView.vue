@@ -31,6 +31,7 @@ const CODE_SIZE_STORAGE_KEY = 'private-gpt-code-size'
 const REASONING_STORAGE_KEY = 'private-gpt-reasoning-effort'
 const SIDEBAR_STORAGE_KEY = 'private-gpt-sidebar-collapsed'
 const WELCOME_STORAGE_KEY = 'private-gpt-welcome-message'
+const WELCOME_SIZE_STORAGE_KEY = 'private-gpt-welcome-font-size'
 
 type ReasoningEffort = 'low' | 'medium' | 'high' | 'xhigh'
 const reasoningOptions: Array<{ value: ReasoningEffort; label: string; hint: string }> = [
@@ -42,6 +43,7 @@ const reasoningOptions: Array<{ value: ReasoningEffort; label: string; hint: str
 
 const textSizeOptions = [13, 14, 15, 16, 17, 18, 19]
 const codeSizeOptions = [11, 12, 13, 14, 15, 16]
+const welcomeSizeOptions = [36, 40, 44, 48, 52, 56, 60, 64]
 const themeOptions: Array<{ value: ThemeMode; label: string }> = [
   { value: 'dark', label: '暗色' },
   { value: 'light', label: '浅色' }
@@ -49,6 +51,7 @@ const themeOptions: Array<{ value: ThemeMode; label: string }> = [
 
 const textSizeMenuOptions = textSizeOptions.map((size) => ({ value: size, label: `${size} px` }))
 const codeSizeMenuOptions = codeSizeOptions.map((size) => ({ value: size, label: `${size} px` }))
+const welcomeSizeMenuOptions = welcomeSizeOptions.map((size) => ({ value: size, label: `${size} px` }))
 
 const auth = useAuthStore()
 const router = useRouter()
@@ -98,6 +101,7 @@ const bubbleColor = ref<BubbleColor>('blue')
 const textSize = ref(15)
 const codeSize = ref(12)
 const welcomeMessage = ref('')
+const welcomeFontSize = ref(48)
 const settingsMenuOpen = ref(false)
 const settingsOpen = ref(false)
 const sidebarCollapsed = ref(false)
@@ -296,7 +300,8 @@ const shellStyle = computed(
       '--bubble-shadow': selectedBubble.value.shadow,
       '--message-font-size': `${textSize.value}px`,
       '--user-message-font-size': `${Math.max(13, textSize.value - 0.5)}px`,
-      '--code-font-size': `${codeSize.value}px`
+      '--code-font-size': `${codeSize.value}px`,
+      '--welcome-font-size': `${welcomeFontSize.value}px`
     }) as CSSProperties
 )
 
@@ -390,6 +395,9 @@ function loadAppearance() {
   const storedWelcomeMessage = window.localStorage.getItem(WELCOME_STORAGE_KEY)
   if (storedWelcomeMessage !== null) welcomeMessage.value = storedWelcomeMessage.slice(0, 90)
 
+  const storedWelcomeSize = Number(window.localStorage.getItem(WELCOME_SIZE_STORAGE_KEY))
+  if (welcomeSizeOptions.includes(storedWelcomeSize)) welcomeFontSize.value = storedWelcomeSize
+
   const storedReasoning = window.localStorage.getItem(REASONING_STORAGE_KEY)
   if (reasoningOptions.some((item) => item.value === storedReasoning)) {
     reasoningEffort.value = storedReasoning as ReasoningEffort
@@ -431,6 +439,12 @@ function setTextSize(size: number) {
 function setCodeSize(size: number) {
   codeSize.value = size
   window.localStorage.setItem(CODE_SIZE_STORAGE_KEY, String(size))
+}
+
+function setWelcomeFontSize(size: number) {
+  if (!welcomeSizeOptions.includes(size)) return
+  welcomeFontSize.value = size
+  window.localStorage.setItem(WELCOME_SIZE_STORAGE_KEY, String(size))
 }
 
 function setWelcomeMessage(value: string) {
@@ -1631,6 +1645,18 @@ onMounted(async () => {
                       option-class="settings-select-option"
                       :options="codeSizeMenuOptions"
                       @change="setCodeSize(Number($event))"
+                    />
+                  </label>
+                  <label class="settings-field">
+                    <span>欢迎语字号</span>
+                    <AppSelect
+                      v-model="welcomeFontSize"
+                      class="settings-select"
+                      button-class="settings-select-button"
+                      menu-class="settings-select-menu"
+                      option-class="settings-select-option"
+                      :options="welcomeSizeMenuOptions"
+                      @change="setWelcomeFontSize(Number($event))"
                     />
                   </label>
                 </div>
