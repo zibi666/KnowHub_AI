@@ -1403,10 +1403,12 @@ async function send() {
           await waitForStreamFlush()
           assistant.id = data.message_id || data.messageId
           if (currentId.value) {
+            const generatedImageSize = assistant.generatedImageSize || assistant.imageProgress?.size
             const canonical = await apiFetch<Message>(`/conversations/${currentId.value}/messages/${assistant.id}`)
             const typedContent = assistant.content
             const canonicalContent = canonical.content || ''
             Object.assign(assistant, { ...canonical, content: typedContent.trim() ? typedContent : canonicalContent })
+            if (generatedImageSize) assistant.generatedImageSize = generatedImageSize
             assistant.imageProgress = undefined
           }
           if (!assistant.content.trim() && typeof data.content === 'string') assistant.content = data.content

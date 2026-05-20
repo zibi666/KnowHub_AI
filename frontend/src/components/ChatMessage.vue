@@ -142,6 +142,7 @@ function imageCardLayout(width: number, height: number) {
 }
 
 function handleImageLoad(attachment: Attachment, event: Event) {
+  if (props.message.role === 'assistant' && props.message.generatedImageSize) return
   const image = event.target as HTMLImageElement | null
   if (!image?.naturalWidth || !image?.naturalHeight) return
   imageLayouts.value = {
@@ -151,6 +152,7 @@ function handleImageLoad(attachment: Attachment, event: Event) {
 }
 
 function imageCardClass(attachment: Attachment) {
+  if (props.message.role === 'assistant' && props.message.generatedImageSize) return 'is-generated-sized'
   return imageLayouts.value[attachment.id]?.className || 'is-loading'
 }
 
@@ -287,9 +289,11 @@ onUnmounted(() => {
               type="button"
               :title="`查看图片：${attachment.filename}`"
               :aria-label="`查看图片：${attachment.filename}`"
+              :class="imageCardClass(attachment)"
+              :style="imageCardStyle(attachment)"
               @click="emit('previewAttachment', attachment)"
             >
-              <img :src="attachmentPreviewUrl(attachment.id)" :alt="attachment.filename" />
+              <img :src="attachmentPreviewUrl(attachment.id)" :alt="attachment.filename" @load="handleImageLoad(attachment, $event)" />
             </button>
             <a class="generated-image-download" :href="attachmentDownloadUrl(attachment.id)" target="_blank" rel="noreferrer">
               <Download :size="15" />
