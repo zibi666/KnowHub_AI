@@ -2597,14 +2597,14 @@ body,
 }
 
 .empty-welcome {
-  width: min(760px, calc(100vw - 4rem));
-  margin: 0 auto 2.2rem;
+  width: 100%;
+  margin: 0 0 2.2rem;
   color: color-mix(in srgb, var(--text) 86%, transparent);
   font-size: clamp(2rem, min(var(--welcome-font-size), 4vw), 3.3rem);
   font-weight: 420;
   letter-spacing: 0;
   line-height: 1.12;
-  text-align: center;
+  text-align: left;
   text-wrap: balance;
 }
 
@@ -2994,7 +2994,7 @@ body,
 .chat-main.has-messages .chat-footer {
   top: auto;
   bottom: 0;
-  transform: translateX(-50%);
+  transform: translateX(calc(-50% - 1.25rem));
 }
 
 .chat-main.is-empty-chat .chat-footer {
