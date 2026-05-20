@@ -1350,13 +1350,26 @@ async function send() {
           appendStreamText(assistant, data.text || '')
         } else if (event === 'image_status') {
           assistant.content = data.text || '正在生成图片'
+          assistant.imageProgress = {
+            b64Json: assistant.imageProgress?.b64Json || '',
+            index: assistant.imageProgress?.index || 0,
+            total: assistant.imageProgress?.total || 2,
+            outputFormat: assistant.imageProgress?.outputFormat || 'png',
+            detail: data.detail || '正在等待模型返回图片进度。',
+            elapsedSeconds: Number(data.elapsed_seconds ?? data.elapsedSeconds ?? assistant.imageProgress?.elapsedSeconds ?? 0),
+            phase: data.phase || assistant.imageProgress?.phase || 'submitted'
+          }
+          scheduleScrollToBottom()
         } else if (event === 'image_progress') {
           assistant.content = '正在生成图片'
           assistant.imageProgress = {
             b64Json: data.b64_json || data.b64Json || '',
             index: Number(data.index || 1),
             total: Number(data.total || 2),
-            outputFormat: data.output_format || data.outputFormat || 'png'
+            outputFormat: data.output_format || data.outputFormat || 'png',
+            detail: `已收到进度图 ${Number(data.index || 1)}/${Number(data.total || 2)}，继续等待最终图片。`,
+            elapsedSeconds: assistant.imageProgress?.elapsedSeconds,
+            phase: 'partial'
           }
           scheduleScrollToBottom()
         } else if (event === 'image_completed') {

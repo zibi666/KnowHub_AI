@@ -49,6 +49,24 @@ const generatedImageProgressSrc = computed(() => {
   const format = progress.outputFormat === 'jpeg' ? 'jpeg' : progress.outputFormat || 'png'
   return `data:image/${format};base64,${progress.b64Json}`
 })
+const generatedImageElapsed = computed(() => {
+  const seconds = props.message.imageProgress?.elapsedSeconds
+  if (!Number.isFinite(seconds) || seconds === undefined) return ''
+  if (seconds < 60) return `${Math.max(0, Math.floor(seconds))} 秒`
+  const minutes = Math.floor(seconds / 60)
+  const rest = Math.floor(seconds % 60)
+  return `${minutes} 分 ${String(rest).padStart(2, '0')} 秒`
+})
+const generatedImageProgressLabel = computed(() => {
+  const progress = props.message.imageProgress
+  if (!progress) return '等待模型响应'
+  if (progress.b64Json) return `进度图 ${progress.index || 1}/${progress.total || 2}`
+  if (progress.phase === 'saving') return '正在保存图片'
+  if (progress.phase === 'rendering_long') return '高质量生成中'
+  if (progress.phase === 'rendering') return '正在绘制'
+  if (progress.phase === 'queued') return '排队与构图'
+  return '已提交请求'
+})
 
 function isImageAttachment(item: Attachment) {
   return item.mimeSniffed?.startsWith('image/')
@@ -202,11 +220,15 @@ watch(
         <div v-else-if="showGeneratedImageProgress" class="generated-image-progress">
           <button class="generated-image-preview" type="button">
             <img v-if="generatedImageProgressSrc" :src="generatedImageProgressSrc" alt="生成中的图片" />
-            <span v-else class="generated-image-placeholder">正在生成图片</span>
+            <span v-else class="generated-image-placeholder">
+              <span class="generated-image-loader" aria-hidden="true"></span>
+              正在生成图片
+            </span>
           </button>
           <div class="generated-image-meta">
-            <strong>正在生成图片</strong>
-            <span>进度图 {{ message.imageProgress?.index || 1 }}/{{ message.imageProgress?.total || 2 }}</span>
+            <strong>{{ generatedImageProgressLabel }}</strong>
+            <span>{{ message.imageProgress?.detail || '正在等待图像模型返回结果。' }}</span>
+            <em v-if="generatedImageElapsed">已等待 {{ generatedImageElapsed }}</em>
           </div>
         </div>
         <div v-else-if="imageAttachments.length" class="message-generated-images">

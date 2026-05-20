@@ -672,7 +672,18 @@ async def stream_image_generation_chat(
             api_key = decrypt_api_key(api_key_row.ciphertext)
             image_settings = quota.image_settings_json if quota else None
 
-        yield json_line("image_status", {"text": "正在生成图片", "model": model})
+        generation_started = time.perf_counter()
+        status_tick = 0
+        yield json_line(
+            "image_status",
+            {
+                "text": "正在生成图片",
+                "detail": "已提交生成请求，正在等待模型开始返回图像。",
+                "elapsed_seconds": 0,
+                "phase": "submitted",
+                "model": model,
+            },
+        )
         stream = image_generation_stream(
             api_key=api_key,
             model=model,
@@ -684,9 +695,30 @@ async def stream_image_generation_chat(
         pending_next = asyncio.ensure_future(_safe_anext(stream))
         try:
             while True:
-                done, _ = await asyncio.wait({pending_next}, timeout=get_settings().stream_ping_interval_seconds)
+                done, _ = await asyncio.wait({pending_next}, timeout=5)
                 if not done:
-                    yield json_line("ping", {"ts": datetime.utcnow().isoformat()})
+                    elapsed_seconds = int(time.perf_counter() - generation_started)
+                    status_tick += 1
+                    if elapsed_seconds < 15:
+                        detail = "模型正在排队和构图，图像生成通常比文字回复更慢。"
+                        phase = "queued"
+                    elif elapsed_seconds < 45:
+                        detail = "模型正在绘制主图，收到进度图或终稿后会立即刷新。"
+                        phase = "rendering"
+                    else:
+                        detail = "仍在生成中，高质量图片可能需要 60-90 秒，请保持页面打开。"
+                        phase = "rendering_long"
+                    yield json_line(
+                        "image_status",
+                        {
+                            "text": "正在生成图片",
+                            "detail": detail,
+                            "elapsed_seconds": elapsed_seconds,
+                            "phase": phase,
+                            "tick": status_tick,
+                            "model": model,
+                        },
+                    )
                     continue
                 event = pending_next.result()
                 if event is _STREAM_END:
@@ -705,6 +737,17 @@ async def stream_image_generation_chat(
 
         if not final_b64:
             raise RuntimeError("image generation completed without image data")
+
+        yield json_line(
+            "image_status",
+            {
+                "text": "图片已生成",
+                "detail": "正在保存图片并生成下载附件。",
+                "elapsed_seconds": int(time.perf_counter() - generation_started),
+                "phase": "saving",
+                "model": model,
+            },
+        )
 
         async with SessionLocal() as db:
             attachment = await save_generated_image_attachment(db, user_id, final_b64, final_format)

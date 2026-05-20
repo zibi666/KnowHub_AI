@@ -36,6 +36,9 @@ export interface Message {
     index: number
     total: number
     outputFormat: string
+    detail?: string
+    elapsedSeconds?: number
+    phase?: string
   }
 }
 
