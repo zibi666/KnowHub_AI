@@ -2479,38 +2479,38 @@ body,
 
 .chat-main::before {
   position: absolute;
-  inset: auto 10% 14% 10%;
+  inset: 9vh -4vw auto -4vw;
   z-index: 0;
-  height: min(44vh, 420px);
+  height: min(66vh, 620px);
   pointer-events: none;
   content: "";
   background:
-    radial-gradient(ellipse at center, color-mix(in srgb, var(--bubble-bg) 24%, transparent) 0%, transparent 62%),
-    radial-gradient(ellipse at center, rgba(30, 58, 138, 0.18) 0%, transparent 68%);
-  filter: blur(28px);
+    radial-gradient(ellipse at 50% 46%, rgba(35, 67, 153, 0.48) 0%, rgba(18, 35, 92, 0.36) 36%, rgba(8, 13, 30, 0) 76%),
+    linear-gradient(180deg, rgba(15, 23, 42, 0.04), rgba(16, 31, 78, 0.2) 42%, rgba(5, 5, 5, 0));
+  filter: blur(32px);
   opacity: 0;
-  transform: translateY(2rem) scale(0.94);
+  transform: translateY(1.4rem) scale(0.96);
   transition:
     opacity 520ms var(--ease-out-soft),
     transform 620ms var(--ease-out-soft);
 }
 
 .chat-main.is-empty-chat::before {
-  opacity: 1;
+  opacity: 0.95;
   transform: translateY(0) scale(1);
 }
 
 .chat-shell.theme-light .chat-main::before {
-  inset: auto 13% 11% 13%;
-  height: min(40vh, 360px);
+  inset: 7vh -6vw auto -6vw;
+  height: min(70vh, 660px);
   background:
-    radial-gradient(ellipse at center, color-mix(in srgb, var(--bubble-bg) 11%, transparent) 0%, transparent 68%),
-    radial-gradient(ellipse at center, rgba(148, 163, 184, 0.12) 0%, transparent 74%);
-  filter: blur(46px);
+    radial-gradient(ellipse at 50% 48%, rgba(188, 225, 255, 0.86) 0%, rgba(213, 236, 255, 0.6) 42%, rgba(247, 247, 248, 0) 80%),
+    linear-gradient(180deg, rgba(247, 247, 248, 0), rgba(225, 241, 255, 0.38) 52%, rgba(247, 247, 248, 0));
+  filter: blur(36px);
 }
 
 .chat-shell.theme-light .chat-main.is-empty-chat::before {
-  opacity: 0.7;
+  opacity: 1;
 }
 
 .chat-main > :not(.chat-header) {
@@ -3094,12 +3094,15 @@ body,
 }
 
 .composer-card.is-empty-composer::before {
-  inset: -34px -80px;
+  inset: -20px -42px;
   border-radius: 999px;
-  background:
-    radial-gradient(ellipse at center, color-mix(in srgb, var(--bubble-bg) 18%, transparent) 0%, transparent 68%),
-    color-mix(in srgb, var(--surface-bg) 32%, transparent);
-  filter: blur(2px);
+  background: color-mix(in srgb, var(--surface-bg) 20%, transparent);
+  filter: blur(18px);
+  opacity: 0.42;
+  backdrop-filter: none;
+  -webkit-backdrop-filter: none;
+  mask-image: radial-gradient(ellipse at center, #000 36%, transparent 76%);
+  -webkit-mask-image: radial-gradient(ellipse at center, #000 36%, transparent 76%);
 }
 
 .composer-card.is-empty-composer::after {
@@ -3116,17 +3119,15 @@ body,
 }
 
 .chat-shell.theme-light .composer-card.is-empty-composer::before {
-  inset: -22px -48px -58px;
+  inset: -14px -30px -26px;
   border-radius: 999px;
-  background:
-    radial-gradient(ellipse at 50% 45%, color-mix(in srgb, var(--bubble-bg) 9%, transparent) 0%, transparent 66%),
-    radial-gradient(ellipse at center, rgba(148, 163, 184, 0.1) 0%, transparent 78%);
-  filter: blur(38px);
-  opacity: 0.75;
+  background: rgba(255, 255, 255, 0.44);
+  filter: blur(18px);
+  opacity: 0.52;
   backdrop-filter: none;
   -webkit-backdrop-filter: none;
-  mask-image: radial-gradient(ellipse at center, #000 28%, transparent 76%);
-  -webkit-mask-image: radial-gradient(ellipse at center, #000 28%, transparent 76%);
+  mask-image: radial-gradient(ellipse at center, #000 34%, transparent 78%);
+  -webkit-mask-image: radial-gradient(ellipse at center, #000 34%, transparent 78%);
 }
 
 .chat-shell.theme-light .composer-card.is-empty-composer::after {
