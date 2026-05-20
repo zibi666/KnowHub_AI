@@ -2380,10 +2380,19 @@ body,
   pointer-events: auto;
   display: inline-flex;
   align-items: center;
-  gap: 0.42rem;
+  gap: 0.08rem;
   min-width: 0;
   max-width: 100%;
   overflow: visible;
+  border: 1px solid color-mix(in srgb, var(--input-border) 70%, transparent);
+  border-radius: 10px;
+  background: color-mix(in srgb, var(--surface-bg) 82%, transparent);
+  box-shadow:
+    0 12px 30px rgba(0, 0, 0, 0.12),
+    inset 0 1px 0 color-mix(in srgb, #ffffff 36%, transparent);
+  padding: 0.18rem 0.24rem;
+  backdrop-filter: blur(16px) saturate(126%);
+  -webkit-backdrop-filter: blur(16px) saturate(126%);
 }
 
 .top-icon-button {
@@ -2393,19 +2402,16 @@ body,
   width: 2.2rem;
   height: 2.2rem;
   flex: 0 0 auto;
-  border-radius: 999px;
+  border-radius: 9px;
   color: var(--muted);
-  background: color-mix(in srgb, var(--surface-bg) 68%, transparent);
-  border: 1px solid color-mix(in srgb, var(--input-border) 76%, transparent);
-  backdrop-filter: blur(16px) saturate(122%);
-  -webkit-backdrop-filter: blur(16px) saturate(122%);
+  background: transparent;
+  border: 0;
   transition: background 150ms ease, border-color 150ms ease, color 150ms ease, transform 150ms ease;
 }
 
 .top-icon-button:hover {
   color: var(--text);
-  border-color: color-mix(in srgb, var(--text) 18%, var(--input-border));
-  background: color-mix(in srgb, var(--control-hover) 78%, transparent);
+  background: color-mix(in srgb, var(--control-hover) 82%, transparent);
 }
 
 .top-icon-button:active {
@@ -2475,6 +2481,7 @@ body,
   position: relative;
   isolation: isolate;
   overflow: visible;
+  background: var(--surface-bg);
 }
 
 .chat-main::before {
@@ -3018,7 +3025,10 @@ body,
 }
 
 .chat-main.is-empty-chat .chat-footer {
+  top: calc(50% + 1.8rem);
+  bottom: auto;
   width: min(820px, calc(100vw - 4rem));
+  transform: translate(-50%, -50%);
 }
 
 .scroll-bottom-button {
@@ -3066,8 +3076,10 @@ body,
   width: 100%;
   border: 1px solid color-mix(in srgb, var(--input-border) 74%, transparent);
   border-radius: 22px;
-  background: var(--input-bg);
-  box-shadow: 0 18px 52px rgba(0, 0, 0, 0.34);
+  background: color-mix(in srgb, var(--input-bg) 76%, transparent);
+  box-shadow: 0 18px 52px rgba(0, 0, 0, 0.26);
+  backdrop-filter: blur(18px) saturate(122%);
+  -webkit-backdrop-filter: blur(18px) saturate(122%);
   overflow: visible;
   transition:
     min-height 320ms var(--ease-out-soft),
@@ -3083,9 +3095,9 @@ body,
   z-index: -1;
   border-radius: 34px;
   content: "";
-  background: color-mix(in srgb, var(--surface-bg) 42%, transparent);
-  backdrop-filter: blur(16px);
-  -webkit-backdrop-filter: blur(16px);
+  background: color-mix(in srgb, var(--surface-bg) 18%, transparent);
+  filter: blur(20px);
+  opacity: 0.62;
   mask-image: radial-gradient(ellipse at center, #000 58%, transparent 78%);
   -webkit-mask-image: radial-gradient(ellipse at center, #000 58%, transparent 78%);
 }
@@ -3131,10 +3143,10 @@ body,
 
 .chat-shell.theme-light .composer-card.is-empty-composer {
   border-color: rgba(148, 163, 184, 0.28);
-  background: rgba(255, 255, 255, 0.86);
+  background: rgba(255, 255, 255, 0.72);
   box-shadow:
-    0 18px 44px rgba(15, 23, 42, 0.08),
-    0 4px 14px rgba(15, 23, 42, 0.04),
+    0 18px 44px rgba(15, 23, 42, 0.07),
+    0 4px 14px rgba(15, 23, 42, 0.035),
     inset 0 1px 0 rgba(255, 255, 255, 0.9);
 }
 
@@ -3445,12 +3457,10 @@ body,
   display: inline-flex;
   align-items: center;
   min-height: 2.2rem;
-  border: 1px solid color-mix(in srgb, var(--input-border) 76%, transparent);
-  border-radius: 999px;
-  background: color-mix(in srgb, var(--surface-bg) 68%, transparent);
+  border: 0;
+  border-radius: 9px;
+  background: transparent;
   color: var(--text);
-  backdrop-filter: blur(16px) saturate(122%);
-  -webkit-backdrop-filter: blur(16px) saturate(122%);
   transition: background 150ms ease, border-color 150ms ease, color 150ms ease, box-shadow 150ms ease;
 }
 
@@ -3459,15 +3469,13 @@ body,
 }
 
 .model-picker:hover {
-  border-color: color-mix(in srgb, var(--text) 18%, var(--input-border));
-  background: color-mix(in srgb, var(--control-hover) 78%, transparent);
+  background: color-mix(in srgb, var(--control-hover) 82%, transparent);
 }
 
 .model-picker:focus-within {
   z-index: 220;
-  border-color: color-mix(in srgb, var(--bubble-bg) 62%, var(--input-border));
-  background: color-mix(in srgb, var(--control-hover) 82%, transparent);
-  box-shadow: 0 10px 28px rgba(0, 0, 0, 0.24);
+  background: color-mix(in srgb, var(--control-hover) 86%, transparent);
+  box-shadow: none;
 }
 
 .model-picker > span {
@@ -3484,7 +3492,7 @@ body,
 
 .top-model-controls .model-picker:hover,
 .top-model-controls .model-picker:focus-within {
-  background: color-mix(in srgb, var(--control-hover) 82%, transparent);
+  background: color-mix(in srgb, var(--control-hover) 86%, transparent);
 }
 
 .model-picker-model > span {

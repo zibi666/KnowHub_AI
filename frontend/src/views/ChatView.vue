@@ -159,8 +159,8 @@ const defaultWelcomeMessage = computed(() => {
   return name ? `Hi ${name}, what can we work on?` : 'What can we work on?'
 })
 const effectiveWelcomeMessage = computed(() => welcomeMessage.value.trim() || defaultWelcomeMessage.value)
-const isEmptyChat = computed(() => !currentId.value && !messagesLoading.value && messages.value.length === 0)
-const hasConversationFrame = computed(() => Boolean(currentId.value) || messagesLoading.value || messages.value.length > 0)
+const isEmptyChat = computed(() => !messagesLoading.value && messages.value.length === 0)
+const hasConversationFrame = computed(() => messagesLoading.value || messages.value.length > 0)
 const composerClasses = computed(() => ({
   'is-expanded': composerExpanded.value,
   'is-drag-active': composerDragActive.value,
