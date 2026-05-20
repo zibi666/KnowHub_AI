@@ -298,8 +298,8 @@ const shellStyle = computed(
       '--bubble-bg': selectedBubble.value.bg,
       '--bubble-hover': selectedBubble.value.hover,
       '--bubble-shadow': selectedBubble.value.shadow,
-      '--message-font-size': `${textSize.value}px`,
-      '--user-message-font-size': `${Math.max(13, textSize.value - 0.5)}px`,
+      '--message-font-size': `${Math.max(16, textSize.value)}px`,
+      '--user-message-font-size': `${Math.max(15.5, textSize.value - 0.25)}px`,
       '--code-font-size': `${codeSize.value}px`,
       '--welcome-font-size': `${welcomeFontSize.value}px`
     }) as CSSProperties
@@ -1425,6 +1425,17 @@ onMounted(async () => {
         <div class="chat-header-info">
           <span>{{ conversationUsage.tokens.toLocaleString() }} Tokens · {{ conversationUsage.requests }} requests</span>
           <span>{{ currentConversation?.title || '新对话' }}</span>
+          <button
+            v-if="currentConversation"
+            class="chat-header-rename-button"
+            type="button"
+            title="修改对话名称"
+            aria-label="修改对话名称"
+            :disabled="streaming"
+            @click.stop="openRenameConversation(currentConversation)"
+          >
+            <Pencil :size="13" />
+          </button>
         </div>
       </header>
 
