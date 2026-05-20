@@ -5,6 +5,7 @@ import { apiFetch } from '../api/client'
 import AppSelect from '../components/AppSelect.vue'
 import { useAuthStore } from '../stores/auth'
 import type { ApiKeyEntry, ApiKeyGroup } from '../types'
+import { copyText } from '../utils/clipboard'
 
 const router = useRouter()
 const auth = useAuthStore()
@@ -110,7 +111,7 @@ async function copyKey(key: ApiKeyEntry) {
   resetMessage()
   try {
     const result = await apiFetch<{ apiKey: string }>(`/api-keys/${key.id}/secret`)
-    await navigator.clipboard.writeText(result.apiKey)
+    await copyText(result.apiKey)
     notice.value = '密钥已复制'
   } catch (err) {
     error.value = err instanceof Error ? err.message : '复制失败'

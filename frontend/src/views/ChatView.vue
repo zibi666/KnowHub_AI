@@ -7,6 +7,7 @@ import AppSelect from '../components/AppSelect.vue'
 import ChatMessage from '../components/ChatMessage.vue'
 import { useAuthStore } from '../stores/auth'
 import type { ApiKeyEntry, ApiKeyGroup, Attachment, AttachmentChunkPreview, Conversation, ConversationSearchResult, Message, User } from '../types'
+import { copyText } from '../utils/clipboard'
 
 type ThemeMode = 'dark' | 'light'
 type SettingsTab = 'appearance' | 'api' | 'groups' | 'account'
@@ -62,6 +63,7 @@ const currentId = ref<string | null>(null)
 const messages = ref<Message[]>([])
 const messagesLoading = ref(false)
 const input = ref('')
+const composerInput = ref<HTMLTextAreaElement | null>(null)
 const composerExpanded = ref(false)
 const models = ref<string[]>([])
 const selectedModel = ref('')
@@ -730,7 +732,7 @@ async function copyApiKeySecret(key: ApiKeyEntry, adminUserId?: string | null) {
       ? `/admin/users/${adminUserId}/api-keys/${key.id}/secret`
       : `/api-keys/${key.id}/secret`
     const result = await apiFetch<{ apiKey: string }>(path)
-    await navigator.clipboard.writeText(result.apiKey)
+    await copyText(result.apiKey)
     settingsNotice.value = '密钥已复制'
   } catch (err) {
     settingsError.value = err instanceof Error ? err.message : '复制密钥失败'
@@ -1313,6 +1315,23 @@ function handleComposerKeydown(event: KeyboardEvent) {
   void send()
 }
 
+function resizeComposerInput() {
+  const textarea = composerInput.value
+  if (!textarea) return
+  textarea.style.height = 'auto'
+  textarea.style.height = `${textarea.scrollHeight}px`
+}
+
+watch(input, async () => {
+  await nextTick()
+  resizeComposerInput()
+})
+
+watch(composerExpanded, async () => {
+  await nextTick()
+  resizeComposerInput()
+})
+
 function closeFloatingMenus() {
   settingsMenuOpen.value = false
 }
@@ -1325,6 +1344,8 @@ watch(searchQuery, () => {
 onMounted(async () => {
   loadAppearance()
   await Promise.all([loadModels(), loadConversations()])
+  await nextTick()
+  resizeComposerInput()
 })
 </script>
 
@@ -1590,6 +1611,7 @@ onMounted(async () => {
             <Maximize2 v-else :size="17" />
           </button>
           <textarea
+            ref="composerInput"
             v-model="input"
             class="composer-input"
             placeholder="输入消息，按 Enter 发送，Shift + Enter 换行"

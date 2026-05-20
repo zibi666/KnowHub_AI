@@ -4,6 +4,7 @@ import { useRouter } from 'vue-router'
 import { apiFetch } from '../api/client'
 import AppSelect from '../components/AppSelect.vue'
 import type { ApiKeyEntry, ApiKeyGroup, User } from '../types'
+import { copyText } from '../utils/clipboard'
 
 const router = useRouter()
 const users = ref<User[]>([])
@@ -210,7 +211,7 @@ async function deleteAdminKey(key: ApiKeyEntry) {
 async function copyAdminKey(key: ApiKeyEntry) {
   if (!selectedKeyUser.value) return
   const result = await apiFetch<{ apiKey: string }>(`/admin/users/${selectedKeyUser.value.id}/api-keys/${key.id}/secret`)
-  await navigator.clipboard.writeText(result.apiKey)
+  await copyText(result.apiKey)
   notice.value = '密钥已复制'
 }
 

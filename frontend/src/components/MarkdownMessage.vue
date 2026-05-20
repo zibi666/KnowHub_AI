@@ -1,5 +1,6 @@
 <script setup lang="ts">
 import { onBeforeUnmount, ref, watch } from 'vue'
+import { copyText } from '../utils/clipboard'
 import { renderMarkdownCached } from '../utils/markdown'
 
 const props = defineProps<{ content: string }>()
@@ -35,9 +36,14 @@ async function handleClick(event: MouseEvent) {
   const encoded = block?.dataset.code
   if (!encoded) return
 
-  await navigator.clipboard.writeText(decodeURIComponent(encoded))
   const oldText = button.textContent || '复制'
-  button.textContent = '已复制'
+  try {
+    await copyText(decodeURIComponent(encoded))
+    button.textContent = '已复制'
+  } catch {
+    button.textContent = '复制失败'
+  }
+
   window.setTimeout(() => {
     button.textContent = oldText
   }, 1200)
