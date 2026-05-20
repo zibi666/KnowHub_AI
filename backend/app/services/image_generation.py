@@ -241,6 +241,7 @@ async def image_generation_stream(
                             b64_json=b64_json,
                             output_format=str(chunk.get("output_format") or generation_settings["output_format"]),
                         )
+                        break
     if not completed:
         raise api_error("UPSTREAM_ERROR", "图像模型没有返回最终图片")
     yield StreamEvent("image_completed", {"b64_json": completed.b64_json, "output_format": completed.output_format})
