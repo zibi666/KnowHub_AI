@@ -3447,6 +3447,10 @@ body,
   box-shadow: inset 0 0 0 1px color-mix(in srgb, var(--bubble-bg) 70%, transparent);
 }
 
+.composer-card.is-scrollable {
+  overflow: hidden;
+}
+
 .composer-expand-button {
   position: absolute;
   top: 0.6rem;
@@ -3618,8 +3622,8 @@ body,
   z-index: 1;
   width: 100%;
   box-sizing: border-box;
-  min-height: 4.4rem;
-  max-height: min(34vh, 20rem);
+  min-height: 3.9rem;
+  max-height: min(32vh, 19rem);
   resize: none;
   border: 0;
   border-radius: 0;
@@ -3628,7 +3632,7 @@ body,
   outline: none;
   overflow-y: auto;
   overflow-x: hidden;
-  padding: 0.76rem 4.35rem 0.58rem 1.08rem;
+  padding: 1rem 2.1rem 0.24rem 1.3rem;
   font-size: 1rem;
   line-height: 1.45;
   overflow-wrap: break-word;
@@ -3661,7 +3665,25 @@ body,
 }
 
 .composer-input::-webkit-scrollbar {
-  display: none;
+  width: 0.42rem;
+}
+
+.composer-input::-webkit-scrollbar-track {
+  background: transparent;
+}
+
+.composer-input::-webkit-scrollbar-thumb {
+  border-radius: 999px;
+  background: transparent;
+}
+
+.composer-card.is-scrollable .composer-input {
+  padding-right: 2.55rem;
+  scrollbar-width: thin;
+}
+
+.composer-card.is-scrollable .composer-input::-webkit-scrollbar-thumb {
+  background: color-mix(in srgb, var(--text) 18%, transparent);
 }
 
 .composer-input::placeholder {
@@ -3677,7 +3699,8 @@ body,
   flex-wrap: wrap;
   gap: 0.45rem 0.6rem;
   border-top: 0;
-  padding: 0.3rem 0.7rem 0.62rem;
+  min-height: 3rem;
+  padding: 0.2rem 0.86rem 0.62rem;
 }
 
 .composer-card.is-empty-composer .composer-toolbar {

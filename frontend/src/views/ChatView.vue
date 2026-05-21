@@ -111,6 +111,8 @@ const streaming = ref(false)
 const pendingAttachments = ref<Attachment[]>([])
 const uploadingAttachmentNames = ref<string[]>([])
 const composerDragActive = ref(false)
+const composerCompact = ref(true)
+const composerScrollable = ref(false)
 const attachmentPreviewOpen = ref(false)
 const attachmentPreview = ref<Attachment | null>(null)
 const attachmentPreviewText = ref('')
@@ -196,6 +198,7 @@ const imageSettings = ref<ImageGenerationSettings>({
 })
 
 let scrollFrame: number | null = null
+let composerResizeFrame: number | null = null
 let activeConversationLoad = 0
 let imagePollingTimer: number | null = null
 let conversationEventSource: EventSource | null = null
@@ -218,15 +221,18 @@ const defaultWelcomeMessage = computed(() => {
 const effectiveWelcomeMessage = computed(() => welcomeMessage.value.trim() || defaultWelcomeMessage.value)
 const isEmptyChat = computed(() => !messagesLoading.value && messages.value.length === 0)
 const hasConversationFrame = computed(() => messagesLoading.value || messages.value.length > 0)
+const canUseCompactComposer = computed(
+  () =>
+    isEmptyChat.value &&
+    !composerExpanded.value &&
+    pendingAttachments.value.length === 0 &&
+    uploadingAttachmentNames.value.length === 0
+)
 const composerClasses = computed(() => ({
   'is-expanded': composerExpanded.value,
   'is-drag-active': composerDragActive.value,
-  'is-empty-composer':
-    isEmptyChat.value &&
-    !composerExpanded.value &&
-    input.value.length === 0 &&
-    pendingAttachments.value.length === 0 &&
-    uploadingAttachmentNames.value.length === 0
+  'is-empty-composer': canUseCompactComposer.value && composerCompact.value,
+  'is-scrollable': composerScrollable.value
 }))
 
 function isImageAttachment(item: Attachment) {
@@ -2014,15 +2020,47 @@ function handleComposerKeydown(event: KeyboardEvent) {
   void send()
 }
 
+function lineBoxHeight(textarea: HTMLTextAreaElement) {
+  const style = getComputedStyle(textarea)
+  const lineHeight = Number.parseFloat(style.lineHeight)
+  return Number.isFinite(lineHeight) ? lineHeight : 0
+}
+
 function resizeComposerInput() {
   const textarea = composerInput.value
   if (!textarea) return
+
+  const previousCompact = composerCompact.value
+  if (!canUseCompactComposer.value) {
+    composerCompact.value = false
+  } else {
+    const previousHeight = textarea.style.height
+    textarea.style.height = 'auto'
+    const lineHeight = lineBoxHeight(textarea)
+    composerCompact.value = textarea.scrollHeight <= textarea.clientHeight + lineHeight * 0.5
+    textarea.style.height = previousHeight
+  }
+  if (previousCompact !== composerCompact.value) {
+    void nextTick().then(resizeComposerInput)
+  }
+
   textarea.style.height = 'auto'
   const maxHeight = Number.parseFloat(getComputedStyle(textarea).maxHeight)
   const hasMaxHeight = Number.isFinite(maxHeight)
   const nextHeight = hasMaxHeight ? Math.min(textarea.scrollHeight, maxHeight) : textarea.scrollHeight
   textarea.style.height = `${nextHeight}px`
-  textarea.style.overflowY = hasMaxHeight && textarea.scrollHeight > nextHeight ? 'auto' : 'hidden'
+  composerScrollable.value = hasMaxHeight && textarea.scrollHeight > nextHeight
+  textarea.style.overflowY = composerScrollable.value ? 'auto' : 'hidden'
+}
+
+function scheduleComposerResize() {
+  if (composerResizeFrame !== null) {
+    window.cancelAnimationFrame(composerResizeFrame)
+  }
+  composerResizeFrame = window.requestAnimationFrame(() => {
+    composerResizeFrame = null
+    resizeComposerInput()
+  })
 }
 
 watch(input, async () => {
@@ -2034,6 +2072,14 @@ watch(composerExpanded, async () => {
   await nextTick()
   resizeComposerInput()
 })
+
+watch(
+  () => canUseCompactComposer.value,
+  async () => {
+    await nextTick()
+    resizeComposerInput()
+  }
+)
 
 function closeFloatingMenus() {
   settingsMenuOpen.value = false
@@ -2053,12 +2099,18 @@ onMounted(async () => {
   }
   await nextTick()
   resizeComposerInput()
+  window.addEventListener('resize', scheduleComposerResize)
 })
 
 onUnmounted(() => {
   stopImagePolling()
   stopConversationEvents()
   cancelPendingScroll()
+  if (composerResizeFrame !== null) {
+    window.cancelAnimationFrame(composerResizeFrame)
+    composerResizeFrame = null
+  }
+  window.removeEventListener('resize', scheduleComposerResize)
 })
 </script>
 
