@@ -839,10 +839,10 @@ body,
 }
 
 .sidebar-brand-icon {
-  width: 1.42rem;
-  height: 1.42rem;
+  width: 1.75rem;
+  height: 1.75rem;
   flex: 0 0 auto;
-  border-radius: 0.45rem;
+  border-radius: 0.55rem;
   object-fit: contain;
 }
 
