@@ -1,8 +1,12 @@
 from __future__ import annotations
 
+import asyncio
+import contextlib
 import hashlib
 import json
 import logging
+import shutil
+import tempfile
 import time
 from collections.abc import AsyncIterator
 from dataclasses import dataclass
@@ -63,6 +67,12 @@ IMAGE_GENERATION_HTTP_TIMEOUT_SECONDS = 15 * 60
 class GeneratedImage:
     b64_json: str
     output_format: str
+
+
+@dataclass
+class ImageGenerationHTTPResponse:
+    status_code: int
+    text: str
 
 
 def is_image_generation_model(model: str | None) -> bool:
@@ -288,12 +298,6 @@ async def image_generation_nonstream(
     generation_settings = normalize_image_settings(image_settings)
     upstream_model, payload = image_generation_payload(model, prompt, user_id, generation_settings)
     output_format = effective_image_output_format(generation_settings)
-    headers = {
-        "Authorization": f"Bearer {api_key}",
-        "Content-Type": "application/json",
-        "Accept": "application/json",
-        "Connection": "close",
-    }
     request_started = time.perf_counter()
     perf_logger.info(
         "upstream_timing image_generation_nonstream_request_start model=%s prompt_chars=%d payload_keys=%s",
@@ -301,19 +305,11 @@ async def image_generation_nonstream(
         len(prompt or ""),
         ",".join(sorted(payload.keys())),
     )
-    timeout = httpx.Timeout(
-        IMAGE_GENERATION_HTTP_TIMEOUT_SECONDS,
-        connect=30.0,
-        write=30.0,
-        pool=30.0,
+    response = await post_image_generation_json(
+        api_key,
+        f"{settings.model_base_url.rstrip('/')}/images/generations",
+        payload,
     )
-    limits = httpx.Limits(max_connections=10, max_keepalive_connections=0)
-    async with httpx.AsyncClient(timeout=timeout, limits=limits) as client:
-        response = await client.post(
-            f"{settings.model_base_url.rstrip('/')}/images/generations",
-            headers=headers,
-            json=payload,
-        )
     perf_logger.info(
         "upstream_timing image_generation_nonstream_status model=%s status=%d elapsed_ms=%d",
         upstream_model,
@@ -325,7 +321,7 @@ async def image_generation_nonstream(
     if response.status_code >= 400:
         raise api_error("UPSTREAM_ERROR", response.text[:500], status_code=response.status_code)
     try:
-        body = response.json()
+        body = json.loads(response.text)
     except json.JSONDecodeError:
         raise api_error("UPSTREAM_ERROR", "图像模型返回了无法解析的响应")
     b64_json = extract_image_b64(body)
@@ -333,6 +329,99 @@ async def image_generation_nonstream(
         raise api_error("UPSTREAM_ERROR", "图像模型没有返回最终图片")
     output_format = extract_image_output_format(body, output_format)
     return GeneratedImage(b64_json=b64_json, output_format=output_format)
+
+
+async def post_image_generation_json(
+    api_key: str,
+    url: str,
+    payload: dict[str, Any],
+) -> ImageGenerationHTTPResponse:
+    curl_path = shutil.which("curl")
+    if curl_path:
+        return await post_image_generation_json_with_curl(curl_path, api_key, url, payload)
+    return await post_image_generation_json_with_httpx(api_key, url, payload)
+
+
+async def post_image_generation_json_with_curl(
+    curl_path: str,
+    api_key: str,
+    url: str,
+    payload: dict[str, Any],
+) -> ImageGenerationHTTPResponse:
+    config_path = ""
+    request_path = ""
+    response_path = ""
+    try:
+        with tempfile.NamedTemporaryFile("w", encoding="utf-8", delete=False, suffix=".curl") as config_file:
+            config_path = config_file.name
+            config_file.write("http1.1\n")
+            config_file.write("compressed\n")
+            config_file.write("silent\n")
+            config_file.write("show-error\n")
+            config_file.write(f"max-time = {IMAGE_GENERATION_HTTP_TIMEOUT_SECONDS}\n")
+            config_file.write("connect-timeout = 30\n")
+            config_file.write('request = "POST"\n')
+            config_file.write(f'url = "{url}"\n')
+            config_file.write(f'header = "Authorization: Bearer {api_key}"\n')
+            config_file.write('header = "Content-Type: application/json"\n')
+            config_file.write('header = "Accept: application/json"\n')
+            config_file.write('user-agent = "node"\n')
+        with tempfile.NamedTemporaryFile("w", encoding="utf-8", delete=False, suffix=".json") as request_file:
+            request_path = request_file.name
+            json.dump(payload, request_file, ensure_ascii=False)
+        with tempfile.NamedTemporaryFile("w", encoding="utf-8", delete=False, suffix=".json") as response_file:
+            response_path = response_file.name
+
+        process = await asyncio.create_subprocess_exec(
+            curl_path,
+            "--config",
+            config_path,
+            "--data-binary",
+            f"@{request_path}",
+            "-o",
+            response_path,
+            "-w",
+            "%{http_code}",
+            stdout=asyncio.subprocess.PIPE,
+            stderr=asyncio.subprocess.PIPE,
+        )
+        stdout, stderr = await process.communicate()
+        response_text = Path(response_path).read_text(encoding="utf-8", errors="replace")
+        if process.returncode != 0:
+            error_text = stderr.decode("utf-8", errors="replace").strip() or response_text[:500]
+            raise api_error("UPSTREAM_ERROR", f"图像生成请求传输失败：{error_text[:500]}")
+        status_text = stdout.decode("utf-8", errors="replace").strip()
+        if not status_text:
+            raise api_error("UPSTREAM_ERROR", "图像模型没有返回 HTTP 状态码")
+        return ImageGenerationHTTPResponse(status_code=int(status_text[-3:]), text=response_text)
+    finally:
+        for path in (config_path, request_path, response_path):
+            if path:
+                with contextlib.suppress(FileNotFoundError):
+                    Path(path).unlink()
+
+
+async def post_image_generation_json_with_httpx(
+    api_key: str,
+    url: str,
+    payload: dict[str, Any],
+) -> ImageGenerationHTTPResponse:
+    headers = {
+        "Authorization": f"Bearer {api_key}",
+        "Content-Type": "application/json",
+        "Accept": "application/json",
+        "User-Agent": "node",
+    }
+    timeout = httpx.Timeout(
+        IMAGE_GENERATION_HTTP_TIMEOUT_SECONDS,
+        connect=30.0,
+        write=30.0,
+        pool=30.0,
+    )
+    limits = httpx.Limits(max_connections=10, max_keepalive_connections=0)
+    async with httpx.AsyncClient(timeout=timeout, limits=limits) as client:
+        response = await client.post(url, headers=headers, json=payload)
+    return ImageGenerationHTTPResponse(status_code=response.status_code, text=response.text)
 
 
 def extract_image_b64(chunk: dict[str, Any]) -> str | None:

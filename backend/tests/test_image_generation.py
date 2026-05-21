@@ -2,75 +2,58 @@ import asyncio
 
 import pytest
 from fastapi import HTTPException
-import httpx
 
-from app.services.image_generation import image_generation_nonstream
-
-
-class DummyResponse:
-    def __init__(self, status_code: int, body):
-        self.status_code = status_code
-        self._body = body
-        self.text = str(body)
-
-    def json(self):
-        if isinstance(self._body, Exception):
-            raise self._body
-        return self._body
+from app.services.image_generation import ImageGenerationHTTPResponse, image_generation_nonstream
 
 
-class DummyAsyncClient:
-    response: DummyResponse
-    responses: list[DummyResponse | Exception] = []
+class DummyTransport:
+    response = ImageGenerationHTTPResponse(200, '{"data":[{"b64_json":"abc"}]}')
+    responses: list[ImageGenerationHTTPResponse | Exception] = []
     payloads: list[dict] = []
 
-    def __init__(self, *args, **kwargs):
-        pass
-
-    async def __aenter__(self):
-        return self
-
-    async def __aexit__(self, exc_type, exc, tb):
-        return None
-
-    async def post(self, url, headers=None, json=None):
-        self.__class__.payloads.append(json or {})
-        if self.__class__.responses:
-            response = self.__class__.responses.pop(0)
+    @classmethod
+    async def post(cls, api_key, url, payload):
+        cls.payloads.append(payload)
+        if cls.responses:
+            response = cls.responses.pop(0)
             if isinstance(response, Exception):
                 raise response
             return response
-        return self.__class__.response
+        return cls.response
+
+
+def install_dummy_transport(monkeypatch, image_generation):
+    monkeypatch.setattr(image_generation, "post_image_generation_json", DummyTransport.post)
 
 
 def test_image_generation_nonstream_reads_data_b64(monkeypatch):
     import app.services.image_generation as image_generation
 
-    DummyAsyncClient.payloads = []
-    DummyAsyncClient.responses = []
-    DummyAsyncClient.response = DummyResponse(200, {"data": [{"b64_json": "abc", "output_format": "webp"}]})
-    monkeypatch.setattr(image_generation.httpx, "AsyncClient", DummyAsyncClient)
+    DummyTransport.payloads = []
+    DummyTransport.responses = []
+    DummyTransport.response = ImageGenerationHTTPResponse(200, '{"data":[{"b64_json":"abc","output_format":"webp"}]}')
+    install_dummy_transport(monkeypatch, image_generation)
 
     result = asyncio.run(image_generation_nonstream("sk-test", "gpt-image-2", "draw", "u1", {"output_format": "webp"}))
 
     assert result.b64_json == "abc"
     assert result.output_format == "webp"
-    assert "stream" not in DummyAsyncClient.payloads[0]
-    assert "partial_images" not in DummyAsyncClient.payloads[0]
-    assert "user" not in DummyAsyncClient.payloads[0]
+    assert "stream" not in DummyTransport.payloads[0]
+    assert "partial_images" not in DummyTransport.payloads[0]
+    assert "user" not in DummyTransport.payloads[0]
 
 
 def test_image_generation_nonstream_uses_documented_default_payload(monkeypatch):
     import app.services.image_generation as image_generation
 
-    DummyAsyncClient.payloads = []
-    DummyAsyncClient.responses = []
-    DummyAsyncClient.response = DummyResponse(200, {"data": [{"b64_json": "abc"}]})
-    monkeypatch.setattr(image_generation.httpx, "AsyncClient", DummyAsyncClient)
+    DummyTransport.payloads = []
+    DummyTransport.responses = []
+    DummyTransport.response = ImageGenerationHTTPResponse(200, '{"data":[{"b64_json":"abc"}]}')
+    install_dummy_transport(monkeypatch, image_generation)
 
     asyncio.run(image_generation_nonstream("sk-test", "image-2", "draw", "u1", None))
 
-    assert DummyAsyncClient.payloads[0] == {
+    assert DummyTransport.payloads[0] == {
         "model": "gpt-image-2",
         "prompt": "draw",
         "n": 1,
@@ -80,10 +63,10 @@ def test_image_generation_nonstream_uses_documented_default_payload(monkeypatch)
 def test_image_generation_nonstream_sends_only_selected_optional_payload(monkeypatch):
     import app.services.image_generation as image_generation
 
-    DummyAsyncClient.payloads = []
-    DummyAsyncClient.responses = []
-    DummyAsyncClient.response = DummyResponse(200, {"data": [{"b64_json": "abc", "output_format": "webp"}]})
-    monkeypatch.setattr(image_generation.httpx, "AsyncClient", DummyAsyncClient)
+    DummyTransport.payloads = []
+    DummyTransport.responses = []
+    DummyTransport.response = ImageGenerationHTTPResponse(200, '{"data":[{"b64_json":"abc","output_format":"webp"}]}')
+    install_dummy_transport(monkeypatch, image_generation)
 
     asyncio.run(
         image_generation_nonstream(
@@ -102,7 +85,7 @@ def test_image_generation_nonstream_sends_only_selected_optional_payload(monkeyp
         )
     )
 
-    assert DummyAsyncClient.payloads[0] == {
+    assert DummyTransport.payloads[0] == {
         "model": "gpt-image-2",
         "prompt": "draw",
         "n": 1,
@@ -118,10 +101,10 @@ def test_image_generation_nonstream_sends_only_selected_optional_payload(monkeyp
 def test_image_generation_nonstream_transparent_jpeg_payload_uses_png(monkeypatch):
     import app.services.image_generation as image_generation
 
-    DummyAsyncClient.payloads = []
-    DummyAsyncClient.responses = []
-    DummyAsyncClient.response = DummyResponse(200, {"data": [{"b64_json": "abc"}]})
-    monkeypatch.setattr(image_generation.httpx, "AsyncClient", DummyAsyncClient)
+    DummyTransport.payloads = []
+    DummyTransport.responses = []
+    DummyTransport.response = ImageGenerationHTTPResponse(200, '{"data":[{"b64_json":"abc"}]}')
+    install_dummy_transport(monkeypatch, image_generation)
 
     result = asyncio.run(
         image_generation_nonstream(
@@ -134,7 +117,7 @@ def test_image_generation_nonstream_transparent_jpeg_payload_uses_png(monkeypatc
     )
 
     assert result.output_format == "png"
-    assert DummyAsyncClient.payloads[0] == {
+    assert DummyTransport.payloads[0] == {
         "model": "gpt-image-2",
         "prompt": "draw",
         "n": 1,
@@ -145,9 +128,10 @@ def test_image_generation_nonstream_transparent_jpeg_payload_uses_png(monkeypatc
 def test_image_generation_nonstream_reads_top_level_b64(monkeypatch):
     import app.services.image_generation as image_generation
 
-    DummyAsyncClient.response = DummyResponse(200, {"b64_json": "top", "output_format": "jpeg"})
-    DummyAsyncClient.responses = []
-    monkeypatch.setattr(image_generation.httpx, "AsyncClient", DummyAsyncClient)
+    DummyTransport.payloads = []
+    DummyTransport.response = ImageGenerationHTTPResponse(200, '{"b64_json":"top","output_format":"jpeg"}')
+    DummyTransport.responses = []
+    install_dummy_transport(monkeypatch, image_generation)
 
     result = asyncio.run(image_generation_nonstream("sk-test", "image-2", "draw", "u1", None))
 
@@ -158,19 +142,21 @@ def test_image_generation_nonstream_reads_top_level_b64(monkeypatch):
 def test_image_generation_nonstream_raises_on_missing_image(monkeypatch):
     import app.services.image_generation as image_generation
 
-    DummyAsyncClient.response = DummyResponse(200, {"data": [{}]})
-    DummyAsyncClient.responses = []
-    monkeypatch.setattr(image_generation.httpx, "AsyncClient", DummyAsyncClient)
+    DummyTransport.payloads = []
+    DummyTransport.response = ImageGenerationHTTPResponse(200, '{"data":[{}]}')
+    DummyTransport.responses = []
+    install_dummy_transport(monkeypatch, image_generation)
 
     with pytest.raises(HTTPException):
         asyncio.run(image_generation_nonstream("sk-test", "gpt-image-2", "draw", "u1", None))
 
 
-def test_image_generation_nonstream_surfaces_transient_disconnect(monkeypatch):
+def test_image_generation_nonstream_surfaces_transport_error(monkeypatch):
     import app.services.image_generation as image_generation
 
-    DummyAsyncClient.responses = [httpx.RemoteProtocolError("server disconnected")]
-    monkeypatch.setattr(image_generation.httpx, "AsyncClient", DummyAsyncClient)
+    DummyTransport.payloads = []
+    DummyTransport.responses = [RuntimeError("curl failed")]
+    install_dummy_transport(monkeypatch, image_generation)
 
-    with pytest.raises(httpx.RemoteProtocolError):
+    with pytest.raises(RuntimeError):
         asyncio.run(image_generation_nonstream("sk-test", "gpt-image-2", "draw", "u1", None))
