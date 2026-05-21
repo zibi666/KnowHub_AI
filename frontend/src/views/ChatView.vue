@@ -256,9 +256,19 @@ function messageIsImageGeneration(message: Message) {
   return ['image-2', 'image-1.5', 'image-1', 'gpt-image-2', 'gpt-image-1.5', 'gpt-image-1'].includes((message.model || '').toLowerCase())
 }
 
+function parseApiDateMs(value: unknown) {
+  if (typeof value === 'number') return Number.isFinite(value) ? value : undefined
+  if (typeof value !== 'string') return undefined
+  const trimmed = value.trim()
+  if (!trimmed) return undefined
+  const hasTimezone = /(?:z|[+-]\d{2}:?\d{2})$/i.test(trimmed)
+  const timestamp = new Date(hasTimezone ? trimmed : `${trimmed}Z`).getTime()
+  return Number.isFinite(timestamp) ? timestamp : undefined
+}
+
 function messageCreatedAtMs(message: Message) {
-  const createdAt = new Date(message.createdAt).getTime()
-  return Number.isFinite(createdAt) ? Math.min(createdAt, Date.now()) : Date.now()
+  const createdAt = parseApiDateMs(message.createdAt)
+  return createdAt !== undefined ? Math.min(createdAt, Date.now()) : Date.now()
 }
 
 function currentRuntimeElapsed(message: Message) {
@@ -325,9 +335,7 @@ function applyRuntimeProgress(message: Message, data: any = {}) {
   const incomingStartedAt = normalizeProgressTimestamp(data.startedAt ?? data.started_at)
   const fallbackStartedAt = message.status === 'streaming' ? messageCreatedAtMs(message) : undefined
   const now = Date.now()
-  const startedAt = [existingStartedAt, incomingStartedAt, fallbackStartedAt, message.status === 'streaming' ? now : undefined]
-    .filter((value): value is number => value !== undefined)
-    .reduce<number | undefined>((earliest, value) => (earliest === undefined ? value : Math.min(earliest, value)), undefined)
+  const startedAt = existingStartedAt ?? incomingStartedAt ?? fallbackStartedAt ?? (message.status === 'streaming' ? now : undefined)
   const firstTokenSeconds = incomingFirstTokenSeconds(data)
   const incomingElapsed = normalizeProgressElapsed(data.elapsedSeconds ?? data.elapsed_seconds)
   const existingElapsed = currentRuntimeElapsed(message)
@@ -578,7 +586,7 @@ const MESSAGE_ROLE_ORDER: Record<Message['role'], number> = {
 }
 
 function compareMessagesForDisplay(a: Message, b: Message) {
-  const timeDelta = new Date(a.createdAt || 0).getTime() - new Date(b.createdAt || 0).getTime()
+  const timeDelta = (parseApiDateMs(a.createdAt) ?? 0) - (parseApiDateMs(b.createdAt) ?? 0)
   if (timeDelta !== 0) return timeDelta
   const roleDelta = (MESSAGE_ROLE_ORDER[a.role] ?? 3) - (MESSAGE_ROLE_ORDER[b.role] ?? 3)
   if (roleDelta !== 0) return roleDelta
@@ -750,8 +758,9 @@ function setApiKeyDraftGroup(key: ApiKeyEntry, groupId: string | number) {
 }
 
 function formatSearchDate(value: string) {
-  const date = new Date(value)
-  if (Number.isNaN(date.getTime())) return ''
+  const timestamp = parseApiDateMs(value)
+  if (timestamp === undefined) return ''
+  const date = new Date(timestamp)
   const now = new Date()
   const startOfToday = new Date(now.getFullYear(), now.getMonth(), now.getDate()).getTime()
   const startOfDate = new Date(date.getFullYear(), date.getMonth(), date.getDate()).getTime()
@@ -763,8 +772,7 @@ function formatSearchDate(value: string) {
 }
 
 function conversationUpdatedAtMs(conversation: Conversation) {
-  const timestamp = new Date(conversation.updatedAt).getTime()
-  return Number.isFinite(timestamp) ? timestamp : 0
+  return parseApiDateMs(conversation.updatedAt) ?? 0
 }
 
 function sortConversationsByUpdatedAt(items: Conversation[]) {
