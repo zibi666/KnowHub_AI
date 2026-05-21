@@ -136,6 +136,7 @@ const contextStats = ref({
   tokensSource: 'estimated' as 'estimated' | 'actual'
 })
 const messageScroller = ref<HTMLElement | null>(null)
+const chatFooter = ref<HTMLElement | null>(null)
 const showScrollToBottom = ref(false)
 let userHasScrolledUp = false
 let programmaticScrollUntil = 0
@@ -199,6 +200,7 @@ const imageSettings = ref<ImageGenerationSettings>({
 
 let scrollFrame: number | null = null
 let composerResizeFrame: number | null = null
+let composerMeasureElement: HTMLDivElement | null = null
 let activeConversationLoad = 0
 let imagePollingTimer: number | null = null
 let conversationEventSource: EventSource | null = null
@@ -2020,10 +2022,67 @@ function handleComposerKeydown(event: KeyboardEvent) {
   void send()
 }
 
-function lineBoxHeight(textarea: HTMLTextAreaElement) {
-  const style = getComputedStyle(textarea)
-  const lineHeight = Number.parseFloat(style.lineHeight)
-  return Number.isFinite(lineHeight) ? lineHeight : 0
+function ensureComposerMeasureElement() {
+  if (composerMeasureElement) return composerMeasureElement
+  composerMeasureElement = document.createElement('div')
+  composerMeasureElement.setAttribute('aria-hidden', 'true')
+  composerMeasureElement.className = 'composer-card is-empty-composer composer-measure-card'
+  composerMeasureElement.style.position = 'fixed'
+  composerMeasureElement.style.left = '-10000px'
+  composerMeasureElement.style.top = '0'
+  composerMeasureElement.style.visibility = 'hidden'
+  composerMeasureElement.style.pointerEvents = 'none'
+  composerMeasureElement.style.contain = 'layout style'
+  const measureInput = document.createElement('textarea')
+  measureInput.className = 'composer-input'
+  measureInput.rows = 1
+  measureInput.tabIndex = -1
+  measureInput.readOnly = true
+  composerMeasureElement.appendChild(measureInput)
+  document.body.appendChild(composerMeasureElement)
+  return composerMeasureElement
+}
+
+function isComposerTextSingleLine(textarea: HTMLTextAreaElement) {
+  const value = textarea.value
+  if (!value) return true
+  const measure = ensureComposerMeasureElement()
+  const measureInput = measure.querySelector<HTMLTextAreaElement>('.composer-input')
+  if (!measureInput) return false
+
+  measure.style.width = `${textarea.getBoundingClientRect().width || textarea.clientWidth}px`
+  measureInput.value = value
+  measureInput.style.height = 'auto'
+  return measureInput.scrollHeight <= measureInput.clientHeight + 1
+}
+
+function updateEmptyFooterAnchorShift() {
+  if (!isEmptyChat.value) return
+  const footer = chatFooter.value
+  if (!footer) return
+
+  const footerHeight = footer.getBoundingClientRect().height
+  if (footerHeight > 0) {
+    footer.style.setProperty('--empty-footer-anchor-shift', `${-(footerHeight / 2)}px`)
+  }
+}
+
+function composerMaxInputHeight(textarea: HTMLTextAreaElement, cssMaxHeight: number | null) {
+  let maxHeight = cssMaxHeight ?? Number.POSITIVE_INFINITY
+  if (!isEmptyChat.value || composerCompact.value) return maxHeight
+
+  const card = textarea.closest<HTMLElement>('.composer-card')
+  const cardRect = card?.getBoundingClientRect()
+  const textareaRect = textarea.getBoundingClientRect()
+  const bottomChrome = cardRect ? Math.max(0, cardRect.bottom - textareaRect.bottom) : 0
+  const bottomGap = Math.max(48, Math.min(72, window.innerHeight * 0.07))
+  const viewportMaxHeight = window.innerHeight - textareaRect.top - bottomChrome - bottomGap
+  if (viewportMaxHeight > 0) {
+    maxHeight = Math.min(maxHeight, viewportMaxHeight)
+  }
+
+  const minHeight = Number.parseFloat(getComputedStyle(textarea).minHeight)
+  return Number.isFinite(minHeight) ? Math.max(minHeight, maxHeight) : maxHeight
 }
 
 function resizeComposerInput() {
@@ -2031,14 +2090,13 @@ function resizeComposerInput() {
   if (!textarea) return
 
   const previousCompact = composerCompact.value
+  if (canUseCompactComposer.value && previousCompact) {
+    updateEmptyFooterAnchorShift()
+  }
   if (!canUseCompactComposer.value) {
     composerCompact.value = false
   } else {
-    const previousHeight = textarea.style.height
-    textarea.style.height = 'auto'
-    const lineHeight = lineBoxHeight(textarea)
-    composerCompact.value = textarea.scrollHeight <= textarea.clientHeight + lineHeight * 0.5
-    textarea.style.height = previousHeight
+    composerCompact.value = isComposerTextSingleLine(textarea)
   }
   if (previousCompact !== composerCompact.value) {
     void nextTick().then(resizeComposerInput)
@@ -2046,10 +2104,10 @@ function resizeComposerInput() {
 
   textarea.style.height = 'auto'
   const maxHeight = Number.parseFloat(getComputedStyle(textarea).maxHeight)
-  const hasMaxHeight = Number.isFinite(maxHeight)
-  const nextHeight = hasMaxHeight ? Math.min(textarea.scrollHeight, maxHeight) : textarea.scrollHeight
+  const nextMaxHeight = composerMaxInputHeight(textarea, Number.isFinite(maxHeight) ? maxHeight : null)
+  const nextHeight = Math.min(textarea.scrollHeight, nextMaxHeight)
   textarea.style.height = `${nextHeight}px`
-  composerScrollable.value = hasMaxHeight && textarea.scrollHeight > nextHeight
+  composerScrollable.value = textarea.scrollHeight > nextHeight
   textarea.style.overflowY = composerScrollable.value ? 'auto' : 'hidden'
 }
 
@@ -2110,6 +2168,8 @@ onUnmounted(() => {
     window.cancelAnimationFrame(composerResizeFrame)
     composerResizeFrame = null
   }
+  composerMeasureElement?.remove()
+  composerMeasureElement = null
   window.removeEventListener('resize', scheduleComposerResize)
 })
 </script>
@@ -2314,7 +2374,7 @@ onUnmounted(() => {
         </div>
       </section>
 
-      <footer class="chat-footer p-4">
+      <footer ref="chatFooter" class="chat-footer p-4">
         <Transition name="welcome-rise">
           <div v-if="isEmptyChat" class="empty-welcome">
             {{ effectiveWelcomeMessage }}
@@ -2386,6 +2446,7 @@ onUnmounted(() => {
             ref="composerInput"
             v-model="input"
             class="composer-input"
+            rows="1"
             placeholder="输入消息，按 Enter 发送，Shift + Enter 换行"
             @keydown.enter="handleComposerKeydown"
           />
