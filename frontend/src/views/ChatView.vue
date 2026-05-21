@@ -273,6 +273,18 @@ function normalizeProgressElapsed(value: unknown) {
   return Number.isFinite(elapsed) && elapsed >= 0 ? Math.floor(elapsed) : undefined
 }
 
+function userFacingSendError(err: unknown) {
+  const apiErr = err instanceof ApiError ? err : null
+  if (apiErr?.code === 'INVALID_CREDENTIALS') return '登录已失效，请重新登录。'
+  if (apiErr) return apiErr.message
+  const raw = err instanceof Error ? err.message : ''
+  const lowered = raw.toLowerCase()
+  if (lowered.includes('server disconnected') || lowered.includes('without sending a response') || lowered.includes('failed to fetch')) {
+    return '服务连接中断，请稍后重试。'
+  }
+  return raw || '请求失败，请稍后重试。'
+}
+
 function messageFirstTokenSeconds(message: Message) {
   return normalizeProgressElapsed(message.firstTokenSeconds ?? message.first_token_seconds)
 }
@@ -304,14 +316,16 @@ function applyRuntimeProgress(message: Message, data: any = {}) {
   const incomingStartedAt = normalizeProgressTimestamp(data.startedAt ?? data.started_at)
   const fallbackStartedAt = message.status === 'streaming' ? messageCreatedAtMs(message) : undefined
   const now = Date.now()
-  const startedAt = existingStartedAt || incomingStartedAt || fallbackStartedAt || (message.status === 'streaming' ? now : undefined)
+  const startedAt = [existingStartedAt, incomingStartedAt, fallbackStartedAt, message.status === 'streaming' ? now : undefined]
+    .filter((value): value is number => value !== undefined)
+    .reduce<number | undefined>((earliest, value) => (earliest === undefined ? value : Math.min(earliest, value)), undefined)
   const firstTokenSeconds = incomingFirstTokenSeconds(data)
   const incomingElapsed = normalizeProgressElapsed(data.elapsedSeconds ?? data.elapsed_seconds)
   const existingElapsed = currentRuntimeElapsed(message)
   const elapsedSeconds =
-    message.status === 'streaming'
+    message.status === 'streaming' || data.status === 'streaming'
       ? Math.max(existingElapsed, incomingElapsed ?? 0)
-      : (incomingElapsed ?? normalizeProgressElapsed(message.elapsedSeconds ?? message.elapsed_seconds))
+      : Math.max(existingElapsed, incomingElapsed ?? normalizeProgressElapsed(message.elapsedSeconds ?? message.elapsed_seconds) ?? 0)
   if (firstTokenSeconds !== undefined) {
     setMessageFirstTokenSeconds(message, firstTokenSeconds)
   }
@@ -363,14 +377,20 @@ function applyImageProgress(message: Message, data: any = {}) {
   message.status = data.status || 'streaming'
   applyRuntimeProgress(message, data)
   const existing = message.imageProgress || message.image_progress
+  const startedAt = normalizeProgressTimestamp(message.startedAt ?? message.started_at) || normalizeProgressTimestamp(existing?.startedAt ?? existing?.started_at) || Date.now()
+  const elapsedSeconds = Math.max(
+    currentRuntimeElapsed(message),
+    normalizeProgressElapsed(existing?.elapsedSeconds ?? existing?.elapsed_seconds) ?? 0,
+    normalizeProgressElapsed(data.elapsedSeconds ?? data.elapsed_seconds) ?? 0
+  )
   message.imageProgress = {
     b64Json: data.b64Json || data.b64_json || existing?.b64Json || existing?.b64_json || '',
     index: Number(data.index || existing?.index || 0),
     total: Number(data.total || existing?.total || 1),
     outputFormat: data.outputFormat || data.output_format || existing?.outputFormat || existing?.output_format || 'png',
     detail: data.detail || existing?.detail || message.progressDetail,
-    elapsedSeconds: currentRuntimeElapsed(message),
-    startedAt: normalizeProgressTimestamp(message.startedAt ?? message.started_at) || Date.now(),
+    elapsedSeconds,
+    startedAt,
     phase: data.phase || existing?.phase || message.progressPhase || 'rendering',
     size: data.size || existing?.size || imageSettings.value.size
   }
@@ -1820,11 +1840,11 @@ async function send() {
   if ((!input.value.trim() && !pendingAttachments.value.length) || currentConversationStreaming.value) return
   const isImageGeneration = selectedModelIsImageGeneration()
   if (isImageGeneration && pendingAttachments.value.length) {
-    error.value = '?????????????????????????'
+    error.value = '图像生成暂不支持同时上传附件。'
     return
   }
   if (pendingAttachments.value.some(isImageAttachment) && !selectedModelSupportsVision()) {
-    error.value = '??????????????????????????????'
+    error.value = '当前模型不支持图片理解，请切换到支持视觉的模型。'
     return
   }
   cancelPendingScroll()
@@ -1913,10 +1933,7 @@ async function send() {
   } catch (err) {
     cancelPendingScroll()
     const apiErr = err instanceof ApiError ? err : null
-    const message =
-      apiErr?.code === 'INVALID_CREDENTIALS'
-        ? '?????????????????????????'
-        : apiErr?.message || (err instanceof Error ? err.message : '????')
+    const message = userFacingSendError(err)
     const assistant = findMessage(draftAssistantId)
     if (assistant) {
       assistant.content = message

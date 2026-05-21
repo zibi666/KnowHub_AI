@@ -10,6 +10,7 @@ from dataclasses import dataclass
 from datetime import datetime, timezone
 from urllib.parse import urlparse
 
+import httpx
 from fastapi import HTTPException
 from arq import create_pool
 from arq.connections import RedisSettings
@@ -120,6 +121,40 @@ def message_progress_event_data(message: Message | None = None, *, started_at: d
     }
 
 
+def image_status_detail(elapsed_seconds: int, *, final_expected: bool = False) -> tuple[str, str]:
+    if final_expected:
+        return "finalizing", "上游已结束但还没有拿到最终图片，正在确认结果。"
+    if elapsed_seconds < 15:
+        return "queued", "模型正在排队和构图，图像生成通常比文字回复更慢。"
+    if elapsed_seconds < 45:
+        return "rendering", "模型正在绘制主图，收到进度图或终稿后会立即刷新。"
+    return "rendering_long", "仍在生成中，高质量图片可能需要 60-90 秒，请保持页面打开。"
+
+
+def image_generation_error_message(exc: Exception | None = None) -> str:
+    if isinstance(exc, HTTPException):
+        detail = exc.detail
+        if isinstance(detail, dict):
+            code = str(detail.get("code") or "")
+            message = str(detail.get("message") or "")
+            if code == "API_KEY_INVALID":
+                return "上游拒绝了当前 API Key，请在设置里更新后重试。"
+            if code == "MODEL_NOT_AVAILABLE":
+                return message or "当前图像模型不可用，请切换模型后重试。"
+            if code == "QUOTA_EXCEEDED":
+                return message or "已达到额度上限。"
+        return "图像生成服务暂时不可用，请稍后重试。"
+    if isinstance(exc, (httpx.RemoteProtocolError, httpx.ReadError, httpx.ConnectError, httpx.TimeoutException)):
+        return "图像生成服务连接中断，可能是上游提前断开或网络超时，请稍后重试。"
+    text = str(exc or "")
+    lowered = text.lower()
+    if "server disconnected" in lowered or "without sending a response" in lowered or "remote protocol" in lowered:
+        return "图像生成服务连接中断，可能是上游提前断开或网络超时，请稍后重试。"
+    if "image generation completed without image data" in lowered or "没有返回最终图片" in text:
+        return "图像模型没有返回最终图片，请稍后重试。"
+    return "图像生成失败，请稍后重试。"
+
+
 def first_token_progress_event_data(message: Message | None = None) -> dict:
     progress = message_progress_event_data(message)
     first_token_seconds = getattr(message, "first_token_seconds", None) if message else None
@@ -165,15 +200,7 @@ def image_progress_from_message(message: Message) -> dict:
             created_at = created_at.astimezone(timezone.utc)
         elapsed_seconds = max(0, int((datetime.now(timezone.utc) - created_at).total_seconds()))
         started_at_ms = int(created_at.timestamp() * 1000)
-    if elapsed_seconds < 15:
-        phase = "queued"
-        detail = "模型正在排队和构图，图像生成通常比文字回复更慢。"
-    elif elapsed_seconds < 45:
-        phase = "rendering"
-        detail = "模型正在绘制主图，收到终稿后会自动刷新。"
-    else:
-        phase = "rendering_long"
-        detail = "仍在生成中，高质量图片可能需要更久；你可以切换对话或刷新页面。"
+    phase, detail = image_status_detail(elapsed_seconds)
     return {
         "b64Json": "",
         "index": 0,
@@ -641,9 +668,9 @@ async def stream_chat(user_id: str, payload: SendMessageRequest, conversation_id
             {
                 "text": "正在生成图片",
                 "detail": "生成任务已在服务器后台运行；刷新或切换对话后仍会继续。",
-                "elapsed_seconds": 0,
                 "phase": "queued",
                 "model": model,
+                **message_progress_event_data(assistant),
             },
         )
         yield json_line(
@@ -1040,8 +1067,11 @@ async def stream_image_generation_chat(
     final_b64 = ""
     final_format = "png"
     prompt_tokens = estimate_tokens_text(prompt)
+    assistant_started_at: datetime | None = None
     try:
         async with SessionLocal() as db:
+            assistant = await db.get(Message, assistant_message_id)
+            assistant_started_at = assistant.created_at if assistant else None
             quota = await db.get(UserQuota, user_id)
             api_key_row = await get_active_api_key(db, user_id)
             if not api_key_row:
@@ -1058,10 +1088,10 @@ async def stream_image_generation_chat(
             {
                 "text": "正在生成图片",
                 "detail": "已提交生成请求，正在等待模型开始返回图像。",
-                "elapsed_seconds": 0,
                 "phase": "submitted",
                 "model": model,
                 "size": image_size,
+                **message_progress_event_data(started_at=assistant_started_at),
             },
         )
         stream = image_generation_stream(
@@ -1077,27 +1107,20 @@ async def stream_image_generation_chat(
             while True:
                 done, _ = await asyncio.wait({pending_next}, timeout=5)
                 if not done:
-                    elapsed_seconds = int(time.perf_counter() - generation_started)
+                    progress = message_progress_event_data(started_at=assistant_started_at)
+                    elapsed_seconds = int(progress["elapsed_seconds"] or time.perf_counter() - generation_started)
                     status_tick += 1
-                    if elapsed_seconds < 15:
-                        detail = "模型正在排队和构图，图像生成通常比文字回复更慢。"
-                        phase = "queued"
-                    elif elapsed_seconds < 45:
-                        detail = "模型正在绘制主图，收到进度图或终稿后会立即刷新。"
-                        phase = "rendering"
-                    else:
-                        detail = "仍在生成中，高质量图片可能需要 60-90 秒，请保持页面打开。"
-                        phase = "rendering_long"
+                    phase, detail = image_status_detail(elapsed_seconds)
                     yield json_line(
                         "image_status",
                         {
                             "text": "正在生成图片",
                             "detail": detail,
-                            "elapsed_seconds": elapsed_seconds,
                             "phase": phase,
                             "tick": status_tick,
                             "model": model,
                             "size": image_size,
+                            **progress,
                         },
                     )
                     continue
@@ -1106,7 +1129,15 @@ async def stream_image_generation_chat(
                     break
                 pending_next = asyncio.ensure_future(_safe_anext(stream))
                 if event.event == "image_progress":
-                    yield json_line("image_progress", event.data)
+                    yield json_line(
+                        "image_progress",
+                        {
+                            **event.data,
+                            "detail": "已收到进度图，正在等待最终图片。",
+                            "phase": "rendering",
+                            **message_progress_event_data(started_at=assistant_started_at),
+                        },
+                    )
                 elif event.event == "image_completed":
                     final_b64 = event.data.get("b64_json") or ""
                     final_format = event.data.get("output_format") or "png"
@@ -1130,10 +1161,10 @@ async def stream_image_generation_chat(
                 "outputFormat": final_format,
                 "index": 1,
                 "total": 1,
-                "elapsed_seconds": int(time.perf_counter() - generation_started),
                 "phase": "returned",
                 "model": model,
                 "size": image_size,
+                **message_progress_event_data(started_at=assistant_started_at),
             },
         )
 
@@ -1224,26 +1255,51 @@ async def stream_image_generation_chat(
         raise
     except HTTPException as exc:
         code = "UPSTREAM_ERROR"
-        message = str(exc.detail)
+        message = image_generation_error_message(exc)
         if isinstance(exc.detail, dict):
             code = exc.detail.get("code", code)
-            message = exc.detail.get("message", message)
+            message = image_generation_error_message(exc)
         async with SessionLocal() as db:
             assistant = await db.get(Message, assistant_message_id)
             if assistant:
                 assistant.content = ""
                 assistant.status = "failed_no_output"
                 await db.commit()
+        yield json_line(
+            "message_failed",
+            {
+                "conversation_id": conversation_id,
+                "message_id": assistant_message_id,
+                "content": message,
+                "status": "failed_no_output",
+                "code": code,
+                "message": message,
+                **message_progress_event_data(started_at=assistant_started_at),
+            },
+        )
         yield json_line("error", {"code": code, "message": message, "retryable": True})
     except Exception as exc:
         logger.exception("stream_image_generation_chat unexpected error user=%s conv=%s", user_id, conversation_id)
+        message = image_generation_error_message(exc)
         async with SessionLocal() as db:
             assistant = await db.get(Message, assistant_message_id)
             if assistant:
                 assistant.content = ""
                 assistant.status = "failed_no_output"
                 await db.commit()
-        yield json_line("error", {"code": "UPSTREAM_ERROR", "message": str(exc)[:500], "retryable": True})
+        yield json_line(
+            "message_failed",
+            {
+                "conversation_id": conversation_id,
+                "message_id": assistant_message_id,
+                "content": message,
+                "status": "failed_no_output",
+                "code": "UPSTREAM_ERROR",
+                "message": message,
+                **message_progress_event_data(started_at=assistant_started_at),
+            },
+        )
+        yield json_line("error", {"code": "UPSTREAM_ERROR", "message": message, "retryable": True})
 
 
 async def run_image_generation_job(
@@ -1294,7 +1350,8 @@ async def run_image_generation_job(
             {
                 "conversation_id": conversation_id,
                 "message_id": assistant_message_id,
-                "detail": "Image request submitted; waiting for the image model.",
+                "text": "正在生成图片",
+                "detail": "已提交生成请求，正在等待模型开始返回图像。",
                 "phase": "submitted",
                 "model": model,
                 "size": image_size,
@@ -1325,7 +1382,7 @@ async def run_image_generation_job(
                         "output_format": event.data.get("output_format") or "png",
                         "outputFormat": event.data.get("output_format") or "png",
                         "size": event.data.get("size") or image_size,
-                        "detail": "Image preview received; waiting for final image.",
+                        "detail": "已收到进度图，正在等待最终图片。",
                         "phase": "rendering",
                         **message_progress_event_data(started_at=assistant_started_at),
                     },
@@ -1427,12 +1484,26 @@ async def run_image_generation_job(
         )
     except Exception as exc:
         logger.exception("image_generation_background_failed user=%s conv=%s msg=%s", user_id, conversation_id, assistant_message_id)
+        message = image_generation_error_message(exc)
         async with SessionLocal() as db:
             assistant = await db.get(Message, assistant_message_id)
             if assistant:
-                assistant.content = str(exc)[:500]
+                assistant.content = message
                 assistant.status = "failed_no_output"
                 await db.commit()
+        await publish_conversation_event(
+            conversation_id,
+            "message_failed",
+            {
+                "conversation_id": conversation_id,
+                "message_id": assistant_message_id,
+                "content": message,
+                "status": "failed_no_output",
+                "code": "UPSTREAM_ERROR",
+                "message": message,
+                **message_progress_event_data(started_at=assistant_started_at),
+            },
+        )
 
 
 async def _persist_assistant_partial(
