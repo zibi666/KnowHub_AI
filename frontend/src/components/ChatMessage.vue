@@ -70,15 +70,15 @@ function formatElapsedSeconds(seconds: number | undefined) {
   return `${minutes} 分 ${String(rest).padStart(2, '0')} 秒`
 }
 const streamingElapsed = computed(() => {
-  if (props.message.status !== 'streaming' || props.message.imageProgress) return ''
+  if (props.message.status !== 'streaming' || props.message.imageProgress || props.message.content.trim()) return ''
   const startedAt = props.message.startedAt || props.message.started_at
   const baseElapsed = props.message.elapsedSeconds ?? props.message.elapsed_seconds ?? 0
   const seconds = startedAt ? Math.max(baseElapsed || 0, Math.floor((nowMs.value - startedAt) / 1000)) : baseElapsed
   return formatElapsedSeconds(seconds)
 })
 const finalElapsed = computed(() => {
-  if (props.message.status === 'streaming' || props.message.imageProgress) return ''
-  const elapsed = props.message.elapsedSeconds ?? props.message.elapsed_seconds
+  if (props.message.imageProgress) return ''
+  const elapsed = props.message.firstTokenSeconds ?? props.message.first_token_seconds ?? props.message.elapsedSeconds ?? props.message.elapsed_seconds
   return formatElapsedSeconds(elapsed)
 })
 const generatedImageProgressLabel = computed(() => {
@@ -325,11 +325,13 @@ onUnmounted(() => {
             <span />
             <span />
           </div>
+          <div v-if="streamingElapsed" class="thinking-elapsed">思考中 {{ streamingElapsed }}</div>
         </div>
         <div v-else-if="emptyAssistantFailureText" class="message-status-text">
           {{ emptyAssistantFailureText }}
         </div>
         <template v-else>
+          <div v-if="finalElapsed" class="thinking-final-elapsed">思考用时 {{ finalElapsed }}</div>
           <div class="message-collapsible" :class="collapsibleClasses">
             <button
               v-if="canCollapse"
@@ -346,7 +348,6 @@ onUnmounted(() => {
               <div v-if="shouldRenderStreamingPlainText" class="streaming-plain-message">{{ message.content }}</div>
               <MarkdownMessage v-else :content="message.content" />
               <span v-if="message.status === 'streaming'" class="typing-cursor" />
-              <div v-if="finalElapsed" class="streaming-elapsed">思考用时 {{ finalElapsed }}</div>
             </div>
           </div>
         </template>

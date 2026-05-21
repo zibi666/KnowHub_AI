@@ -3039,8 +3039,8 @@ body,
   overflow-wrap: anywhere;
 }
 
-.streaming-elapsed {
-  margin-top: 0.45rem;
+.thinking-final-elapsed {
+  margin-bottom: 0.45rem;
   color: color-mix(in srgb, var(--muted) 78%, var(--bubble-bg));
   font-size: 0.78rem;
   line-height: 1.35;
@@ -3144,6 +3144,13 @@ body,
   margin-bottom: 0.85rem;
   color: var(--muted);
   font-size: 0.95rem;
+}
+
+.thinking-elapsed {
+  margin-top: 0.65rem;
+  color: color-mix(in srgb, var(--muted) 82%, var(--bubble-bg));
+  font-size: 0.82rem;
+  line-height: 1.35;
 }
 
 .message-status-text {

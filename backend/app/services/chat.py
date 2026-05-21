@@ -126,6 +126,8 @@ def first_token_progress_event_data(message: Message | None = None) -> dict:
     if first_token_seconds is not None:
         progress["elapsed_seconds"] = int(first_token_seconds)
         progress["elapsedSeconds"] = int(first_token_seconds)
+        progress["first_token_seconds"] = int(first_token_seconds)
+        progress["firstTokenSeconds"] = int(first_token_seconds)
     return progress
 
 
@@ -142,7 +144,11 @@ def final_progress_from_message(message: Message) -> dict:
         started_at_ms = int(created_at.timestamp() * 1000)
     return {
         "elapsedSeconds": elapsed_seconds,
+        "elapsed_seconds": elapsed_seconds,
+        "firstTokenSeconds": elapsed_seconds,
+        "first_token_seconds": elapsed_seconds,
         "startedAt": started_at_ms,
+        "started_at": started_at_ms,
         "phase": message.status,
         "detail": "回复已完成。",
     }
@@ -788,7 +794,14 @@ async def stream_chat(user_id: str, payload: SendMessageRequest, conversation_id
                             conversation_id,
                             int((time.perf_counter() - request_started) * 1000),
                         )
-                    yield json_line("token", {"text": text})
+                    yield json_line(
+                        "token",
+                        {
+                            "text": text,
+                            "first_token_seconds": first_token_seconds,
+                            "firstTokenSeconds": first_token_seconds,
+                        },
+                    )
                 elif event.event == "completed_text":
                     text = event.data.get("text") or ""
                     current = "".join(buffer)
@@ -813,7 +826,14 @@ async def stream_chat(user_id: str, payload: SendMessageRequest, conversation_id
                         SLEEP = 0.008
                         for offset in range(0, len(remaining), CHUNK):
                             piece = remaining[offset : offset + CHUNK]
-                            yield json_line("token", {"text": piece})
+                            yield json_line(
+                                "token",
+                                {
+                                    "text": piece,
+                                    "first_token_seconds": first_token_seconds,
+                                    "firstTokenSeconds": first_token_seconds,
+                                },
+                            )
                             # Only sleep if there's more to come, and don't sleep
                             # for tiny tails. Total added wall time:
                             # ceil(len/16) * 8ms, e.g. 6000 chars about 3s.
@@ -1527,6 +1547,8 @@ async def run_chat_generation_job(
                             "message_id": assistant_message_id,
                             "text": text,
                             "content": content,
+                            "first_token_seconds": first_token_seconds,
+                            "firstTokenSeconds": first_token_seconds,
                             **message_progress_event_data(started_at=assistant_started_at),
                         },
                     )
@@ -1552,6 +1574,8 @@ async def run_chat_generation_job(
                                 "message_id": assistant_message_id,
                                 "text": remaining,
                                 "content": content,
+                                "first_token_seconds": first_token_seconds,
+                                "firstTokenSeconds": first_token_seconds,
                                 **message_progress_event_data(started_at=assistant_started_at),
                             },
                         )

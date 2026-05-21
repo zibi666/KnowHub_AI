@@ -270,17 +270,47 @@ function normalizeProgressElapsed(value: unknown) {
   return Number.isFinite(elapsed) && elapsed >= 0 ? Math.floor(elapsed) : undefined
 }
 
+function messageFirstTokenSeconds(message: Message) {
+  return normalizeProgressElapsed(message.firstTokenSeconds ?? message.first_token_seconds)
+}
+
+function incomingFirstTokenSeconds(data: any = {}) {
+  return normalizeProgressElapsed(data.firstTokenSeconds ?? data.first_token_seconds)
+}
+
+function setMessageFirstTokenSeconds(message: Message, seconds: number | undefined) {
+  if (seconds === undefined) return
+  message.firstTokenSeconds = seconds
+  message.first_token_seconds = seconds
+}
+
+function freezeFirstTokenSeconds(message: Message, data: any = {}) {
+  const incomingFirstToken = incomingFirstTokenSeconds(data)
+  if (incomingFirstToken !== undefined) {
+    setMessageFirstTokenSeconds(message, incomingFirstToken)
+    message.elapsedSeconds = incomingFirstToken
+    message.elapsed_seconds = incomingFirstToken
+    return
+  }
+  if (messageFirstTokenSeconds(message) !== undefined) return
+  setMessageFirstTokenSeconds(message, currentRuntimeElapsed(message))
+}
+
 function applyRuntimeProgress(message: Message, data: any = {}) {
   const existingStartedAt = normalizeProgressTimestamp(message.startedAt ?? message.started_at)
   const incomingStartedAt = normalizeProgressTimestamp(data.startedAt ?? data.started_at)
   const fallbackStartedAt = message.status === 'streaming' ? messageCreatedAtMs(message) : undefined
   const startedAt = existingStartedAt || incomingStartedAt || fallbackStartedAt
+  const firstTokenSeconds = incomingFirstTokenSeconds(data)
   const incomingElapsed = normalizeProgressElapsed(data.elapsedSeconds ?? data.elapsed_seconds)
   const existingElapsed = currentRuntimeElapsed(message)
   const elapsedSeconds =
     message.status === 'streaming'
       ? Math.max(existingElapsed, incomingElapsed ?? 0)
       : (incomingElapsed ?? normalizeProgressElapsed(message.elapsedSeconds ?? message.elapsed_seconds))
+  if (firstTokenSeconds !== undefined) {
+    setMessageFirstTokenSeconds(message, firstTokenSeconds)
+  }
   if (startedAt !== undefined) {
     message.startedAt = startedAt
     message.started_at = startedAt
@@ -1129,6 +1159,7 @@ function applyConversationEvent(event: string, data: any) {
     }
     message.status = 'streaming'
     applyRuntimeProgress(message, data)
+    if (message.content.trim()) freezeFirstTokenSeconds(message, data)
     syncActiveRequestState()
     scheduleScrollToBottom()
     return
@@ -1174,6 +1205,7 @@ function applyConversationEvent(event: string, data: any) {
   if (event === 'message_completed' || event === 'message_failed') {
     if (message) {
       applyRuntimeProgress(message, data)
+      if (typeof data.content === 'string' && data.content.trim()) freezeFirstTokenSeconds(message, data)
       message.status = data.status || (event === 'message_completed' ? 'completed' : 'failed_no_output')
       if (typeof data.content === 'string') message.content = data.content
       if (message.status !== 'streaming') message.imageProgress = undefined
