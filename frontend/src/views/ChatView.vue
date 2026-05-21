@@ -1164,6 +1164,18 @@ function markProgrammaticScroll() {
   programmaticScrollUntil = Date.now() + 250
 }
 
+function waitForAnimationFrame(): Promise<void> {
+  return new Promise((resolve) => {
+    window.requestAnimationFrame(() => resolve())
+  })
+}
+
+async function waitForMessageLayout() {
+  await nextTick()
+  await waitForAnimationFrame()
+  await waitForAnimationFrame()
+}
+
 function pauseAutoScrollFromUserScroll() {
   if (!streaming.value) return
   userHasScrolledUp = true
@@ -1198,6 +1210,12 @@ async function scrollMessagesToBottom(behavior: ScrollBehavior = 'smooth') {
   markProgrammaticScroll()
   scroller.scrollTo({ top: scroller.scrollHeight, behavior })
   showScrollToBottom.value = false
+}
+
+async function scrollLoadedConversationToBottom(loadId: number) {
+  await waitForMessageLayout()
+  if (loadId !== activeConversationLoad) return
+  await scrollMessagesToBottom('auto')
 }
 
 async function returnToBottom() {
@@ -1619,6 +1637,8 @@ async function openConversation(id: string, focusMessageId?: string | null) {
   window.localStorage.setItem(CURRENT_CONVERSATION_STORAGE_KEY, id)
   messages.value = []
   messagesLoading.value = true
+  userHasScrolledUp = false
+  showScrollToBottom.value = false
   try {
     const params = focusMessageId ? `?aroundMessageId=${encodeURIComponent(focusMessageId)}&limit=120` : ''
     const loadedMessages = sortMessagesForDisplay(
@@ -1626,14 +1646,15 @@ async function openConversation(id: string, focusMessageId?: string | null) {
     )
     if (loadId !== activeConversationLoad) return
     messages.value = loadedMessages
+    messagesLoading.value = false
     syncActiveRequestState()
     syncImagePolling()
     syncConversationEvents()
-    await loadContextStats()
+    void loadContextStats()
     if (focusMessageId) {
       await scrollToMessage(focusMessageId)
     } else {
-      await scrollMessagesToBottom('auto')
+      await scrollLoadedConversationToBottom(loadId)
     }
   } catch (err) {
     if (loadId === activeConversationLoad && err instanceof ApiError) error.value = err.message
@@ -1643,7 +1664,7 @@ async function openConversation(id: string, focusMessageId?: string | null) {
 }
 
 async function scrollToMessage(messageId: string) {
-  await nextTick()
+  await waitForMessageLayout()
   const target = Array.from(document.querySelectorAll<HTMLElement>('[data-message-id]')).find(
     (item) => item.dataset.messageId === messageId
   )
