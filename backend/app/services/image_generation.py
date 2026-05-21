@@ -192,6 +192,25 @@ def image_generation_payload(
     return upstream_model, payload
 
 
+def _tcp_keepalive_socket_options() -> list[tuple[int, int, int]]:
+    import socket
+
+    opts: list[tuple[int, int, int]] = [(socket.SOL_SOCKET, socket.SO_KEEPALIVE, 1)]
+    try:
+        opts.append((socket.IPPROTO_TCP, socket.TCP_KEEPIDLE, 60))
+    except AttributeError:
+        pass
+    try:
+        opts.append((socket.IPPROTO_TCP, socket.TCP_KEEPINTVL, 30))
+    except AttributeError:
+        pass
+    try:
+        opts.append((socket.IPPROTO_TCP, socket.TCP_KEEPCNT, 3))
+    except AttributeError:
+        pass
+    return opts
+
+
 async def image_generation_stream(
     api_key: str,
     model: str,
@@ -213,19 +232,29 @@ async def image_generation_stream(
     payload["partial_images"] = partial_images
 
     request_started = time.perf_counter()
+    request_url = f"{settings.model_base_url.rstrip('/')}/images/generations"
     perf_logger.info(
-        "upstream_timing image_generation_request_start model=%s prompt_chars=%d partial_images=%d",
+        "upstream_timing image_generation_request_start model=%s url=%s prompt_chars=%d partial_images=%d payload_keys=%s",
         upstream_model,
+        request_url,
         len(prompt or ""),
         partial_images,
+        ",".join(sorted(payload.keys())),
+    )
+    logger.info(
+        "image_generation_request_payload model=%s url=%s payload=%s",
+        upstream_model,
+        request_url,
+        json.dumps({k: v for k, v in payload.items() if k != "prompt"}, ensure_ascii=False),
     )
     completed: GeneratedImage | None = None
     partial_seen = 0
 
-    async with httpx.AsyncClient(timeout=None) as client:
+    transport = httpx.AsyncHTTPTransport(socket_options=_tcp_keepalive_socket_options())
+    async with httpx.AsyncClient(timeout=None, transport=transport) as client:
         async with client.stream(
             "POST",
-            f"{settings.model_base_url.rstrip('/')}/images/generations",
+            request_url,
             headers=headers,
             json=payload,
         ) as response:
@@ -242,68 +271,105 @@ async def image_generation_stream(
                 raise api_error("UPSTREAM_ERROR", body.decode("utf-8", errors="ignore")[:500], status_code=response.status_code)
 
             current_event_type = ""
-            async for line in response.aiter_lines():
-                if not line or not line.startswith("data:"):
-                    if line.startswith("event:"):
-                        current_event_type = line.removeprefix("event:").strip()
-                    continue
-                raw = line.removeprefix("data:").strip()
-                if raw == "[DONE]":
-                    break
-                try:
-                    chunk = json.loads(raw)
-                except json.JSONDecodeError:
-                    logger.warning("image_generation JSON decode error: %s", raw[:200])
-                    continue
-                event_type = chunk.get("type") or chunk.get("event") or current_event_type
-                current_event_type = ""
-                if event_type == "error":
-                    error_msg = chunk.get("message") or chunk.get("error", {}).get("message", "Unknown stream error")
-                    raise api_error("UPSTREAM_ERROR", str(error_msg)[:500])
-                if event_type.endswith("partial_image") or event_type == "image.partial_image":
-                    b64_json = extract_image_b64(chunk)
-                    if not b64_json:
+            buffer = ""
+            async for chunk_bytes in response.aiter_bytes():
+                buffer += chunk_bytes.decode("utf-8", errors="replace")
+                while "\n" in buffer:
+                    line, buffer = buffer.split("\n", 1)
+                    line = line.rstrip("\r")
+                    if not line:
                         continue
-                    partial_seen += 1
-                    progress_index = partial_seen
-                    raw_index = chunk.get("partial_image_index", chunk.get("index"))
-                    if raw_index is not None:
-                        try:
-                            parsed_index = int(raw_index)
-                            progress_index = parsed_index + 1 if parsed_index < partial_images else parsed_index
-                        except (TypeError, ValueError):
-                            progress_index = partial_seen
-                    logger.info(
-                        "upstream_image_event partial model=%s index=%d total=%d b64_len=%d",
-                        upstream_model,
-                        progress_index,
-                        partial_images,
-                        len(b64_json),
-                    )
-                    yield StreamEvent(
-                        "image_progress",
-                        {
-                            "b64_json": b64_json,
-                            "index": progress_index,
-                            "total": partial_images,
-                            "output_format": output_format,
-                            "size": generation_settings["size"],
-                        },
-                    )
-                elif event_type.endswith("completed") or event_type == "image.completed":
-                    b64_json = extract_image_b64(chunk)
-                    logger.info(
-                        "upstream_image_event completed model=%s has_b64=%s",
-                        upstream_model,
-                        bool(b64_json),
-                    )
-                    if b64_json:
-                        completed = GeneratedImage(
-                            b64_json=b64_json,
-                            output_format=extract_image_output_format(chunk, output_format),
-                        )
+                    if not line.startswith("data:"):
+                        if line.startswith("event:"):
+                            current_event_type = line.removeprefix("event:").strip()
+                            logger.info(
+                                "image_generation_sse_event model=%s event=%s",
+                                upstream_model, current_event_type,
+                            )
+                        continue
+                    raw = line.removeprefix("data:").strip()
+                    if raw == "[DONE]":
+                        logger.info("image_generation_sse_done model=%s", upstream_model)
+                        current_event_type = ""
                         break
+                    logger.info(
+                        "image_generation_sse_data model=%s raw_head=%s",
+                        upstream_model, raw[:200],
+                    )
+                    try:
+                        chunk = json.loads(raw)
+                    except json.JSONDecodeError:
+                        logger.warning("image_generation JSON decode error: %s", raw[:200])
+                        continue
+                    event_type = chunk.get("type") or chunk.get("event") or current_event_type
+                    logger.info(
+                        "image_generation_sse_parsed model=%s event_type=%s keys=%s",
+                        upstream_model, event_type, ",".join(sorted(chunk.keys())),
+                    )
+                    current_event_type = ""
+                    if event_type == "error":
+                        error_msg = chunk.get("message") or chunk.get("error", {}).get("message", "Unknown stream error")
+                        raise api_error("UPSTREAM_ERROR", str(error_msg)[:500])
+                    if event_type.endswith("partial_image") or event_type == "image.partial_image":
+                        b64_json = extract_image_b64(chunk)
+                        if not b64_json:
+                            logger.warning(
+                                "image_generation partial_image without b64_json model=%s",
+                                upstream_model,
+                            )
+                            continue
+                        partial_seen += 1
+                        progress_index = partial_seen
+                        raw_index = chunk.get("partial_image_index", chunk.get("index"))
+                        if raw_index is not None:
+                            try:
+                                parsed_index = int(raw_index)
+                                progress_index = parsed_index + 1 if parsed_index < partial_images else parsed_index
+                            except (TypeError, ValueError):
+                                progress_index = partial_seen
+                        logger.info(
+                            "upstream_image_event partial model=%s index=%d total=%d b64_len=%d",
+                            upstream_model,
+                            progress_index,
+                            partial_images,
+                            len(b64_json),
+                        )
+                        yield StreamEvent(
+                            "image_progress",
+                            {
+                                "b64_json": b64_json,
+                                "index": progress_index,
+                                "total": partial_images,
+                                "output_format": output_format,
+                                "size": generation_settings["size"],
+                            },
+                        )
+                    elif event_type.endswith("completed") or event_type == "image.completed":
+                        b64_json = extract_image_b64(chunk)
+                        logger.info(
+                            "upstream_image_event completed model=%s has_b64=%s b64_len=%d",
+                            upstream_model,
+                            bool(b64_json),
+                            len(b64_json or ""),
+                        )
+                        if b64_json:
+                            completed = GeneratedImage(
+                                b64_json=b64_json,
+                                output_format=extract_image_output_format(chunk, output_format),
+                            )
+                            break
+                    else:
+                        logger.info(
+                            "image_generation_unhandled_event model=%s event_type=%s",
+                            upstream_model, event_type,
+                        )
+                if completed:
+                    break
     if not completed:
+        logger.error(
+            "image_generation_no_completed model=%s partial_seen=%d",
+            upstream_model, partial_seen,
+        )
         raise api_error("UPSTREAM_ERROR", "图像模型没有返回最终图片")
     yield StreamEvent("image_completed", {"b64_json": completed.b64_json, "output_format": completed.output_format})
 
@@ -419,8 +485,10 @@ async def post_image_generation_json_with_curl(
             config_file.write("silent\n")
             config_file.write("show-error\n")
             config_file.write(f"max-time = {IMAGE_GENERATION_HTTP_TIMEOUT_SECONDS}\n")
-            config_file.write("connect-timeout = 30\n")
+            config_file.write("connect-timeout = 60\n")
             config_file.write("tlsv1.2\n")
+            config_file.write("no-http2\n")
+            config_file.write("keepalive-time = 30\n")
             config_file.write('request = "POST"\n')
             config_file.write(f'url = "{url}"\n')
             config_file.write(f'header = "Authorization: Bearer {api_key}"\n')
