@@ -61,6 +61,10 @@ IMAGE_BACKGROUND_OPTIONS = {"auto", "transparent", "opaque"}
 IMAGE_FORMAT_OPTIONS = {"png", "jpeg", "webp"}
 IMAGE_MODERATION_OPTIONS = {"auto", "low"}
 IMAGE_GENERATION_HTTP_TIMEOUT_SECONDS = 15 * 60
+IMAGE_TRANSPORT_LOST_MESSAGE = (
+    "图像生成的网络连接在读取结果时断开，可能上游已经完成并计费，但本地没有收到完整图片数据。"
+    "请稍后确认记录后再决定是否重试，避免重复扣费。"
+)
 
 
 @dataclass
@@ -73,6 +77,10 @@ class GeneratedImage:
 class ImageGenerationHTTPResponse:
     status_code: int
     text: str
+
+
+class ImageGenerationStreamTransportError(RuntimeError):
+    """Raised when stream-first generation cannot complete because of transport issues."""
 
 
 def is_image_generation_model(model: str | None) -> bool:
@@ -166,6 +174,7 @@ def image_generation_payload(
         "model": upstream_model,
         "prompt": prompt,
         "n": 1,
+        "user": user_id,
     }
     output_format = effective_image_output_format(generation_settings)
     if generation_settings["size"] != "auto":
@@ -287,6 +296,35 @@ async def image_generation_stream(
     yield StreamEvent("image_completed", {"b64_json": completed.b64_json, "output_format": completed.output_format})
 
 
+async def image_generation_stream_final(
+    api_key: str,
+    model: str,
+    prompt: str,
+    user_id: str,
+    image_settings: dict[str, Any] | None = None,
+) -> GeneratedImage:
+    try:
+        stream = image_generation_stream(
+            api_key=api_key,
+            model=model,
+            prompt=prompt,
+            user_id=user_id,
+            image_settings=image_settings,
+            partial_images=0,
+        )
+        async for event in stream:
+            if event.event != "image_completed":
+                continue
+            b64_json = event.data.get("b64_json") or ""
+            if b64_json:
+                generation_settings = normalize_image_settings(image_settings)
+                output_format = event.data.get("output_format") or effective_image_output_format(generation_settings)
+                return GeneratedImage(b64_json=b64_json, output_format=output_format)
+    except (httpx.RemoteProtocolError, httpx.ReadError, httpx.ConnectError, httpx.TimeoutException) as exc:
+        raise ImageGenerationStreamTransportError(str(exc)) from exc
+    raise api_error("UPSTREAM_ERROR", "图像模型没有返回最终图片")
+
+
 async def image_generation_nonstream(
     api_key: str,
     model: str,
@@ -385,24 +423,42 @@ async def post_image_generation_json_with_curl(
             stdout=asyncio.subprocess.PIPE,
             stderr=asyncio.subprocess.PIPE,
         )
+        request_started = time.perf_counter()
         stdout, stderr = await process.communicate()
+        elapsed_ms = int((time.perf_counter() - request_started) * 1000)
         response_text = Path(response_path).read_text(encoding="utf-8", errors="replace")
-        if process.returncode != 0:
-            if response_text.strip():
-                logger.warning(
-                    "image_generation curl returned nonzero with response body returncode=%s stderr=%s",
-                    process.returncode,
-                    stderr.decode("utf-8", errors="replace").strip()[:300],
-                )
-                status_text = stdout.decode("utf-8", errors="replace").strip()
-                status_code = int(status_text[-3:]) if status_text and status_text[-3:].isdigit() else 200
-                return ImageGenerationHTTPResponse(status_code=status_code, text=response_text)
-            error_text = stderr.decode("utf-8", errors="replace").strip() or response_text[:500]
-            raise api_error("UPSTREAM_ERROR", f"图像生成请求传输失败：{error_text[:500]}")
         status_text = stdout.decode("utf-8", errors="replace").strip()
+        status_code = int(status_text[-3:]) if status_text and status_text[-3:].isdigit() else 200
+        response_bytes = Path(response_path).stat().st_size
+        stderr_text = stderr.decode("utf-8", errors="replace").strip()
+        perf_logger.info(
+            "upstream_timing image_generation_curl_done status=%s returncode=%s bytes=%d elapsed_ms=%d",
+            status_code,
+            process.returncode,
+            response_bytes,
+            elapsed_ms,
+        )
+        if process.returncode != 0:
+            if response_text.strip() and response_text_has_complete_image(response_text):
+                logger.warning(
+                    "image_generation curl returned nonzero with complete response body status=%s returncode=%s bytes=%d stderr=%s",
+                    status_code,
+                    process.returncode,
+                    response_bytes,
+                    stderr_text[:300],
+                )
+                return ImageGenerationHTTPResponse(status_code=status_code, text=response_text)
+            logger.warning(
+                "image_generation curl transport lost status=%s returncode=%s bytes=%d stderr=%s",
+                status_code,
+                process.returncode,
+                response_bytes,
+                stderr_text[:300],
+            )
+            raise api_error("IMAGE_TRANSPORT_LOST", IMAGE_TRANSPORT_LOST_MESSAGE)
         if not status_text:
             raise api_error("UPSTREAM_ERROR", "图像模型没有返回 HTTP 状态码")
-        return ImageGenerationHTTPResponse(status_code=int(status_text[-3:]), text=response_text)
+        return ImageGenerationHTTPResponse(status_code=status_code, text=response_text)
     finally:
         for path in (config_path, request_path, response_path):
             if path:
@@ -459,6 +515,14 @@ def extract_image_output_format(chunk: dict[str, Any], fallback: str = "png") ->
     if isinstance(image, dict) and isinstance(image.get("output_format"), str):
         return image["output_format"]
     return fallback
+
+
+def response_text_has_complete_image(response_text: str) -> bool:
+    try:
+        body = json.loads(response_text)
+    except json.JSONDecodeError:
+        return False
+    return bool(extract_image_b64(body))
 
 
 async def save_generated_image_attachment(

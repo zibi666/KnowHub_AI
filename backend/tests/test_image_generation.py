@@ -4,8 +4,10 @@ from pathlib import Path
 import pytest
 from fastapi import HTTPException
 
+from app.providers.openai_compatible import StreamEvent
 from app.services.image_generation import (
     ImageGenerationHTTPResponse,
+    image_generation_stream_final,
     image_generation_nonstream,
     post_image_generation_json_with_curl,
 )
@@ -45,7 +47,8 @@ def test_image_generation_nonstream_reads_data_b64(monkeypatch):
     assert result.output_format == "webp"
     assert "stream" not in DummyTransport.payloads[0]
     assert "partial_images" not in DummyTransport.payloads[0]
-    assert "user" not in DummyTransport.payloads[0]
+    assert DummyTransport.payloads[0]["user"] == "u1"
+    assert "response_format" not in DummyTransport.payloads[0]
 
 
 def test_image_generation_nonstream_uses_documented_default_payload(monkeypatch):
@@ -62,6 +65,7 @@ def test_image_generation_nonstream_uses_documented_default_payload(monkeypatch)
         "model": "gpt-image-2",
         "prompt": "draw",
         "n": 1,
+        "user": "u1",
     }
 
 
@@ -94,6 +98,7 @@ def test_image_generation_nonstream_sends_only_selected_optional_payload(monkeyp
         "model": "gpt-image-2",
         "prompt": "draw",
         "n": 1,
+        "user": "u1",
         "size": "1536x1024",
         "quality": "high",
         "background": "opaque",
@@ -126,6 +131,7 @@ def test_image_generation_nonstream_transparent_jpeg_payload_uses_png(monkeypatc
         "model": "gpt-image-2",
         "prompt": "draw",
         "n": 1,
+        "user": "u1",
         "background": "transparent",
     }
 
@@ -167,6 +173,24 @@ def test_image_generation_nonstream_surfaces_transport_error(monkeypatch):
         asyncio.run(image_generation_nonstream("sk-test", "gpt-image-2", "draw", "u1", None))
 
 
+def test_image_generation_stream_final_reads_completed_image(monkeypatch):
+    import app.services.image_generation as image_generation
+
+    calls = []
+
+    async def dummy_stream(**kwargs):
+        calls.append(kwargs)
+        yield StreamEvent("image_completed", {"b64_json": "abc", "output_format": "webp"})
+
+    monkeypatch.setattr(image_generation, "image_generation_stream", dummy_stream)
+
+    result = asyncio.run(image_generation_stream_final("sk-test", "gpt-image-2", "draw", "u1", {"output_format": "webp"}))
+
+    assert result.b64_json == "abc"
+    assert result.output_format == "webp"
+    assert calls[0]["partial_images"] == 0
+
+
 def test_curl_transport_uses_body_when_tls_eof_happens(monkeypatch, tmp_path):
     import app.services.image_generation as image_generation
 
@@ -206,4 +230,88 @@ def test_curl_transport_uses_body_when_tls_eof_happens(monkeypatch, tmp_path):
 
     assert response.status_code == 200
     assert '"b64_json":"abc"' in response.text
+    assert all(not path.exists() for path in created_paths)
+
+
+def test_curl_transport_raises_transport_lost_when_tls_eof_has_empty_body(monkeypatch, tmp_path):
+    import app.services.image_generation as image_generation
+
+    created_paths: list[Path] = []
+
+    class DummyTempFile:
+        def __init__(self, mode, encoding=None, delete=False, suffix=""):
+            self.path = tmp_path / f"temp-{len(created_paths)}{suffix}"
+            created_paths.append(self.path)
+            self.file = self.path.open(mode, encoding=encoding)
+            self.name = str(self.path)
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, exc_type, exc, tb):
+            self.file.close()
+
+        def write(self, value):
+            return self.file.write(value)
+
+    class DummyProcess:
+        returncode = 56
+
+        async def communicate(self):
+            return b"200", b"curl: (56) OpenSSL SSL_read: unexpected eof while reading"
+
+    async def dummy_create_subprocess_exec(*args, **kwargs):
+        return DummyProcess()
+
+    monkeypatch.setattr(image_generation.tempfile, "NamedTemporaryFile", DummyTempFile)
+    monkeypatch.setattr(image_generation.asyncio, "create_subprocess_exec", dummy_create_subprocess_exec)
+
+    with pytest.raises(HTTPException) as exc_info:
+        asyncio.run(post_image_generation_json_with_curl("curl", "sk-test", "https://example.test", {"prompt": "draw"}))
+
+    assert exc_info.value.detail["code"] == "IMAGE_TRANSPORT_LOST"
+    assert "curl:" not in exc_info.value.detail["message"]
+    assert all(not path.exists() for path in created_paths)
+
+
+def test_curl_transport_raises_transport_lost_when_tls_eof_has_truncated_json(monkeypatch, tmp_path):
+    import app.services.image_generation as image_generation
+
+    created_paths: list[Path] = []
+
+    class DummyTempFile:
+        def __init__(self, mode, encoding=None, delete=False, suffix=""):
+            self.path = tmp_path / f"temp-{len(created_paths)}{suffix}"
+            created_paths.append(self.path)
+            self.file = self.path.open(mode, encoding=encoding)
+            self.name = str(self.path)
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, exc_type, exc, tb):
+            self.file.close()
+
+        def write(self, value):
+            return self.file.write(value)
+
+    class DummyProcess:
+        returncode = 56
+
+        async def communicate(self):
+            response_path = created_paths[2]
+            response_path.write_text('{"data":[{"b64_json":"abc"', encoding="utf-8")
+            return b"200", b"curl: (56) OpenSSL SSL_read: unexpected eof while reading"
+
+    async def dummy_create_subprocess_exec(*args, **kwargs):
+        return DummyProcess()
+
+    monkeypatch.setattr(image_generation.tempfile, "NamedTemporaryFile", DummyTempFile)
+    monkeypatch.setattr(image_generation.asyncio, "create_subprocess_exec", dummy_create_subprocess_exec)
+
+    with pytest.raises(HTTPException) as exc_info:
+        asyncio.run(post_image_generation_json_with_curl("curl", "sk-test", "https://example.test", {"prompt": "draw"}))
+
+    assert exc_info.value.detail["code"] == "IMAGE_TRANSPORT_LOST"
+    assert "curl:" not in exc_info.value.detail["message"]
     assert all(not path.exists() for path in created_paths)

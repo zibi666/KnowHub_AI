@@ -39,10 +39,11 @@ from app.services.context import build_context_bundle, build_current_message_bra
 from app.services.dead_letters import push_dead_letter
 from app.services.image_generation import (
     DEFAULT_IMAGE_SETTINGS,
+    ImageGenerationStreamTransportError,
     effective_image_output_format,
     filter_available_models_for_request,
-    image_generation_nonstream,
     image_generation_stream,
+    image_generation_stream_final,
     image_model_is_available,
     is_image_generation_model,
     official_available_models,
@@ -149,20 +150,35 @@ def image_generation_error_message(exc: Exception | None = None) -> str:
                 return message or "当前图像模型不可用，请切换模型后重试。"
             if code == "QUOTA_EXCEEDED":
                 return message or "已达到额度上限。"
+            if code == "IMAGE_TRANSPORT_LOST":
+                return message or (
+                    "图像生成的连接在读取结果时断开，可能上游已经完成并计费，但本地没有收到完整图片。"
+                    "请稍后确认记录后再决定是否重试，避免重复扣费。"
+                )
             if code == "UPSTREAM_ERROR" and message:
                 return message
         return "图像生成服务暂时不可用，请稍后重试。"
+    if isinstance(exc, ImageGenerationStreamTransportError):
+        return "图像生成的流式连接在读取结果时断开，可能上游已经完成并计费，但本地没有收到完整图片。请稍后确认记录后再决定是否重试，避免重复扣费。"
     if is_transient_image_generation_error(exc):
-        return "图像生成请求提前断开，后端没有收到最终图片数据；请稍后重试，或降低图片质量后再试。"
+        return "图像生成请求提前断开，可能上游已经完成并计费，但后端没有收到最终图片数据。请稍后确认记录后再决定是否重试，避免重复扣费。"
     text = str(exc or "")
     lowered = text.lower()
     if "image generation exceeded" in lowered:
         return "图像生成等待超过 10 分钟，仍未收到最终图片。请稍后重试，或降低图片质量后再试。"
     if "server disconnected" in lowered or "without sending a response" in lowered or "remote protocol" in lowered:
-        return "图像生成服务连接中断，可能是上游提前断开或网络超时，请稍后重试。"
+        return "图像生成服务连接中断，可能上游已经完成并计费，但本地未收到完整图片。请稍后确认记录后再决定是否重试。"
     if "image generation completed without image data" in lowered or "没有返回最终图片" in text:
         return "图像模型没有返回最终图片，请稍后重试。"
     return "图像生成失败，请稍后重试。"
+
+
+def image_generation_error_code(exc: Exception | None = None) -> str:
+    if isinstance(exc, HTTPException) and isinstance(exc.detail, dict):
+        return str(exc.detail.get("code") or "UPSTREAM_ERROR")
+    if isinstance(exc, ImageGenerationStreamTransportError) or is_transient_image_generation_error(exc):
+        return "IMAGE_TRANSPORT_LOST"
+    return "UPSTREAM_ERROR"
 
 
 def is_transient_image_generation_error(exc: Exception | None) -> bool:
@@ -1390,7 +1406,7 @@ async def run_image_generation_job(
 
         status_tick = 0
         generation_task = asyncio.create_task(
-            image_generation_nonstream(
+            image_generation_stream_final(
                 api_key=api_key,
                 model=model,
                 prompt=prompt,
@@ -1544,7 +1560,7 @@ async def run_image_generation_job(
                 "message_id": assistant_message_id,
                 "content": message,
                 "status": "failed_no_output",
-                "code": "UPSTREAM_ERROR",
+                "code": image_generation_error_code(exc),
                 "message": message,
                 **message_progress_event_data(started_at=assistant_started_at),
             },
