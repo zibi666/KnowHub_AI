@@ -6,7 +6,7 @@ from datetime import datetime, timedelta
 
 from fastapi import APIRouter, Depends, Query
 from fastapi.responses import StreamingResponse
-from sqlalchemy import func, or_, select, update
+from sqlalchemy import case, func, or_, select, update
 from sqlalchemy.ext.asyncio import AsyncSession
 from arq import create_pool
 
@@ -81,15 +81,31 @@ async def hydrate_single_message(db: AsyncSession, message_id: str, user_id: str
 
 @router.get("/conversations", response_model=list[ConversationOut])
 async def list_conversations(user: User = Depends(get_current_user), db: AsyncSession = Depends(get_session)):
+    latest_message_at = (
+        select(func.max(Message.created_at))
+        .where(Message.conversation_id == Conversation.id, Message.user_id == user.id)
+        .correlate(Conversation)
+        .scalar_subquery()
+    )
+    active_at = case(
+        (latest_message_at.is_(None), Conversation.updated_at),
+        (latest_message_at > Conversation.updated_at, latest_message_at),
+        else_=Conversation.updated_at,
+    )
     rows = (
         await db.execute(
-            select(Conversation)
+            select(Conversation, active_at.label("active_at"))
             .where(Conversation.user_id == user.id, Conversation.deleted_at.is_(None))
-            .order_by(Conversation.updated_at.desc())
+            .order_by(active_at.desc(), Conversation.id.desc())
             .limit(100)
         )
-    ).scalars().all()
-    return rows
+    ).all()
+    conversations = []
+    for conversation, active_at_value in rows:
+        if active_at_value and active_at_value > conversation.updated_at:
+            conversation.updated_at = active_at_value
+        conversations.append(conversation)
+    return conversations
 
 
 @router.get("/conversations/search", response_model=list[ConversationSearchResult])
