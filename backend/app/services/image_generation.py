@@ -376,8 +376,25 @@ async def post_image_generation_json(
 ) -> ImageGenerationHTTPResponse:
     curl_path = shutil.which("curl")
     if curl_path:
-        return await post_image_generation_json_with_curl(curl_path, api_key, url, payload)
+        try:
+            return await post_image_generation_json_with_curl(curl_path, api_key, url, payload)
+        except HTTPException as exc:
+            if isinstance(exc.detail, dict) and exc.detail.get("code") == "IMAGE_TRANSPORT_LOST":
+                logger.warning("curl transport lost, falling back to httpx for %s", url)
+                return await post_image_generation_json_with_httpx(api_key, url, payload)
+            raise
     return await post_image_generation_json_with_httpx(api_key, url, payload)
+
+
+def _parse_http_status(status_text: str) -> int:
+    if not status_text:
+        return 200
+    import re
+
+    matches = re.findall(r"\b(\d{3})\b", status_text)
+    if matches:
+        return int(matches[-1])
+    return 200
 
 
 async def post_image_generation_json_with_curl(
@@ -392,12 +409,12 @@ async def post_image_generation_json_with_curl(
     try:
         with tempfile.NamedTemporaryFile("w", encoding="utf-8", delete=False, suffix=".curl") as config_file:
             config_path = config_file.name
-            config_file.write("http1.1\n")
             config_file.write("compressed\n")
             config_file.write("silent\n")
             config_file.write("show-error\n")
             config_file.write(f"max-time = {IMAGE_GENERATION_HTTP_TIMEOUT_SECONDS}\n")
             config_file.write("connect-timeout = 30\n")
+            config_file.write("tlsv1.2\n")
             config_file.write('request = "POST"\n')
             config_file.write(f'url = "{url}"\n')
             config_file.write(f'header = "Authorization: Bearer {api_key}"\n')
@@ -428,7 +445,7 @@ async def post_image_generation_json_with_curl(
         elapsed_ms = int((time.perf_counter() - request_started) * 1000)
         response_text = Path(response_path).read_text(encoding="utf-8", errors="replace")
         status_text = stdout.decode("utf-8", errors="replace").strip()
-        status_code = int(status_text[-3:]) if status_text and status_text[-3:].isdigit() else 200
+        status_code = _parse_http_status(status_text)
         response_bytes = Path(response_path).stat().st_size
         stderr_text = stderr.decode("utf-8", errors="replace").strip()
         perf_logger.info(
