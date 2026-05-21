@@ -167,6 +167,8 @@ const selectedGroupId = ref('ungrouped')
 const selectedGroupKeys = ref<ApiKeyEntry[]>([])
 const groupKeysLoading = ref(false)
 const deletingConversationId = ref<string | null>(null)
+const deleteConfirmOpen = ref(false)
+const conversationPendingDelete = ref<Conversation | null>(null)
 const renamingConversationId = ref<string | null>(null)
 const renameSaving = ref(false)
 const renameDialogOpen = ref(false)
@@ -1789,12 +1791,27 @@ async function saveConversationTitle() {
   }
 }
 
-async function deleteConversation(conversation: Conversation) {
+function requestDeleteConversation(conversation: Conversation) {
   if (deletingConversationId.value || (conversation.id === currentId.value && currentConversationStreaming.value)) return
+  conversationPendingDelete.value = conversation
+  deleteConfirmOpen.value = true
+}
+
+function closeDeleteConfirm() {
+  if (deletingConversationId.value) return
+  deleteConfirmOpen.value = false
+  conversationPendingDelete.value = null
+}
+
+async function confirmDeleteConversation() {
+  const conversation = conversationPendingDelete.value
+  if (!conversation || deletingConversationId.value || (conversation.id === currentId.value && currentConversationStreaming.value)) return
   deletingConversationId.value = conversation.id
   try {
     await apiFetch(`/conversations/${conversation.id}`, { method: 'DELETE' })
     conversations.value = conversations.value.filter((item) => item.id !== conversation.id)
+    deleteConfirmOpen.value = false
+    conversationPendingDelete.value = null
     if (currentId.value === conversation.id) {
       const nextConversation = conversations.value[0]
       if (nextConversation) {
@@ -2258,7 +2275,7 @@ onUnmounted(() => {
               title="删除对话"
               aria-label="删除对话"
               :disabled="deletingConversationId === conversation.id || (conversation.id === currentId && currentConversationStreaming)"
-              @click.stop="deleteConversation(conversation)"
+              @click.stop="requestDeleteConversation(conversation)"
             >
               <X :size="15" />
             </button>
@@ -3055,6 +3072,26 @@ onUnmounted(() => {
             <button type="submit" class="rename-primary-button" :disabled="renameSaving || !renameDraft.trim()">保存</button>
           </div>
         </form>
+      </div>
+    </Transition>
+
+    <Transition name="dialog-pop">
+      <div v-if="deleteConfirmOpen" class="confirm-modal-backdrop" @click.self="closeDeleteConfirm">
+        <section class="confirm-modal" role="dialog" aria-modal="true" aria-label="确认删除对话">
+          <div class="confirm-modal-header">
+            <h2>删除对话？</h2>
+            <button type="button" class="confirm-modal-close" title="关闭" aria-label="关闭" @click="closeDeleteConfirm">
+              <X :size="18" />
+            </button>
+          </div>
+          <p>对话「{{ conversationPendingDelete?.title || '未命名对话' }}」删除后将从侧边栏移除。</p>
+          <div class="confirm-modal-actions">
+            <button type="button" class="confirm-secondary-button" :disabled="Boolean(deletingConversationId)" @click="closeDeleteConfirm">取消</button>
+            <button type="button" class="confirm-danger-button" :disabled="Boolean(deletingConversationId)" @click="confirmDeleteConversation">
+              {{ deletingConversationId ? '删除中...' : '确认删除' }}
+            </button>
+          </div>
+        </section>
       </div>
     </Transition>
 
