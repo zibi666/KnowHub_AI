@@ -533,14 +533,16 @@ const MESSAGE_ROLE_ORDER: Record<Message['role'], number> = {
   assistant: 2
 }
 
+function compareMessagesForDisplay(a: Message, b: Message) {
+  const timeDelta = new Date(a.createdAt || 0).getTime() - new Date(b.createdAt || 0).getTime()
+  if (timeDelta !== 0) return timeDelta
+  const roleDelta = (MESSAGE_ROLE_ORDER[a.role] ?? 3) - (MESSAGE_ROLE_ORDER[b.role] ?? 3)
+  if (roleDelta !== 0) return roleDelta
+  return a.id.localeCompare(b.id)
+}
+
 function sortMessagesForDisplay(items: Message[]) {
-  const ordered = [...items].sort((a, b) => {
-    const timeDelta = new Date(a.createdAt || 0).getTime() - new Date(b.createdAt || 0).getTime()
-    if (timeDelta !== 0) return timeDelta
-    const roleDelta = (MESSAGE_ROLE_ORDER[a.role] ?? 3) - (MESSAGE_ROLE_ORDER[b.role] ?? 3)
-    if (roleDelta !== 0) return roleDelta
-    return a.id.localeCompare(b.id)
-  })
+  const ordered = [...items].sort(compareMessagesForDisplay)
   const byId = new Map(ordered.map((message) => [message.id, message]))
   const parentIds = new Set(ordered.map((message) => message.parentMessageId).filter(Boolean) as string[])
   const head = [...ordered].reverse().find((message) => !parentIds.has(message.id)) || ordered[ordered.length - 1]
@@ -559,6 +561,26 @@ function sortMessagesForDisplay(items: Message[]) {
     return [...olderLegacyMessages, ...branchChronological]
   }
   return ordered
+}
+
+function findDisplayInsertIndex(message: Message) {
+  return messages.value.findIndex((item) => compareMessagesForDisplay(message, item) < 0)
+}
+
+function insertMessageInDisplayOrder(message: Message) {
+  const insertIndex = findDisplayInsertIndex(message)
+  if (insertIndex === -1) {
+    messages.value.push(message)
+  } else {
+    messages.value.splice(insertIndex, 0, message)
+  }
+}
+
+function moveMessageToDisplayPosition(message: Message) {
+  const currentIndex = messages.value.indexOf(message)
+  if (currentIndex === -1) return
+  messages.value.splice(currentIndex, 1)
+  insertMessageInDisplayOrder(message)
 }
 
 function updateContextStats(data: any, source: 'estimated' | 'actual' = 'estimated') {
@@ -1175,15 +1197,38 @@ function findMessage(messageId?: string | null) {
   return messages.value.find((message) => message.id === messageId)
 }
 
-function upsertMessage(message: Message) {
+function findMessageForMerge(message: Message) {
+  return (
+    findMessage(message.id) ||
+    (message.clientKey ? messages.value.find((item) => item.clientKey === message.clientKey) : undefined) ||
+    messages.value.find((item) => {
+      if (!item.id.startsWith('stream-') && !item.id.startsWith('local-')) return false
+      if (item.role !== message.role) return false
+      if (item.role === 'assistant' && item.status !== 'streaming') return false
+      if (item.role === 'user' && item.content !== message.content) return false
+      return true
+    })
+  )
+}
+
+function mergeMessageIntoExisting(existing: Message, incoming: Message, preserve: Partial<Message> = {}) {
+  const stableClientKey = existing.clientKey || preserve.clientKey || incoming.clientKey || existing.id
+  Object.assign(existing, incoming, preserve, { clientKey: stableClientKey })
+  moveMessageToDisplayPosition(existing)
+}
+
+function upsertMessage(message: Message, preserve: Partial<Message> = {}) {
   const normalized = normalizeLoadedMessage(message)
-  const existing = findMessage(normalized.id)
+  const existing = findMessageForMerge({ ...normalized, ...preserve })
   const shouldFollow = !userHasScrolledUp && isNearBottom(40)
   if (existing) {
-    normalized.clientKey = existing.clientKey || normalized.clientKey
-    Object.assign(existing, normalized)
+    mergeMessageIntoExisting(existing, normalized, preserve)
   } else {
-    messages.value = sortMessagesForDisplay([...messages.value, normalized])
+    insertMessageInDisplayOrder({
+      ...normalized,
+      ...preserve,
+      clientKey: preserve.clientKey || normalized.clientKey || normalized.id
+    })
   }
   scheduleScrollToBottom(shouldFollow)
 }
@@ -1193,17 +1238,10 @@ function replaceDraftWithMessage(draftId: string, message: Message, preserve: Pa
   const normalized = normalizeLoadedMessage(message)
   const shouldFollow = !userHasScrolledUp && isNearBottom(40)
   if (!draft) {
-    upsertMessage({
-      ...normalized,
-      ...preserve,
-      clientKey: preserve.clientKey || normalized.clientKey
-    })
+    upsertMessage(normalized, preserve)
     return
   }
-  Object.assign(draft, normalized, preserve, {
-    clientKey: draft.clientKey || preserve.clientKey || normalized.clientKey || draft.id
-  })
-  messages.value = sortMessagesForDisplay(messages.value)
+  mergeMessageIntoExisting(draft, normalized, preserve)
   scheduleScrollToBottom(shouldFollow)
 }
 
@@ -1224,7 +1262,18 @@ function applyConversationEvent(event: string, data: any) {
   const conversationId = data?.conversation_id || data?.conversationId
   if (conversationId && currentId.value && conversationId !== currentId.value) return
   const messageId = data?.message_id || data?.messageId
-  const message = findMessage(messageId)
+  const eventMessage: Message = {
+    id: messageId || `event-${Date.now()}`,
+    conversationId: conversationId || currentId.value || 'new',
+    role: 'assistant',
+    content: typeof data.content === 'string' ? data.content : '',
+    status: data.status || 'streaming',
+    model: data.model,
+    totalTokens: Number(data.total_tokens || data.totalTokens || 0),
+    createdAt: data.created_at || data.createdAt || new Date().toISOString(),
+    parentMessageId: data.user_message_id || data.userMessageId || data.parent_message_id || data.parentMessageId
+  }
+  const message = findMessage(messageId) || findMessageForMerge(eventMessage)
   if (event === 'message_delta') {
     if (!message) {
       void refreshMessageById(messageId)
@@ -1794,6 +1843,7 @@ async function send() {
     id: draftAssistantId,
     clientKey: assistantClientKey,
     conversationId: draftConversationId,
+    parentMessageId: userDraft.id,
     role: 'assistant',
     content: '',
     status: 'streaming',
@@ -1802,7 +1852,8 @@ async function send() {
     startedAt: Date.now(),
     elapsedSeconds: 0
   }
-  messages.value = sortMessagesForDisplay([...messages.value, userDraft, assistantDraft])
+  insertMessageInDisplayOrder(userDraft)
+  insertMessageInDisplayOrder(assistantDraft)
   syncActiveRequestState()
   await scrollMessagesToBottom('auto')
   const path = currentId.value ? `/conversations/${currentId.value}/messages` : '/conversations/new/messages'
