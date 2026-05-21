@@ -1243,11 +1243,14 @@ async def run_image_generation_job(
     final_format = "png"
     prompt_tokens = estimate_tokens_text(prompt)
     request_started = time.perf_counter()
+    assistant_started_at: datetime | None = None
+    image_size = "1024x1024"
     try:
         async with SessionLocal() as db:
             assistant = await db.get(Message, assistant_message_id)
             if not assistant or assistant.user_id != user_id or assistant.conversation_id != conversation_id:
                 return
+            assistant_started_at = assistant.created_at
             assistant.content = "正在生成图片"
             assistant.status = "streaming"
             quota = await db.get(UserQuota, user_id)
@@ -1259,7 +1262,22 @@ async def run_image_generation_job(
                 return
             api_key = decrypt_api_key(api_key_row.ciphertext)
             image_settings = quota.image_settings_json if quota else None
+            image_size = image_settings.get("size", image_size) if isinstance(image_settings, dict) else image_size
             await db.commit()
+
+        await publish_conversation_event(
+            conversation_id,
+            "image_status",
+            {
+                "conversation_id": conversation_id,
+                "message_id": assistant_message_id,
+                "detail": "Image request submitted; waiting for the image model.",
+                "phase": "submitted",
+                "model": model,
+                "size": image_size,
+                **message_progress_event_data(started_at=assistant_started_at),
+            },
+        )
 
         async for event in image_generation_stream(
             api_key=api_key,
@@ -1269,9 +1287,47 @@ async def run_image_generation_job(
             image_settings=image_settings,
             partial_images=1,
         ):
+            if event.event == "image_progress":
+                b64_json = event.data.get("b64_json") or ""
+                await publish_conversation_event(
+                    conversation_id,
+                    "image_progress",
+                    {
+                        "conversation_id": conversation_id,
+                        "message_id": assistant_message_id,
+                        "b64_json": b64_json,
+                        "b64Json": b64_json,
+                        "index": event.data.get("index") or 1,
+                        "total": event.data.get("total") or 1,
+                        "output_format": event.data.get("output_format") or "png",
+                        "outputFormat": event.data.get("output_format") or "png",
+                        "size": event.data.get("size") or image_size,
+                        "detail": "Image preview received; waiting for final image.",
+                        "phase": "rendering",
+                        **message_progress_event_data(started_at=assistant_started_at),
+                    },
+                )
             if event.event == "image_completed":
                 final_b64 = event.data.get("b64_json") or ""
                 final_format = event.data.get("output_format") or "png"
+                await publish_conversation_event(
+                    conversation_id,
+                    "image_progress",
+                    {
+                        "conversation_id": conversation_id,
+                        "message_id": assistant_message_id,
+                        "b64_json": final_b64,
+                        "b64Json": final_b64,
+                        "index": 1,
+                        "total": 1,
+                        "output_format": final_format,
+                        "outputFormat": final_format,
+                        "size": image_size,
+                        "detail": "Image returned; saving downloadable attachment.",
+                        "phase": "saving",
+                        **message_progress_event_data(started_at=assistant_started_at),
+                    },
+                )
                 break
 
         if not final_b64:
@@ -1290,6 +1346,22 @@ async def run_image_generation_job(
             assistant.tokens_source = "estimated"
             db.add(MessageAttachment(message_id=assistant.id, attachment_id=attachment.id))
             await db.commit()
+            await db.refresh(attachment)
+            attachment_payload = attachment_event_data(attachment)
+        await publish_conversation_event(
+            conversation_id,
+            "image_completed",
+            {
+                "conversation_id": conversation_id,
+                "message_id": assistant_message_id,
+                "attachment": attachment_payload,
+                "content": "已根据提示词生成图片。",
+                "status": "completed",
+                "phase": "completed",
+                "size": image_size,
+                **message_progress_event_data(started_at=assistant_started_at),
+            },
+        )
         try:
             async with SessionLocal() as db:
                 await record_usage(db, user_id, model, prompt_tokens, "estimated")

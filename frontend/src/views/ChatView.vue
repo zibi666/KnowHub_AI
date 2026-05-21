@@ -260,9 +260,10 @@ function currentRuntimeElapsed(message: Message) {
 
 function normalizeProgressTimestamp(value: unknown) {
   if (value === null || value === undefined) return undefined
-  const timestamp = Number(value)
+  let timestamp = Number(value)
   if (!Number.isFinite(timestamp) || timestamp <= 0) return undefined
-  return timestamp > Date.now() ? undefined : timestamp
+  if (timestamp < 10_000_000_000) timestamp *= 1000
+  return timestamp
 }
 
 function normalizeProgressElapsed(value: unknown) {
@@ -301,7 +302,8 @@ function applyRuntimeProgress(message: Message, data: any = {}) {
   const existingStartedAt = normalizeProgressTimestamp(message.startedAt ?? message.started_at)
   const incomingStartedAt = normalizeProgressTimestamp(data.startedAt ?? data.started_at)
   const fallbackStartedAt = message.status === 'streaming' ? messageCreatedAtMs(message) : undefined
-  const startedAt = existingStartedAt || incomingStartedAt || fallbackStartedAt
+  const now = Date.now()
+  const startedAt = existingStartedAt || incomingStartedAt || fallbackStartedAt || (message.status === 'streaming' ? now : undefined)
   const firstTokenSeconds = incomingFirstTokenSeconds(data)
   const incomingElapsed = normalizeProgressElapsed(data.elapsedSeconds ?? data.elapsed_seconds)
   const existingElapsed = currentRuntimeElapsed(message)
@@ -313,8 +315,9 @@ function applyRuntimeProgress(message: Message, data: any = {}) {
     setMessageFirstTokenSeconds(message, firstTokenSeconds)
   }
   if (startedAt !== undefined) {
-    message.startedAt = startedAt
-    message.started_at = startedAt
+    const safeStartedAt = startedAt > now ? now : startedAt
+    message.startedAt = safeStartedAt
+    message.started_at = safeStartedAt
   }
   if (elapsedSeconds !== undefined) {
     message.elapsedSeconds = elapsedSeconds
@@ -353,6 +356,24 @@ function normalizeLoadedMessage(message: Message): Message {
     message.imageProgress = undefined
   }
   return message
+}
+
+function applyImageProgress(message: Message, data: any = {}) {
+  message.status = data.status || 'streaming'
+  applyRuntimeProgress(message, data)
+  const existing = message.imageProgress || message.image_progress
+  message.imageProgress = {
+    b64Json: data.b64Json || data.b64_json || existing?.b64Json || existing?.b64_json || '',
+    index: Number(data.index || existing?.index || 0),
+    total: Number(data.total || existing?.total || 1),
+    outputFormat: data.outputFormat || data.output_format || existing?.outputFormat || existing?.output_format || 'png',
+    detail: data.detail || existing?.detail || message.progressDetail,
+    elapsedSeconds: currentRuntimeElapsed(message),
+    startedAt: normalizeProgressTimestamp(message.startedAt ?? message.started_at) || Date.now(),
+    phase: data.phase || existing?.phase || message.progressPhase || 'rendering',
+    size: data.size || existing?.size || imageSettings.value.size
+  }
+  message.image_progress = message.imageProgress
 }
 
 function normalizeImageSettings(data: any): ImageGenerationSettings {
@@ -1242,6 +1263,37 @@ function applyConversationEvent(event: string, data: any) {
     }
     return
   }
+  if (event === 'image_status' || event === 'image_progress') {
+    if (!message) {
+      void refreshMessageById(messageId)
+      return
+    }
+    applyImageProgress(message, data)
+    syncActiveRequestState()
+    syncImagePolling()
+    scheduleScrollToBottom()
+    return
+  }
+  if (event === 'image_completed') {
+    if (message) {
+      applyRuntimeProgress(message, data)
+      if (data.attachment) {
+        const attachments = message.attachments || []
+        if (!attachments.some((attachment) => attachment.id === data.attachment.id)) {
+          message.attachments = [...attachments, data.attachment]
+        }
+      }
+      message.status = data.status || 'completed'
+      if (typeof data.content === 'string') message.content = data.content
+      if (message.status !== 'streaming') message.imageProgress = undefined
+    }
+    syncActiveRequestState()
+    stopImagePolling()
+    void loadConversations()
+    void loadContextStats()
+    scheduleScrollToBottom(true)
+    return
+  }
   if (event === 'usage') {
     if (message) {
       message.promptTokens = Number(data.prompt_tokens || data.promptTokens || message.promptTokens || 0)
@@ -1313,7 +1365,18 @@ function syncConversationEvents() {
   conversationEventSourceId = conversationId
   const source = new EventSource(`/api/conversations/${conversationId}/events`, { withCredentials: true })
   conversationEventSource = source
-  const eventNames = ['message_started', 'message_delta', 'message_snapshot', 'message_completed', 'message_failed', 'usage', 'context']
+  const eventNames = [
+    'message_started',
+    'message_delta',
+    'message_snapshot',
+    'message_completed',
+    'message_failed',
+    'image_status',
+    'image_progress',
+    'image_completed',
+    'usage',
+    'context'
+  ]
   for (const eventName of eventNames) {
     source.addEventListener(eventName, (event) => {
       try {
@@ -1732,7 +1795,7 @@ async function send() {
     clientKey: assistantClientKey,
     conversationId: draftConversationId,
     role: 'assistant',
-    content: isImageGeneration ? '??????' : '',
+    content: '',
     status: 'streaming',
     totalTokens: 0,
     createdAt: nowIso,
