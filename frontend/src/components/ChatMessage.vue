@@ -84,7 +84,8 @@ const finalElapsed = computed(() => {
 const generatedImageProgressLabel = computed(() => {
   const progress = props.message.imageProgress
   if (!progress) return '等待模型响应'
-  if (progress.phase === 'saving') return progress.b64Json ? '图片生成完成，正在保存' : '正在保存图片'
+  if (progress.phase === 'returned') return '图片已返回'
+  if (progress.phase === 'saving') return progress.b64Json ? '图片已返回' : '正在保存图片'
   if (progress.b64Json) return `进度图 ${progress.index || 1}/${progress.total || 1}`
   if (progress.phase === 'rendering_long') return '高质量生成中'
   if (progress.phase === 'rendering') return '正在绘制'
@@ -98,6 +99,10 @@ function isImageAttachment(item: Attachment) {
 
 function attachmentPreviewUrl(id: string) {
   return `/api/attachments/${id}/preview`
+}
+
+function attachmentImageSrc(attachment: Attachment) {
+  return attachment.previewDataUrl || attachmentPreviewUrl(attachment.id)
 }
 
 function attachmentDownloadUrl(id: string) {
@@ -242,7 +247,7 @@ onUnmounted(() => {
               :aria-label="`查看图片：${attachment.filename}`"
               @click="emit('previewAttachment', attachment)"
             >
-              <img :src="attachmentPreviewUrl(attachment.id)" :alt="attachment.filename" @load="handleImageLoad(attachment, $event)" />
+              <img :src="attachmentImageSrc(attachment)" :alt="attachment.filename" @load="handleImageLoad(attachment, $event)" />
             </button>
           </div>
           <div v-if="message.content.trim()" class="message-bubble message-user">
@@ -282,7 +287,7 @@ onUnmounted(() => {
         <div v-else-if="showGeneratedImageProgress" class="generated-image-progress">
           <button
             class="generated-image-preview"
-            :class="{ 'is-saving': message.imageProgress?.phase === 'saving' }"
+            :class="{ 'is-saving': message.imageProgress?.phase === 'saving' || message.imageProgress?.phase === 'returned' }"
             :style="generatedImageFrameStyle"
             type="button"
             disabled
@@ -310,7 +315,7 @@ onUnmounted(() => {
               :style="imageCardStyle(attachment)"
               @click="emit('previewAttachment', attachment)"
             >
-              <img :src="attachmentPreviewUrl(attachment.id)" :alt="attachment.filename" @load="handleImageLoad(attachment, $event)" />
+              <img :src="attachmentImageSrc(attachment)" :alt="attachment.filename" @load="handleImageLoad(attachment, $event)" />
             </button>
             <a class="generated-image-download" :href="attachmentDownloadUrl(attachment.id)" target="_blank" rel="noreferrer">
               <Download :size="15" />

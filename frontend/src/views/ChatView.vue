@@ -14,6 +14,7 @@ import type {
   Conversation,
   ConversationSearchResult,
   ImageGenerationSettings,
+  ImageProgress,
   Message,
   SendMessageResponse,
   User
@@ -376,6 +377,13 @@ function applyImageProgress(message: Message, data: any = {}) {
   message.image_progress = message.imageProgress
 }
 
+function imageProgressPreviewDataUrl(progress?: ImageProgress) {
+  const b64Json = progress?.b64Json || progress?.b64_json
+  if (!b64Json) return ''
+  const format = progress?.outputFormat === 'jpeg' || progress?.output_format === 'jpeg' ? 'jpeg' : progress?.outputFormat || progress?.output_format || 'png'
+  return `data:image/${format};base64,${b64Json}`
+}
+
 function normalizeImageSettings(data: any): ImageGenerationSettings {
   return {
     size: data?.size || '1024x1024',
@@ -389,6 +397,10 @@ function normalizeImageSettings(data: any): ImageGenerationSettings {
 
 function attachmentPreviewUrl(id: string) {
   return `/api/attachments/${id}/preview`
+}
+
+function attachmentImageSrc(attachment: Attachment) {
+  return attachment.previewDataUrl || attachmentPreviewUrl(attachment.id)
 }
 
 function attachmentKindLabel(item: Attachment | { filename: string; mimeSniffed?: string }) {
@@ -470,12 +482,11 @@ async function openAttachmentPreview(item: Attachment) {
   attachmentPreviewText.value = ''
   attachmentPreviewChunks.value = []
   attachmentPreviewError.value = ''
-  attachmentPreviewLoading.value = true
+  attachmentPreviewLoading.value = !isImageAttachment(item)
+  if (isImageAttachment(item)) return
   try {
-    if (!isImageAttachment(item)) {
-      const preview = await apiFetch<{ attachmentId: string; filename: string; previewText: string }>(`/attachments/${item.id}/preview`)
-      attachmentPreviewText.value = preview.previewText || ''
-    }
+    const preview = await apiFetch<{ attachmentId: string; filename: string; previewText: string }>(`/attachments/${item.id}/preview`)
+    attachmentPreviewText.value = preview.previewText || ''
     attachmentPreviewChunks.value = await apiFetch<AttachmentChunkPreview[]>(`/attachments/${item.id}/chunks`)
   } catch (err) {
     attachmentPreviewError.value = err instanceof Error ? err.message : '附件预览加载失败'
@@ -1328,8 +1339,10 @@ function applyConversationEvent(event: string, data: any) {
       applyRuntimeProgress(message, data)
       if (data.attachment) {
         const attachments = message.attachments || []
+        const previewDataUrl = data.attachment.previewDataUrl || imageProgressPreviewDataUrl(message.imageProgress)
+        const attachment = previewDataUrl ? { ...data.attachment, previewDataUrl } : data.attachment
         if (!attachments.some((attachment) => attachment.id === data.attachment.id)) {
-          message.attachments = [...attachments, data.attachment]
+          message.attachments = [...attachments, attachment]
         }
       }
       message.status = data.status || 'completed'
@@ -2702,7 +2715,7 @@ onUnmounted(() => {
             <div v-else-if="attachmentPreviewError" class="attachment-preview-empty error">{{ attachmentPreviewError }}</div>
             <template v-else-if="attachmentPreview">
               <div v-if="isImageAttachment(attachmentPreview)" class="attachment-preview-image-wrap">
-                <img class="attachment-preview-image" :src="attachmentPreviewUrl(attachmentPreview.id)" :alt="attachmentPreview.filename" />
+                <img class="attachment-preview-image" :src="attachmentImageSrc(attachmentPreview)" :alt="attachmentPreview.filename" />
               </div>
               <template v-else>
                 <section class="attachment-preview-section">

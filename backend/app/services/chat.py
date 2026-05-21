@@ -241,6 +241,13 @@ def attachment_event_data(attachment: Attachment) -> dict:
     }
 
 
+def generated_image_data_url(b64_json: str, output_format: str | None) -> str:
+    if not b64_json:
+        return ""
+    image_format = "jpeg" if output_format == "jpg" else output_format or "png"
+    return f"data:image/{image_format};base64,{b64_json}"
+
+
 def model_supports_vision(model: str | None) -> bool:
     settings = get_settings()
     model_name = (model or "").lower()
@@ -1116,14 +1123,21 @@ async def stream_image_generation_chat(
             "image_status",
             {
                 "text": "图片已生成",
-                "detail": "正在保存图片并生成下载附件。",
+                "detail": "图片已返回，正在生成下载附件。",
+                "b64_json": final_b64,
+                "b64Json": final_b64,
+                "output_format": final_format,
+                "outputFormat": final_format,
+                "index": 1,
+                "total": 1,
                 "elapsed_seconds": int(time.perf_counter() - generation_started),
-                "phase": "saving",
+                "phase": "returned",
                 "model": model,
                 "size": image_size,
             },
         )
 
+        save_started = time.perf_counter()
         async with SessionLocal() as db:
             attachment = await save_generated_image_attachment(db, user_id, final_b64, final_format)
             assistant = await db.get(Message, assistant_message_id)
@@ -1138,6 +1152,13 @@ async def stream_image_generation_chat(
             db.add(MessageAttachment(message_id=assistant.id, attachment_id=attachment.id))
             await db.commit()
             await db.refresh(attachment)
+        perf_logger.info(
+            "chat_timing image_stream_save_commit user=%s conv=%s msg=%s elapsed_ms=%d",
+            user_id,
+            conversation_id,
+            assistant_message_id,
+            int((time.perf_counter() - save_started) * 1000),
+        )
 
         try:
             async with SessionLocal() as db:
@@ -1165,7 +1186,9 @@ async def stream_image_generation_chat(
                 str(exc),
             )
 
-        yield json_line("image_completed", {"attachment": attachment_event_data(attachment)})
+        attachment_payload = attachment_event_data(attachment)
+        attachment_payload["previewDataUrl"] = generated_image_data_url(final_b64, final_format)
+        yield json_line("image_completed", {"attachment": attachment_payload})
         yield json_line(
             "usage",
             {
@@ -1323,8 +1346,8 @@ async def run_image_generation_job(
                         "output_format": final_format,
                         "outputFormat": final_format,
                         "size": image_size,
-                        "detail": "Image returned; saving downloadable attachment.",
-                        "phase": "saving",
+                        "detail": "图片已返回，正在生成下载附件。",
+                        "phase": "returned",
                         **message_progress_event_data(started_at=assistant_started_at),
                     },
                 )
@@ -1333,6 +1356,7 @@ async def run_image_generation_job(
         if not final_b64:
             raise RuntimeError("image generation completed without image data")
 
+        save_started = time.perf_counter()
         async with SessionLocal() as db:
             attachment = await save_generated_image_attachment(db, user_id, final_b64, final_format)
             assistant = await db.get(Message, assistant_message_id)
@@ -1347,7 +1371,15 @@ async def run_image_generation_job(
             db.add(MessageAttachment(message_id=assistant.id, attachment_id=attachment.id))
             await db.commit()
             await db.refresh(attachment)
-            attachment_payload = attachment_event_data(attachment)
+        perf_logger.info(
+            "chat_timing image_background_save_commit user=%s conv=%s msg=%s elapsed_ms=%d",
+            user_id,
+            conversation_id,
+            assistant_message_id,
+            int((time.perf_counter() - save_started) * 1000),
+        )
+        attachment_payload = attachment_event_data(attachment)
+        attachment_payload["previewDataUrl"] = generated_image_data_url(final_b64, final_format)
         await publish_conversation_event(
             conversation_id,
             "image_completed",

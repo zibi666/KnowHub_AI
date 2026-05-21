@@ -94,6 +94,7 @@ export interface Attachment {
   chunkCount?: number
   embeddingStatus?: string | null
   previewText?: string | null
+  previewDataUrl?: string
   createdAt?: string
 }
 

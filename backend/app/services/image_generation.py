@@ -270,8 +270,14 @@ async def save_generated_image_attachment(
     extension = "jpg" if output_format == "jpeg" else output_format if output_format in IMAGE_FORMAT_OPTIONS else "png"
     import base64
 
+    save_started = time.perf_counter()
+    stage_started = save_started
     data = base64.b64decode(b64_json)
+    decode_ms = int((time.perf_counter() - stage_started) * 1000)
+    stage_started = time.perf_counter()
     digest = hashlib.sha256(data).hexdigest()
+    hash_ms = int((time.perf_counter() - stage_started) * 1000)
+    stage_started = time.perf_counter()
     existing = (
         await db.execute(
             select(Attachment).where(
@@ -281,9 +287,21 @@ async def save_generated_image_attachment(
             )
         )
     ).scalar_one_or_none()
+    lookup_ms = int((time.perf_counter() - stage_started) * 1000)
     if existing:
+        perf_logger.info(
+            "image_save_timing reused user=%s attachment=%s bytes=%d decode_ms=%d hash_ms=%d lookup_ms=%d total_ms=%d",
+            user_id,
+            existing.id,
+            len(data),
+            decode_ms,
+            hash_ms,
+            lookup_ms,
+            int((time.perf_counter() - save_started) * 1000),
+        )
         return existing
 
+    stage_started = time.perf_counter()
     quota = await db.get(UserQuota, user_id)
     used = await db.scalar(
         select(func.coalesce(func.sum(Attachment.size_bytes), 0)).where(
@@ -291,17 +309,22 @@ async def save_generated_image_attachment(
             Attachment.deleted_at.is_(None),
         )
     )
+    quota_ms = int((time.perf_counter() - stage_started) * 1000)
     if quota and (used or 0) + len(data) > quota.max_storage_bytes:
         raise api_error("QUOTA_EXCEEDED", "存储额度已用完")
 
     now = datetime.utcnow()
     filename = f"generated-{now.strftime('%Y%m%d-%H%M%S')}.{extension}"
     dest = storage_path(user_id, now.strftime("%Y%m"), digest, filename)
+    stage_started = time.perf_counter()
     ensure_parent(dest)
     dest.write_bytes(data)
+    write_ms = int((time.perf_counter() - stage_started) * 1000)
+    stage_started = time.perf_counter()
     mime = sniff_mime(dest, filename)
     if mime == "application/octet-stream":
         mime = f"image/{'jpeg' if extension == 'jpg' else extension}"
+    sniff_ms = int((time.perf_counter() - stage_started) * 1000)
     attachment = Attachment(
         user_id=user_id,
         sha256=digest,
@@ -316,5 +339,25 @@ async def save_generated_image_attachment(
         context_text_tokens=0,
     )
     db.add(attachment)
+    stage_started = time.perf_counter()
     await db.flush()
+    flush_ms = int((time.perf_counter() - stage_started) * 1000)
+    perf_logger.info(
+        (
+            "image_save_timing created user=%s attachment=%s bytes=%d format=%s decode_ms=%d "
+            "hash_ms=%d lookup_ms=%d quota_ms=%d write_ms=%d sniff_ms=%d flush_ms=%d total_ms=%d"
+        ),
+        user_id,
+        attachment.id,
+        len(data),
+        output_format,
+        decode_ms,
+        hash_ms,
+        lookup_ms,
+        quota_ms,
+        write_ms,
+        sniff_ms,
+        flush_ms,
+        int((time.perf_counter() - save_started) * 1000),
+    )
     return attachment
