@@ -18,6 +18,7 @@ export interface Conversation {
 
 export interface Message {
   id: string
+  clientKey?: string
   conversationId: string
   parentMessageId?: string | null
   retryOfMessageId?: string | null

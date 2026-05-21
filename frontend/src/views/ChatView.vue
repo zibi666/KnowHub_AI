@@ -135,6 +135,7 @@ const contextStats = ref({
 const messageScroller = ref<HTMLElement | null>(null)
 const showScrollToBottom = ref(false)
 let userHasScrolledUp = false
+let programmaticScrollUntil = 0
 
 const themeMode = ref<ThemeMode>('dark')
 const bubbleColor = ref<BubbleColor>('blue')
@@ -1072,15 +1073,38 @@ function isNearBottom(threshold = 80): boolean {
   return scroller.scrollHeight - scroller.scrollTop - scroller.clientHeight < threshold
 }
 
+function isProgrammaticScroll() {
+  return Date.now() < programmaticScrollUntil
+}
+
+function markProgrammaticScroll() {
+  programmaticScrollUntil = Date.now() + 250
+}
+
+function pauseAutoScrollFromUserScroll() {
+  if (!streaming.value) return
+  userHasScrolledUp = true
+  showScrollToBottom.value = messages.value.length > 0
+  cancelPendingScroll()
+}
+
+function handleScrollerWheel(event: WheelEvent) {
+  if (event.deltaY < 0) pauseAutoScrollFromUserScroll()
+}
+
+function handleScrollerTouchStart() {
+  pauseAutoScrollFromUserScroll()
+}
+
 function handleScrollerScroll() {
-  const awayFromBottom = !isNearBottom(120)
+  const nearBottom = isNearBottom(36)
+  const awayFromBottom = !nearBottom
   showScrollToBottom.value = messages.value.length > 0 && awayFromBottom
-  // When the user scrolls during streaming, detect whether they moved
-  // away from the bottom.  If they did, stop auto-scrolling so they can
-  // read earlier content undisturbed.  Auto-scroll resumes once they
-  // scroll back near the bottom.
-  if (streaming.value) {
-    userHasScrolledUp = awayFromBottom
+  if (!streaming.value || isProgrammaticScroll()) return
+  if (nearBottom) {
+    userHasScrolledUp = false
+  } else if (awayFromBottom) {
+    userHasScrolledUp = true
   }
 }
 
@@ -1088,6 +1112,7 @@ async function scrollMessagesToBottom(behavior: ScrollBehavior = 'smooth') {
   await nextTick()
   const scroller = messageScroller.value
   if (!scroller) return
+  markProgrammaticScroll()
   scroller.scrollTo({ top: scroller.scrollHeight, behavior })
   showScrollToBottom.value = false
 }
@@ -1097,9 +1122,10 @@ async function returnToBottom() {
   await scrollMessagesToBottom('smooth')
 }
 
-function scheduleScrollToBottom() {
+function scheduleScrollToBottom(force = false) {
   // Skip auto-scroll when the user has intentionally scrolled up.
   if (userHasScrolledUp) return
+  if (!force && !isNearBottom(40)) return
   if (scrollFrame !== null) return
   scrollFrame = window.requestAnimationFrame(() => {
     scrollFrame = null
@@ -1109,8 +1135,9 @@ function scheduleScrollToBottom() {
 
 function appendStreamText(message: Message, text: string) {
   if (!text) return
+  const shouldFollow = !userHasScrolledUp && isNearBottom(40)
   message.content += text
-  scheduleScrollToBottom()
+  scheduleScrollToBottom(shouldFollow)
 }
 
 function findMessage(messageId?: string | null) {
@@ -1121,12 +1148,33 @@ function findMessage(messageId?: string | null) {
 function upsertMessage(message: Message) {
   const normalized = normalizeLoadedMessage(message)
   const existing = findMessage(normalized.id)
+  const shouldFollow = !userHasScrolledUp && isNearBottom(40)
   if (existing) {
+    normalized.clientKey = existing.clientKey || normalized.clientKey
     Object.assign(existing, normalized)
   } else {
     messages.value = sortMessagesForDisplay([...messages.value, normalized])
   }
-  scheduleScrollToBottom()
+  scheduleScrollToBottom(shouldFollow)
+}
+
+function replaceDraftWithMessage(draftId: string, message: Message, preserve: Partial<Message> = {}) {
+  const draft = findMessage(draftId)
+  const normalized = normalizeLoadedMessage(message)
+  const shouldFollow = !userHasScrolledUp && isNearBottom(40)
+  if (!draft) {
+    upsertMessage({
+      ...normalized,
+      ...preserve,
+      clientKey: preserve.clientKey || normalized.clientKey
+    })
+    return
+  }
+  Object.assign(draft, normalized, preserve, {
+    clientKey: draft.clientKey || preserve.clientKey || normalized.clientKey || draft.id
+  })
+  messages.value = sortMessagesForDisplay(messages.value)
+  scheduleScrollToBottom(shouldFollow)
 }
 
 async function refreshMessageById(messageId?: string | null) {
@@ -1654,9 +1702,12 @@ async function send() {
   const draftConversationId = currentId.value || 'new'
   const draftUserId = `local-${Date.now()}`
   const draftAssistantId = `stream-${Date.now()}`
+  const userClientKey = draftUserId
+  const assistantClientKey = draftAssistantId
   const nowIso = new Date().toISOString()
   const userDraft: Message = {
     id: draftUserId,
+    clientKey: userClientKey,
     conversationId: draftConversationId,
     role: 'user',
     content: userText,
@@ -1667,6 +1718,7 @@ async function send() {
   }
   const assistantDraft: Message = {
     id: draftAssistantId,
+    clientKey: assistantClientKey,
     conversationId: draftConversationId,
     role: 'assistant',
     content: isImageGeneration ? '??????' : '',
@@ -1678,7 +1730,7 @@ async function send() {
   }
   messages.value = sortMessagesForDisplay([...messages.value, userDraft, assistantDraft])
   syncActiveRequestState()
-  await scrollMessagesToBottom('smooth')
+  await scrollMessagesToBottom('auto')
   const path = currentId.value ? `/conversations/${currentId.value}/messages` : '/conversations/new/messages'
   try {
     const result = await apiFetch<SendMessageResponse>(path, {
@@ -1698,17 +1750,22 @@ async function send() {
       currentId.value = newConversationId
       window.localStorage.setItem(CURRENT_CONVERSATION_STORAGE_KEY, newConversationId)
     }
-    messages.value = messages.value.filter((message) => message.id !== draftUserId && message.id !== draftAssistantId)
-    if (userMessage) upsertMessage(userMessage)
+    if (userMessage) replaceDraftWithMessage(draftUserId, userMessage, { clientKey: userClientKey })
     if (assistantMessage) {
-      assistantMessage.startedAt = assistantDraft.startedAt
-      assistantMessage.started_at = assistantMessage.startedAt
-      assistantMessage.elapsedSeconds = Math.max(
+      const startedAt = assistantDraft.startedAt
+      const elapsedSeconds = Math.max(
         assistantDraft.elapsedSeconds ?? 0,
         normalizeProgressElapsed(assistantMessage.elapsedSeconds ?? assistantMessage.elapsed_seconds) ?? 0
       )
-      assistantMessage.elapsed_seconds = assistantMessage.elapsedSeconds
-      upsertMessage(assistantMessage)
+      replaceDraftWithMessage(draftAssistantId, assistantMessage, {
+        clientKey: assistantClientKey,
+        startedAt,
+        started_at: startedAt,
+        elapsedSeconds,
+        elapsed_seconds: elapsedSeconds,
+        firstTokenSeconds: assistantDraft.firstTokenSeconds ?? assistantDraft.first_token_seconds ?? assistantMessage.firstTokenSeconds,
+        first_token_seconds: assistantDraft.first_token_seconds ?? assistantDraft.firstTokenSeconds ?? assistantMessage.first_token_seconds
+      })
     }
     syncActiveRequestState()
     syncConversationEvents()
@@ -1945,7 +2002,13 @@ onUnmounted(() => {
         </div>
       </header>
 
-      <section ref="messageScroller" class="chat-surface flex-1 min-h-0 overflow-y-auto overscroll-contain px-6 py-8" @scroll="handleScrollerScroll">
+      <section
+        ref="messageScroller"
+        class="chat-surface flex-1 min-h-0 overflow-y-auto overscroll-contain px-6 py-8"
+        @scroll="handleScrollerScroll"
+        @wheel.passive="handleScrollerWheel"
+        @touchstart.passive="handleScrollerTouchStart"
+      >
         <div class="chat-flow mx-auto">
           <div v-if="messagesLoading" class="message-skeleton-stack" aria-label="正在加载消息">
             <div class="message-skeleton-row assistant">
@@ -1971,7 +2034,7 @@ onUnmounted(() => {
           <ChatMessage
             v-else
             v-for="message in messages"
-            :key="message.id"
+            :key="message.clientKey || message.id"
             :message="message"
             @preview-attachment="openAttachmentPreview"
           />
