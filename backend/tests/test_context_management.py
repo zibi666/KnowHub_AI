@@ -3,7 +3,7 @@ from datetime import datetime, timedelta
 from app.models.entities import Attachment, ConversationCompaction, Message
 from app.schemas.attachments import AttachmentOut
 from app.schemas.chat import MessageOut
-from app.services.chat import attach_images_to_current_user_message, model_supports_vision, remaining_completed_text
+from app.services.chat import attach_images_to_current_user_message, message_progress_event_data, model_supports_vision, remaining_completed_text
 from app.services.attachments import cosine_similarity, split_attachment_text
 from app.services.context import (
     build_attachment_context_blocks,
@@ -263,6 +263,29 @@ def test_message_out_includes_runtime_progress_for_streaming_text():
     assert result.elapsed_seconds is not None
     assert result.started_at is not None
     assert result.progress_phase == "running"
+
+
+def test_message_progress_event_data_includes_snake_and_camel_fields():
+    message = make_message("a1", role="assistant", status="streaming", seconds=1, content="")
+
+    result = message_progress_event_data(message)
+
+    assert result["elapsed_seconds"] >= 0
+    assert result["elapsedSeconds"] == result["elapsed_seconds"]
+    assert result["started_at"] is not None
+    assert result["startedAt"] == result["started_at"]
+
+
+def test_message_out_keeps_final_elapsed_for_completed_assistant():
+    message = make_message("a1", role="assistant", status="completed", seconds=1, content="done")
+    message.model = "gpt-5.5"
+    message.updated_at = message.created_at + timedelta(seconds=7)
+
+    result = MessageOut.from_message(message)
+
+    assert result.elapsed_seconds == 7
+    assert result.started_at is not None
+    assert result.progress_phase == "completed"
 
 
 def test_message_out_includes_image_progress_for_streaming_image():

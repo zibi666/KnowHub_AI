@@ -245,10 +245,56 @@ function messageIsImageGeneration(message: Message) {
   return ['image-2', 'image-1.5', 'image-1', 'gpt-image-2', 'gpt-image-1.5', 'gpt-image-1'].includes((message.model || '').toLowerCase())
 }
 
+function messageCreatedAtMs(message: Message) {
+  const createdAt = new Date(message.createdAt).getTime()
+  return Number.isFinite(createdAt) ? createdAt : Date.now()
+}
+
+function normalizeProgressTimestamp(value: unknown) {
+  if (value === null || value === undefined) return undefined
+  const timestamp = Number(value)
+  return Number.isFinite(timestamp) && timestamp > 0 ? timestamp : undefined
+}
+
+function normalizeProgressElapsed(value: unknown) {
+  if (value === null || value === undefined) return undefined
+  const elapsed = Number(value)
+  return Number.isFinite(elapsed) && elapsed >= 0 ? Math.floor(elapsed) : undefined
+}
+
+function applyRuntimeProgress(message: Message, data: any = {}) {
+  const fallbackToCreatedAt = message.status === 'streaming' || Boolean(data.startedAt ?? data.started_at)
+  const startedAt = fallbackToCreatedAt
+    ? normalizeProgressTimestamp(data.startedAt ?? data.started_at) ||
+      normalizeProgressTimestamp(message.startedAt ?? message.started_at) ||
+      messageCreatedAtMs(message)
+    : normalizeProgressTimestamp(data.startedAt ?? data.started_at) || normalizeProgressTimestamp(message.startedAt ?? message.started_at)
+  const elapsedSeconds = normalizeProgressElapsed(data.elapsedSeconds ?? data.elapsed_seconds ?? message.elapsedSeconds ?? message.elapsed_seconds)
+  if (startedAt !== undefined) {
+    message.startedAt = startedAt
+    message.started_at = startedAt
+  }
+  if (elapsedSeconds !== undefined || message.status === 'streaming') {
+    message.elapsedSeconds = elapsedSeconds ?? 0
+    message.elapsed_seconds = message.elapsedSeconds
+  }
+  message.progressDetail = data.detail || data.progressDetail || data.progress_detail || message.progressDetail || message.progress_detail
+  message.progress_detail = message.progressDetail
+  message.progressPhase = data.phase || data.progressPhase || data.progress_phase || message.progressPhase || message.progress_phase
+  message.progress_phase = message.progressPhase
+}
+
 function normalizeLoadedMessage(message: Message): Message {
   const progress = message.imageProgress || message.image_progress
-  const startedAt = message.startedAt || message.started_at || undefined
-  const elapsedSeconds = message.elapsedSeconds ?? message.elapsed_seconds
+  if (
+    message.status === 'streaming' ||
+    message.elapsedSeconds !== undefined ||
+    message.elapsed_seconds !== undefined ||
+    message.startedAt !== undefined ||
+    message.started_at !== undefined
+  ) {
+    applyRuntimeProgress(message)
+  }
   if (progress && message.status === 'streaming') {
     message.imageProgress = {
       b64Json: progress.b64Json || progress.b64_json || '',
@@ -257,18 +303,12 @@ function normalizeLoadedMessage(message: Message): Message {
       outputFormat: progress.outputFormat || progress.output_format || 'png',
       detail: progress.detail,
       elapsedSeconds: Number(progress.elapsedSeconds ?? progress.elapsed_seconds ?? 0),
-      startedAt: progress.startedAt || progress.started_at || startedAt || new Date(message.createdAt).getTime(),
+      startedAt: progress.startedAt || progress.started_at || message.startedAt || messageCreatedAtMs(message),
       phase: progress.phase || 'rendering',
       size: progress.size || imageSettings.value.size
     }
   } else {
     message.imageProgress = undefined
-  }
-  if (message.status === 'streaming') {
-    message.startedAt = startedAt || new Date(message.createdAt).getTime()
-    message.elapsedSeconds = Number(elapsedSeconds ?? 0)
-    message.progressDetail = message.progressDetail || message.progress_detail
-    message.progressPhase = message.progressPhase || message.progress_phase
   }
   return message
 }
@@ -1077,7 +1117,7 @@ function applyConversationEvent(event: string, data: any) {
       appendStreamText(message, data.text || '')
     }
     message.status = 'streaming'
-    message.startedAt = message.startedAt || new Date(message.createdAt).getTime()
+    applyRuntimeProgress(message, data)
     syncActiveRequestState()
     scheduleScrollToBottom()
     return
@@ -1089,15 +1129,14 @@ function applyConversationEvent(event: string, data: any) {
     }
     if (typeof data.content === 'string') message.content = data.content
     if (data.status) message.status = data.status
-    message.startedAt = message.startedAt || new Date(message.createdAt).getTime()
-    message.elapsedSeconds = Number(data.elapsed_seconds ?? data.elapsedSeconds ?? message.elapsedSeconds ?? 0)
+    applyRuntimeProgress(message, data)
     syncActiveRequestState()
     return
   }
   if (event === 'message_started') {
     if (message) {
       message.status = 'streaming'
-      message.startedAt = message.startedAt || new Date(message.createdAt).getTime()
+      applyRuntimeProgress(message, data)
       syncActiveRequestState()
     } else {
       void refreshMessageById(messageId)
@@ -1123,6 +1162,7 @@ function applyConversationEvent(event: string, data: any) {
   }
   if (event === 'message_completed' || event === 'message_failed') {
     if (message) {
+      applyRuntimeProgress(message, data)
       message.status = data.status || (event === 'message_completed' ? 'completed' : 'failed_no_output')
       if (typeof data.content === 'string') message.content = data.content
       if (message.status !== 'streaming') message.imageProgress = undefined
@@ -1617,7 +1657,13 @@ async function send() {
     }
     messages.value = messages.value.filter((message) => message.id !== draftUserId && message.id !== draftAssistantId)
     if (userMessage) upsertMessage(userMessage)
-    if (assistantMessage) upsertMessage(assistantMessage)
+    if (assistantMessage) {
+      assistantMessage.startedAt = assistantMessage.startedAt || assistantMessage.started_at || assistantDraft.startedAt
+      assistantMessage.started_at = assistantMessage.startedAt
+      assistantMessage.elapsedSeconds = assistantMessage.elapsedSeconds ?? assistantMessage.elapsed_seconds ?? assistantDraft.elapsedSeconds
+      assistantMessage.elapsed_seconds = assistantMessage.elapsedSeconds
+      upsertMessage(assistantMessage)
+    }
     syncActiveRequestState()
     syncConversationEvents()
     syncImagePolling()

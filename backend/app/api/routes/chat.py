@@ -25,7 +25,7 @@ from app.schemas.chat import (
     SendMessageRequest,
     UpdateConversationRequest,
 )
-from app.services.chat import conversation_event_channel, create_queued_chat, redis_settings, sse_line
+from app.services.chat import conversation_event_channel, create_queued_chat, message_progress_event_data, redis_settings, sse_line
 from app.services.compaction import compact_conversation
 from app.services.context import build_current_message_branch, build_context_stats, build_message_branch
 from app.services.ratelimit import check_fixed_window
@@ -273,6 +273,7 @@ async def conversation_events(
             "content": message.content,
             "status": message.status,
             "model": message.model,
+            **message_progress_event_data(message),
         }
         for message in streaming_rows
     ]

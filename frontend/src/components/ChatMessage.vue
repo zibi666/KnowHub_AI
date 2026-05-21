@@ -19,12 +19,14 @@ const isStreaming = computed(() => props.message.status === 'streaming')
 const isUserMessage = computed(() => props.message.role === 'user')
 const isLiveDraft = computed(() => isStreaming.value && props.message.id.startsWith('stream-'))
 const shouldRenderStreamingPlainText = computed(() => props.message.role === 'assistant' && isStreaming.value && props.message.content.trim())
+const showThinkingPanel = computed(
+  () => props.message.role === 'assistant' && isStreaming.value && !props.message.content.trim() && !props.message.imageProgress
+)
 const emptyAssistantFailureText = computed(() => {
   if (props.message.content.trim()) return ''
   if (props.message.status === 'failed_no_output') return '回复生成失败，请重试'
   if (props.message.status === 'failed_partial') return '回复生成中断，请重试'
   if (props.message.status === 'interrupted') return '回复已中断'
-  if (props.message.status === 'streaming' && !isLiveDraft.value) return '回复未完成，请重试'
   return ''
 })
 const canCollapse = computed(
@@ -58,22 +60,26 @@ const generatedImageElapsed = computed(() => {
     progress?.startedAt && props.message.status === 'streaming'
       ? Math.max(progress.elapsedSeconds || 0, Math.floor((nowMs.value - progress.startedAt) / 1000))
       : progress?.elapsedSeconds
+  return formatElapsedSeconds(seconds)
+})
+function formatElapsedSeconds(seconds: number | undefined) {
   if (!Number.isFinite(seconds) || seconds === undefined) return ''
   if (seconds < 60) return `${Math.max(0, Math.floor(seconds))} 秒`
   const minutes = Math.floor(seconds / 60)
   const rest = Math.floor(seconds % 60)
   return `${minutes} 分 ${String(rest).padStart(2, '0')} 秒`
-})
+}
 const streamingElapsed = computed(() => {
   if (props.message.status !== 'streaming' || props.message.imageProgress) return ''
   const startedAt = props.message.startedAt || props.message.started_at
   const baseElapsed = props.message.elapsedSeconds ?? props.message.elapsed_seconds ?? 0
   const seconds = startedAt ? Math.max(baseElapsed || 0, Math.floor((nowMs.value - startedAt) / 1000)) : baseElapsed
-  if (!Number.isFinite(seconds) || seconds === undefined) return ''
-  if (seconds < 60) return `${Math.max(0, Math.floor(seconds))} 秒`
-  const minutes = Math.floor(seconds / 60)
-  const rest = Math.floor(seconds % 60)
-  return `${minutes} 分 ${String(rest).padStart(2, '0')} 秒`
+  return formatElapsedSeconds(seconds)
+})
+const finalElapsed = computed(() => {
+  if (props.message.status === 'streaming' || props.message.imageProgress) return ''
+  const elapsed = props.message.elapsedSeconds ?? props.message.elapsed_seconds
+  return formatElapsedSeconds(elapsed)
 })
 const generatedImageProgressLabel = computed(() => {
   const progress = props.message.imageProgress
@@ -198,7 +204,7 @@ watch(
 )
 
 watch(
-  () => Boolean(props.message.status === 'streaming' && (props.message.imageProgress || props.message.startedAt || props.message.started_at)),
+  () => Boolean(props.message.role === 'assistant' && props.message.status === 'streaming'),
   (active) => {
     if (progressTimer !== null) {
       window.clearInterval(progressTimer)
@@ -312,8 +318,9 @@ onUnmounted(() => {
             </a>
           </div>
         </div>
-        <div v-else-if="isLiveDraft && !message.content" class="thinking-panel">
+        <div v-else-if="showThinkingPanel" class="thinking-panel">
           <div class="thinking-label">正在思考</div>
+          <div v-if="streamingElapsed" class="thinking-elapsed">已运行 {{ streamingElapsed }}</div>
           <div class="thinking-bars" aria-hidden="true">
             <span />
             <span />
@@ -341,6 +348,7 @@ onUnmounted(() => {
               <MarkdownMessage v-else :content="message.content" />
               <span v-if="message.status === 'streaming'" class="typing-cursor" />
               <div v-if="streamingElapsed" class="streaming-elapsed">已运行 {{ streamingElapsed }}</div>
+              <div v-else-if="finalElapsed" class="streaming-elapsed">思考用时 {{ finalElapsed }}</div>
             </div>
           </div>
         </template>

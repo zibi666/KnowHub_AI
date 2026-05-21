@@ -53,6 +53,10 @@ class MessageOut(ApiModel):
             from app.services.chat import runtime_progress_from_message
 
             runtime_progress = runtime_progress_from_message(message)
+        elif getattr(message, "role") == "assistant" and getattr(message, "status") in {"completed", "failed_no_output", "failed_partial", "interrupted"}:
+            from app.services.chat import final_progress_from_message
+
+            runtime_progress = final_progress_from_message(message)
         if (
             getattr(message, "role") == "assistant"
             and getattr(message, "status") == "streaming"

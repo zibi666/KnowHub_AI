@@ -101,6 +101,49 @@ def runtime_progress_from_message(message: Message) -> dict:
     }
 
 
+def message_progress_event_data(message: Message | None = None, *, started_at: datetime | None = None) -> dict:
+    created_at = started_at or (message.created_at if message else None)
+    elapsed_seconds = 0
+    started_at_ms = None
+    if created_at:
+        if created_at.tzinfo is None:
+            created_at = created_at.replace(tzinfo=timezone.utc)
+        else:
+            created_at = created_at.astimezone(timezone.utc)
+        elapsed_seconds = max(0, int((datetime.now(timezone.utc) - created_at).total_seconds()))
+        started_at_ms = int(created_at.timestamp() * 1000)
+    return {
+        "elapsed_seconds": elapsed_seconds,
+        "started_at": started_at_ms,
+        "elapsedSeconds": elapsed_seconds,
+        "startedAt": started_at_ms,
+    }
+
+
+def final_progress_from_message(message: Message) -> dict:
+    created_at = message.created_at
+    finished_at = getattr(message, "updated_at", None) or created_at
+    elapsed_seconds = 0
+    started_at_ms = None
+    if created_at:
+        if created_at.tzinfo is None:
+            created_at = created_at.replace(tzinfo=timezone.utc)
+        else:
+            created_at = created_at.astimezone(timezone.utc)
+        if finished_at.tzinfo is None:
+            finished_at = finished_at.replace(tzinfo=timezone.utc)
+        else:
+            finished_at = finished_at.astimezone(timezone.utc)
+        elapsed_seconds = max(0, int((finished_at - created_at).total_seconds()))
+        started_at_ms = int(created_at.timestamp() * 1000)
+    return {
+        "elapsedSeconds": elapsed_seconds,
+        "startedAt": started_at_ms,
+        "phase": message.status,
+        "detail": "回复已完成。",
+    }
+
+
 def image_progress_from_message(message: Message) -> dict:
     elapsed_seconds = 0
     started_at_ms = None
@@ -390,6 +433,8 @@ async def create_queued_chat(user_id: str, payload: SendMessageRequest, conversa
                 assistant.status = "failed_no_output"
                 await db.commit()
         raise HTTPException(status_code=503, detail={"code": "QUEUE_ERROR", "message": "后台任务启动失败"})
+    async with SessionLocal() as db:
+        assistant = await db.get(Message, prepared.assistant_message_id)
     await publish_conversation_event(
         prepared.conversation_id,
         "message_started",
@@ -398,6 +443,7 @@ async def create_queued_chat(user_id: str, payload: SendMessageRequest, conversa
             "message_id": prepared.assistant_message_id,
             "user_message_id": prepared.user_message_id,
             "model": prepared.model,
+            **message_progress_event_data(assistant),
         },
     )
     return prepared
@@ -1296,6 +1342,7 @@ async def run_chat_generation_job(
     usage: dict | None = None
     context_event: dict | None = None
     try:
+        assistant_started_at: datetime | None = None
         async with SessionLocal() as db:
             user_message = await db.get(Message, user_message_id)
             assistant = await db.get(Message, assistant_message_id)
@@ -1310,6 +1357,8 @@ async def run_chat_generation_job(
                 return
             model = assistant.model or model or DEFAULT_CHAT_MODEL
             prompt = user_message.content or ""
+            assistant_progress = message_progress_event_data(assistant)
+            assistant_started_at = assistant.created_at
 
         await publish_conversation_event(
             conversation_id,
@@ -1319,6 +1368,7 @@ async def run_chat_generation_job(
                 "message_id": assistant_message_id,
                 "user_message_id": user_message_id,
                 "model": model,
+                **assistant_progress,
             },
         )
 
@@ -1327,10 +1377,11 @@ async def run_chat_generation_job(
             async with SessionLocal() as db:
                 assistant = await db.get(Message, assistant_message_id)
                 status = assistant.status if assistant else "failed_no_output"
+                progress = message_progress_event_data(assistant)
             await publish_conversation_event(
                 conversation_id,
                 "message_completed" if status == "completed" else "message_failed",
-                {"conversation_id": conversation_id, "message_id": assistant_message_id, "status": status},
+                {"conversation_id": conversation_id, "message_id": assistant_message_id, "status": status, **progress},
             )
             return
 
@@ -1422,10 +1473,18 @@ async def run_chat_generation_job(
                 if not done:
                     content = "".join(buffer)
                     await _persist_assistant_partial(assistant_message_id, content)
+                    async with SessionLocal() as db:
+                        assistant = await db.get(Message, assistant_message_id)
                     await publish_conversation_event(
                         conversation_id,
                         "message_snapshot",
-                        {"conversation_id": conversation_id, "message_id": assistant_message_id, "content": content, "status": "streaming"},
+                        {
+                            "conversation_id": conversation_id,
+                            "message_id": assistant_message_id,
+                            "content": content,
+                            "status": "streaming",
+                            **message_progress_event_data(assistant),
+                        },
                     )
                     continue
 
@@ -1445,7 +1504,13 @@ async def run_chat_generation_job(
                     await publish_conversation_event(
                         conversation_id,
                         "message_delta",
-                        {"conversation_id": conversation_id, "message_id": assistant_message_id, "text": text, "content": content},
+                        {
+                            "conversation_id": conversation_id,
+                            "message_id": assistant_message_id,
+                            "text": text,
+                            "content": content,
+                            **message_progress_event_data(started_at=assistant_started_at),
+                        },
                     )
                 elif event.event == "completed_text":
                     text = event.data.get("text") or ""
@@ -1458,7 +1523,13 @@ async def run_chat_generation_job(
                         await publish_conversation_event(
                             conversation_id,
                             "message_delta",
-                            {"conversation_id": conversation_id, "message_id": assistant_message_id, "text": remaining, "content": content},
+                            {
+                                "conversation_id": conversation_id,
+                                "message_id": assistant_message_id,
+                                "text": remaining,
+                                "content": content,
+                                **message_progress_event_data(started_at=assistant_started_at),
+                            },
                         )
                 elif event.event == "usage":
                     usage = event.data
@@ -1471,15 +1542,19 @@ async def run_chat_generation_job(
         content = "".join(buffer)
         if not content.strip():
             await _persist_assistant_partial(assistant_message_id, "", status="failed_no_output")
+            async with SessionLocal() as db:
+                assistant = await db.get(Message, assistant_message_id)
             await publish_conversation_event(
                 conversation_id,
                 "message_failed",
                 {
                     "conversation_id": conversation_id,
                     "message_id": assistant_message_id,
+                    "content": "",
                     "status": "failed_no_output",
                     "code": "UPSTREAM_ERROR",
                     "message": "妯″瀷杩斿洖浜嗙┖鍥炲",
+                    **message_progress_event_data(assistant),
                 },
             )
             return
@@ -1506,6 +1581,7 @@ async def run_chat_generation_job(
             assistant.total_tokens = total_tokens
             assistant.tokens_source = tokens_source
             await db.commit()
+            progress = message_progress_event_data(assistant)
 
         try:
             async with SessionLocal() as db:
@@ -1552,8 +1628,10 @@ async def run_chat_generation_job(
             {
                 "conversation_id": conversation_id,
                 "message_id": assistant_message_id,
+                "content": content,
                 "status": "completed",
                 "finished_at": datetime.utcnow().isoformat(),
+                **progress,
             },
         )
         asyncio.create_task(
@@ -1585,15 +1663,19 @@ async def run_chat_generation_job(
             total_tokens=estimate_tokens_text(content) if content else 0,
             tokens_source="estimated" if content else None,
         )
+        async with SessionLocal() as db:
+            assistant = await db.get(Message, assistant_message_id)
         await publish_conversation_event(
             conversation_id,
             "message_failed",
             {
                 "conversation_id": conversation_id,
                 "message_id": assistant_message_id,
+                "content": content,
                 "status": "failed_partial" if content else "failed_no_output",
                 "code": code,
                 "message": message,
+                **message_progress_event_data(assistant),
             },
         )
     except Exception as exc:
@@ -1607,15 +1689,19 @@ async def run_chat_generation_job(
             total_tokens=estimate_tokens_text(content) if content else 0,
             tokens_source="estimated" if content else None,
         )
+        async with SessionLocal() as db:
+            assistant = await db.get(Message, assistant_message_id)
         await publish_conversation_event(
             conversation_id,
             "message_failed",
             {
                 "conversation_id": conversation_id,
                 "message_id": assistant_message_id,
+                "content": content,
                 "status": "failed_partial" if content else "failed_no_output",
                 "code": "UPSTREAM_ERROR",
                 "message": str(exc)[:500],
+                **message_progress_event_data(assistant),
             },
         )
 
