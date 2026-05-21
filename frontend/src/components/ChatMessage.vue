@@ -320,7 +320,6 @@ onUnmounted(() => {
         </div>
         <div v-else-if="showThinkingPanel" class="thinking-panel">
           <div class="thinking-label">正在思考</div>
-          <div v-if="streamingElapsed" class="thinking-elapsed">已运行 {{ streamingElapsed }}</div>
           <div class="thinking-bars" aria-hidden="true">
             <span />
             <span />
@@ -347,8 +346,7 @@ onUnmounted(() => {
               <div v-if="shouldRenderStreamingPlainText" class="streaming-plain-message">{{ message.content }}</div>
               <MarkdownMessage v-else :content="message.content" />
               <span v-if="message.status === 'streaming'" class="typing-cursor" />
-              <div v-if="streamingElapsed" class="streaming-elapsed">已运行 {{ streamingElapsed }}</div>
-              <div v-else-if="finalElapsed" class="streaming-elapsed">思考用时 {{ finalElapsed }}</div>
+              <div v-if="finalElapsed" class="streaming-elapsed">思考用时 {{ finalElapsed }}</div>
             </div>
           </div>
         </template>

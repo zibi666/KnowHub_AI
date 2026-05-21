@@ -3141,16 +3141,9 @@ body,
 }
 
 .thinking-label {
-  margin-bottom: 0.25rem;
+  margin-bottom: 0.85rem;
   color: var(--muted);
   font-size: 0.95rem;
-}
-
-.thinking-elapsed {
-  margin-bottom: 0.85rem;
-  color: color-mix(in srgb, var(--muted) 78%, var(--bubble-bg));
-  font-size: 0.78rem;
-  line-height: 1.35;
 }
 
 .message-status-text {
