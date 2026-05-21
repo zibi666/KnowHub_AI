@@ -397,6 +397,7 @@ async def prepare_chat_messages(user_id: str, payload: SendMessageRequest, conve
         )
         db.add(assistant)
         await db.flush()
+        conversation.updated_at = datetime.utcnow()
         prepared = PreparedChat(
             conversation_id=conversation_id,
             created_conversation_id=created_conversation_id,
@@ -591,6 +592,7 @@ async def stream_chat(user_id: str, payload: SendMessageRequest, conversation_id
         db.add(assistant)
         await db.flush()
         assistant_message_id = assistant.id
+        conversation.updated_at = datetime.utcnow()
         await db.commit()
     perf_logger.info(
         "chat_timing db_prepared user=%s conv=%s elapsed_ms=%d",

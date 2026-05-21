@@ -675,6 +675,15 @@ function formatSearchDate(value: string) {
   return date.toLocaleDateString()
 }
 
+function conversationUpdatedAtMs(conversation: Conversation) {
+  const timestamp = new Date(conversation.updatedAt).getTime()
+  return Number.isFinite(timestamp) ? timestamp : 0
+}
+
+function sortConversationsByUpdatedAt(items: Conversation[]) {
+  return [...items].sort((a, b) => conversationUpdatedAtMs(b) - conversationUpdatedAtMs(a))
+}
+
 function openSearchDialog() {
   settingsMenuOpen.value = false
   searchOpen.value = true
@@ -1409,7 +1418,7 @@ function newChat() {
 async function loadConversations() {
   conversationsLoading.value = conversations.value.length === 0
   try {
-    conversations.value = await apiFetch<Conversation[]>('/conversations')
+    conversations.value = sortConversationsByUpdatedAt(await apiFetch<Conversation[]>('/conversations'))
   } catch (err) {
     if (err instanceof ApiError && err.code === 'INVALID_CREDENTIALS') {
       await router.push('/login')
@@ -1543,7 +1552,9 @@ async function saveConversationTitle() {
       method: 'PATCH',
       body: JSON.stringify({ title })
     })
-    conversations.value = conversations.value.map((item) => (item.id === updated.id ? { ...item, ...updated } : item))
+    conversations.value = sortConversationsByUpdatedAt(
+      conversations.value.map((item) => (item.id === updated.id ? { ...item, ...updated } : item))
+    )
     renameDialogOpen.value = false
     renamingConversationId.value = null
     renameDraft.value = ''
