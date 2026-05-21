@@ -2448,13 +2448,15 @@ body,
   overflow: visible;
   border: 1px solid color-mix(in srgb, var(--input-border) 30%, transparent);
   border-radius: 12px;
-  background: color-mix(in srgb, var(--input-bg) 22%, transparent);
+  background:
+    linear-gradient(180deg, color-mix(in srgb, var(--input-bg) 38%, #ffffff 3%), color-mix(in srgb, var(--input-bg) 26%, transparent)),
+    color-mix(in srgb, var(--input-bg) 32%, transparent);
   box-shadow:
     0 6px 18px rgba(0, 0, 0, 0.08),
     inset 0 1px 0 color-mix(in srgb, #ffffff 4%, transparent);
   padding: 0.05rem 0.12rem;
-  backdrop-filter: blur(8px) saturate(108%);
-  -webkit-backdrop-filter: blur(8px) saturate(108%);
+  transform: translateZ(0);
+  backface-visibility: hidden;
 }
 
 .top-icon-button {
