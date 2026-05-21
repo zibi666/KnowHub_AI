@@ -19,8 +19,8 @@ const avatarUploading = ref(false)
 const imageSettingsLoading = ref(false)
 const imageSettingsSaving = ref(false)
 const imageSettings = ref<ImageGenerationSettings>({
-  size: '1024x1024',
-  quality: 'high',
+  size: 'auto',
+  quality: 'auto',
   background: 'auto',
   outputFormat: 'png',
   outputCompression: 100,
@@ -60,8 +60,8 @@ function resetMessages() {
 
 function normalizeImageSettings(data: any): ImageGenerationSettings {
   return {
-    size: data?.size || '1024x1024',
-    quality: data?.quality || 'high',
+    size: data?.size || 'auto',
+    quality: data?.quality || 'auto',
     background: data?.background || 'auto',
     outputFormat: data?.outputFormat || data?.output_format || 'png',
     outputCompression: Number(data?.outputCompression ?? data?.output_compression ?? 100),

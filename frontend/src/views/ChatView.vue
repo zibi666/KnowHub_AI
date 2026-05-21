@@ -187,8 +187,8 @@ const avatarUploading = ref(false)
 const imageSettingsLoading = ref(false)
 const imageSettingsSaving = ref(false)
 const imageSettings = ref<ImageGenerationSettings>({
-  size: '1024x1024',
-  quality: 'high',
+  size: 'auto',
+  quality: 'auto',
   background: 'auto',
   outputFormat: 'png',
   outputCompression: 100,
@@ -356,15 +356,19 @@ function normalizeLoadedMessage(message: Message): Message {
     applyRuntimeProgress(message)
   }
   if (progress && message.status === 'streaming') {
+    const elapsedSeconds = Math.max(
+      currentRuntimeElapsed(message),
+      normalizeProgressElapsed(progress.elapsedSeconds ?? progress.elapsed_seconds) ?? 0
+    )
     message.imageProgress = {
-      b64Json: progress.b64Json || progress.b64_json || '',
+      b64Json: '',
       index: Number(progress.index || 0),
       total: Number(progress.total || 1),
       outputFormat: progress.outputFormat || progress.output_format || 'png',
       detail: progress.detail,
-      elapsedSeconds: Number(progress.elapsedSeconds ?? progress.elapsed_seconds ?? 0),
-      startedAt: progress.startedAt || progress.started_at || message.startedAt || messageCreatedAtMs(message),
-      phase: progress.phase || 'rendering',
+      elapsedSeconds,
+      startedAt: normalizeProgressTimestamp(progress.startedAt ?? progress.started_at) || message.startedAt || messageCreatedAtMs(message),
+      phase: progress.phase || message.progressPhase || message.progress_phase || 'submitted',
       size: progress.size || imageSettings.value.size
     }
   } else {
@@ -384,7 +388,7 @@ function applyImageProgress(message: Message, data: any = {}) {
     normalizeProgressElapsed(data.elapsedSeconds ?? data.elapsed_seconds) ?? 0
   )
   message.imageProgress = {
-    b64Json: data.b64Json || data.b64_json || existing?.b64Json || existing?.b64_json || '',
+    b64Json: '',
     index: Number(data.index || existing?.index || 0),
     total: Number(data.total || existing?.total || 1),
     outputFormat: data.outputFormat || data.output_format || existing?.outputFormat || existing?.output_format || 'png',
@@ -406,8 +410,8 @@ function imageProgressPreviewDataUrl(progress?: ImageProgress) {
 
 function normalizeImageSettings(data: any): ImageGenerationSettings {
   return {
-    size: data?.size || '1024x1024',
-    quality: data?.quality || 'high',
+    size: data?.size || 'auto',
+    quality: data?.quality || 'auto',
     background: data?.background || 'auto',
     outputFormat: data?.outputFormat || data?.output_format || 'png',
     outputCompression: Number(data?.outputCompression ?? data?.output_compression ?? 100),
@@ -1266,6 +1270,39 @@ function mergeMessageIntoExisting(existing: Message, incoming: Message, preserve
   moveMessageToDisplayPosition(existing)
 }
 
+function mergeImageMessageIntoExisting(existing: Message, incoming: Message) {
+  const existingProgress = existing.imageProgress || existing.image_progress
+  const incomingProgress = incoming.imageProgress || incoming.image_progress
+  const startedAt =
+    normalizeProgressTimestamp(existing.startedAt ?? existing.started_at) ||
+    normalizeProgressTimestamp(existingProgress?.startedAt ?? existingProgress?.started_at) ||
+    normalizeProgressTimestamp(incoming.startedAt ?? incoming.started_at) ||
+    normalizeProgressTimestamp(incomingProgress?.startedAt ?? incomingProgress?.started_at)
+  const elapsedSeconds = Math.max(
+    currentRuntimeElapsed(existing),
+    normalizeProgressElapsed(existingProgress?.elapsedSeconds ?? existingProgress?.elapsed_seconds) ?? 0,
+    normalizeProgressElapsed(incoming.elapsedSeconds ?? incoming.elapsed_seconds) ?? 0,
+    normalizeProgressElapsed(incomingProgress?.elapsedSeconds ?? incomingProgress?.elapsed_seconds) ?? 0
+  )
+  mergeMessageIntoExisting(existing, incoming)
+  if (startedAt !== undefined) {
+    existing.startedAt = startedAt
+    existing.started_at = startedAt
+  }
+  existing.elapsedSeconds = elapsedSeconds
+  existing.elapsed_seconds = elapsedSeconds
+  if (existing.status === 'streaming') {
+    applyImageProgress(existing, {
+      ...(incomingProgress || {}),
+      elapsedSeconds,
+      startedAt,
+      phase: incomingProgress?.phase || incoming.progressPhase || incoming.progress_phase || existingProgress?.phase,
+      detail: incomingProgress?.detail || incoming.progressDetail || incoming.progress_detail || existingProgress?.detail,
+      size: incomingProgress?.size || existingProgress?.size || incoming.generatedImageSize || existing.generatedImageSize
+    })
+  }
+}
+
 function upsertMessage(message: Message, preserve: Partial<Message> = {}) {
   const normalized = normalizeLoadedMessage(message)
   const existing = findMessageForMerge({ ...normalized, ...preserve })
@@ -1420,6 +1457,9 @@ function applyConversationEvent(event: string, data: any) {
       if (message.status !== 'streaming') message.imageProgress = undefined
     }
     syncActiveRequestState()
+    if (!messages.value.some((item) => item.role === 'assistant' && item.status === 'streaming' && messageIsImageGeneration(item))) {
+      stopImagePolling()
+    }
     void refreshMessageById(messageId)
     void loadConversations()
     void loadContextStats()
@@ -1535,7 +1575,7 @@ async function refreshStreamingImages() {
       try {
         const updated = normalizeLoadedMessage(await apiFetch<Message>(`/conversations/${conversationId}/messages/${message.id}`))
         if (currentId.value !== conversationId) return
-        Object.assign(message, updated)
+        mergeImageMessageIntoExisting(message, updated)
       } catch {
         // Keep the local timer alive; the next poll may succeed.
       }

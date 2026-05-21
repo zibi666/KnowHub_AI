@@ -3,6 +3,7 @@ from __future__ import annotations
 from urllib.parse import urlparse
 
 from arq.connections import RedisSettings
+from arq.worker import func as arq_func
 
 from app.core.db import SessionLocal
 from app.core.config import get_settings
@@ -114,10 +115,11 @@ class WorkerSettings:
         zombie_scan_worker,
         compaction_watchdog_worker,
         purge_user_job,
-        chat_generation_job,
-        image_generation_job,
+        arq_func(chat_generation_job, timeout=15 * 60),
+        arq_func(image_generation_job, timeout=15 * 60, max_tries=1),
     ]
     on_startup = startup
     on_shutdown = shutdown
     redis_settings = redis_settings()
     max_jobs = 10
+    job_timeout = 15 * 60

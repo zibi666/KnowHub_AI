@@ -49,10 +49,7 @@ const fileAttachments = computed(() => (props.message.attachments || []).filter(
 const showGeneratedImageProgress = computed(() => props.message.role === 'assistant' && props.message.status === 'streaming' && props.message.imageProgress)
 const generatedImageFrameStyle = computed(() => generatedImageFrameFromSize(props.message.imageProgress?.size || props.message.generatedImageSize))
 const generatedImageProgressSrc = computed(() => {
-  const progress = props.message.imageProgress
-  if (!progress?.b64Json) return ''
-  const format = progress.outputFormat === 'jpeg' ? 'jpeg' : progress.outputFormat || 'png'
-  return `data:image/${format};base64,${progress.b64Json}`
+  return ''
 })
 const generatedImageElapsed = computed(() => {
   const progress = props.message.imageProgress
@@ -84,9 +81,7 @@ const finalElapsed = computed(() => {
 const generatedImageProgressLabel = computed(() => {
   const progress = props.message.imageProgress
   if (!progress) return '等待模型响应'
-  if (progress.phase === 'returned') return '图片已返回'
-  if (progress.phase === 'saving') return progress.b64Json ? '图片已返回' : '正在保存图片'
-  if (progress.b64Json) return `进度图 ${progress.index || 1}/${progress.total || 1}`
+  if (progress.phase === 'returned' || progress.phase === 'saving') return '正在保存图片'
   if (progress.phase === 'rendering_long') return '高质量生成中'
   if (progress.phase === 'rendering') return '正在绘制'
   if (progress.phase === 'queued') return '排队与构图'

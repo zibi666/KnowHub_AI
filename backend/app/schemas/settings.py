@@ -17,8 +17,8 @@ class ModelsOut(ApiModel):
 
 
 class ImageGenerationSettings(ApiModel):
-    size: str = "1024x1024"
-    quality: str = "high"
+    size: str = "auto"
+    quality: str = "auto"
     background: str = "auto"
     output_format: str = "png"
     output_compression: int = 100

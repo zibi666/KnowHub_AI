@@ -43,8 +43,8 @@ OFFICIAL_MODEL_CATALOG = [
 ]
 
 DEFAULT_IMAGE_SETTINGS = {
-    "size": "1024x1024",
-    "quality": "high",
+    "size": "auto",
+    "quality": "auto",
     "background": "auto",
     "output_format": "png",
     "output_compression": 100,
@@ -56,6 +56,7 @@ IMAGE_QUALITY_OPTIONS = {"low", "medium", "high", "auto"}
 IMAGE_BACKGROUND_OPTIONS = {"auto", "transparent", "opaque"}
 IMAGE_FORMAT_OPTIONS = {"png", "jpeg", "webp"}
 IMAGE_MODERATION_OPTIONS = {"auto", "low"}
+IMAGE_GENERATION_HTTP_TIMEOUT_SECONDS = 15 * 60
 
 
 @dataclass
@@ -135,6 +136,43 @@ def normalize_image_settings(raw: dict[str, Any] | None) -> dict[str, Any]:
     return settings
 
 
+def effective_image_output_format(generation_settings: dict[str, Any]) -> str:
+    normalized = normalize_image_settings(generation_settings)
+    output_format = normalized["output_format"]
+    if normalized["background"] == "transparent" and output_format == "jpeg":
+        return "png"
+    return output_format
+
+
+def image_generation_payload(
+    model: str,
+    prompt: str,
+    user_id: str,
+    image_settings: dict[str, Any] | None = None,
+) -> tuple[str, dict[str, Any]]:
+    upstream_model = to_upstream_image_model(model)
+    generation_settings = normalize_image_settings(image_settings)
+    payload: dict[str, Any] = {
+        "model": upstream_model,
+        "prompt": prompt,
+        "n": 1,
+    }
+    output_format = effective_image_output_format(generation_settings)
+    if generation_settings["size"] != "auto":
+        payload["size"] = generation_settings["size"]
+    if generation_settings["quality"] != "auto":
+        payload["quality"] = generation_settings["quality"]
+    if generation_settings["background"] != "auto":
+        payload["background"] = generation_settings["background"]
+    if output_format != DEFAULT_IMAGE_SETTINGS["output_format"]:
+        payload["output_format"] = output_format
+    if generation_settings["moderation"] != "auto":
+        payload["moderation"] = generation_settings["moderation"]
+    if output_format in {"jpeg", "webp"}:
+        payload["output_compression"] = generation_settings["output_compression"]
+    return upstream_model, payload
+
+
 async def image_generation_stream(
     api_key: str,
     model: str,
@@ -144,24 +182,16 @@ async def image_generation_stream(
     partial_images: int = 1,
 ) -> AsyncIterator[StreamEvent]:
     settings = get_settings()
-    upstream_model = to_upstream_image_model(model)
+    upstream_model, payload = image_generation_payload(model, prompt, user_id, image_settings)
     generation_settings = normalize_image_settings(image_settings)
+    output_format = effective_image_output_format(generation_settings)
     headers = {
         "Authorization": f"Bearer {api_key}",
         "Content-Type": "application/json",
         "Accept": "text/event-stream",
     }
-    payload: dict[str, Any] = {
-        "model": upstream_model,
-        "prompt": prompt,
-        "stream": True,
-        "partial_images": partial_images,
-        "n": 1,
-        "user": user_id,
-        **generation_settings,
-    }
-    if generation_settings["output_format"] == "png":
-        payload.pop("output_compression", None)
+    payload["stream"] = True
+    payload["partial_images"] = partial_images
 
     request_started = time.perf_counter()
     perf_logger.info(
@@ -230,7 +260,7 @@ async def image_generation_stream(
                             "b64_json": b64_json,
                             "index": progress_index,
                             "total": partial_images,
-                            "output_format": generation_settings["output_format"],
+                            "output_format": output_format,
                             "size": generation_settings["size"],
                         },
                     )
@@ -239,12 +269,70 @@ async def image_generation_stream(
                     if b64_json:
                         completed = GeneratedImage(
                             b64_json=b64_json,
-                            output_format=str(chunk.get("output_format") or generation_settings["output_format"]),
+                            output_format=extract_image_output_format(chunk, output_format),
                         )
                         break
     if not completed:
         raise api_error("UPSTREAM_ERROR", "图像模型没有返回最终图片")
     yield StreamEvent("image_completed", {"b64_json": completed.b64_json, "output_format": completed.output_format})
+
+
+async def image_generation_nonstream(
+    api_key: str,
+    model: str,
+    prompt: str,
+    user_id: str,
+    image_settings: dict[str, Any] | None = None,
+) -> GeneratedImage:
+    settings = get_settings()
+    generation_settings = normalize_image_settings(image_settings)
+    upstream_model, payload = image_generation_payload(model, prompt, user_id, generation_settings)
+    output_format = effective_image_output_format(generation_settings)
+    headers = {
+        "Authorization": f"Bearer {api_key}",
+        "Content-Type": "application/json",
+        "Accept": "application/json",
+        "Connection": "close",
+    }
+    request_started = time.perf_counter()
+    perf_logger.info(
+        "upstream_timing image_generation_nonstream_request_start model=%s prompt_chars=%d payload_keys=%s",
+        upstream_model,
+        len(prompt or ""),
+        ",".join(sorted(payload.keys())),
+    )
+    timeout = httpx.Timeout(
+        IMAGE_GENERATION_HTTP_TIMEOUT_SECONDS,
+        connect=30.0,
+        write=30.0,
+        pool=30.0,
+    )
+    limits = httpx.Limits(max_connections=10, max_keepalive_connections=0)
+    async with httpx.AsyncClient(timeout=timeout, limits=limits) as client:
+        response = await client.post(
+            f"{settings.model_base_url.rstrip('/')}/images/generations",
+            headers=headers,
+            json=payload,
+        )
+    perf_logger.info(
+        "upstream_timing image_generation_nonstream_status model=%s status=%d elapsed_ms=%d",
+        upstream_model,
+        response.status_code,
+        int((time.perf_counter() - request_started) * 1000),
+    )
+    if response.status_code in {401, 403}:
+        raise api_error("API_KEY_INVALID", "上游拒绝了该 API Key")
+    if response.status_code >= 400:
+        raise api_error("UPSTREAM_ERROR", response.text[:500], status_code=response.status_code)
+    try:
+        body = response.json()
+    except json.JSONDecodeError:
+        raise api_error("UPSTREAM_ERROR", "图像模型返回了无法解析的响应")
+    b64_json = extract_image_b64(body)
+    if not b64_json:
+        raise api_error("UPSTREAM_ERROR", "图像模型没有返回最终图片")
+    output_format = extract_image_output_format(body, output_format)
+    return GeneratedImage(b64_json=b64_json, output_format=output_format)
 
 
 def extract_image_b64(chunk: dict[str, Any]) -> str | None:
@@ -259,6 +347,20 @@ def extract_image_b64(chunk: dict[str, Any]) -> str | None:
     if isinstance(image, dict) and isinstance(image.get("b64_json"), str):
         return image["b64_json"]
     return None
+
+
+def extract_image_output_format(chunk: dict[str, Any], fallback: str = "png") -> str:
+    if isinstance(chunk.get("output_format"), str):
+        return chunk["output_format"]
+    data = chunk.get("data")
+    if isinstance(data, list) and data:
+        first = data[0]
+        if isinstance(first, dict) and isinstance(first.get("output_format"), str):
+            return first["output_format"]
+    image = chunk.get("image")
+    if isinstance(image, dict) and isinstance(image.get("output_format"), str):
+        return image["output_format"]
+    return fallback
 
 
 async def save_generated_image_attachment(
