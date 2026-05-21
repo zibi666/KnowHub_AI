@@ -224,6 +224,7 @@ const composerClasses = computed(() => ({
   'is-empty-composer':
     isEmptyChat.value &&
     !composerExpanded.value &&
+    input.value.length === 0 &&
     pendingAttachments.value.length === 0 &&
     uploadingAttachmentNames.value.length === 0
 }))
@@ -2017,7 +2018,11 @@ function resizeComposerInput() {
   const textarea = composerInput.value
   if (!textarea) return
   textarea.style.height = 'auto'
-  textarea.style.height = `${textarea.scrollHeight}px`
+  const maxHeight = Number.parseFloat(getComputedStyle(textarea).maxHeight)
+  const hasMaxHeight = Number.isFinite(maxHeight)
+  const nextHeight = hasMaxHeight ? Math.min(textarea.scrollHeight, maxHeight) : textarea.scrollHeight
+  textarea.style.height = `${nextHeight}px`
+  textarea.style.overflowY = hasMaxHeight && textarea.scrollHeight > nextHeight ? 'auto' : 'hidden'
 }
 
 watch(input, async () => {

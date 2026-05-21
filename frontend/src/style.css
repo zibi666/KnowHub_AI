@@ -3617,6 +3617,7 @@ body,
   position: relative;
   z-index: 1;
   width: 100%;
+  box-sizing: border-box;
   min-height: 4.4rem;
   max-height: min(34vh, 20rem);
   resize: none;
@@ -3626,14 +3627,15 @@ body,
   color: var(--text);
   outline: none;
   overflow-y: auto;
+  overflow-x: hidden;
   padding: 0.76rem 4.35rem 0.58rem 1.08rem;
   font-size: 1rem;
   line-height: 1.45;
-  overflow-wrap: anywhere;
+  overflow-wrap: break-word;
   scrollbar-gutter: stable;
   scrollbar-width: none;
   white-space: pre-wrap;
-  word-break: break-word;
+  word-break: normal;
   transition:
     height 320ms var(--ease-out-soft),
     padding 320ms var(--ease-out-soft);
