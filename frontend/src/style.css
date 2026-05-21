@@ -826,13 +826,30 @@ body,
 }
 
 .sidebar-brand {
+  display: inline-flex;
   min-width: 0;
+  align-items: center;
+  gap: 0.48rem;
   color: var(--text);
   font-size: 1.02rem;
   font-weight: 850;
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
+}
+
+.sidebar-brand-icon {
+  width: 1.42rem;
+  height: 1.42rem;
+  flex: 0 0 auto;
+  border-radius: 0.45rem;
+  object-fit: contain;
+}
+
+.sidebar-brand span {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
 }
 
 .chat-sidebar-footer {

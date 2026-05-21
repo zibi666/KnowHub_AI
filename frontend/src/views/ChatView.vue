@@ -2210,7 +2210,10 @@ onUnmounted(() => {
       <div class="chat-sidebar-top">
         <div class="sidebar-top-actions">
           <div class="sidebar-title-row">
-            <div class="sidebar-brand">KnowHub</div>
+            <div class="sidebar-brand">
+              <img class="sidebar-brand-icon" src="/brand/knowhub-icon.png" alt="" aria-hidden="true" />
+              <span>KnowHub</span>
+            </div>
             <button
               class="sidebar-collapse-button"
               type="button"
