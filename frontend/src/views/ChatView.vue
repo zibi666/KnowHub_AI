@@ -247,13 +247,21 @@ function messageIsImageGeneration(message: Message) {
 
 function messageCreatedAtMs(message: Message) {
   const createdAt = new Date(message.createdAt).getTime()
-  return Number.isFinite(createdAt) ? createdAt : Date.now()
+  return Number.isFinite(createdAt) ? Math.min(createdAt, Date.now()) : Date.now()
+}
+
+function currentRuntimeElapsed(message: Message) {
+  const startedAt = normalizeProgressTimestamp(message.startedAt ?? message.started_at)
+  const baseElapsed = normalizeProgressElapsed(message.elapsedSeconds ?? message.elapsed_seconds) ?? 0
+  if (!startedAt) return baseElapsed
+  return Math.max(baseElapsed, Math.floor((Date.now() - startedAt) / 1000), 0)
 }
 
 function normalizeProgressTimestamp(value: unknown) {
   if (value === null || value === undefined) return undefined
   const timestamp = Number(value)
-  return Number.isFinite(timestamp) && timestamp > 0 ? timestamp : undefined
+  if (!Number.isFinite(timestamp) || timestamp <= 0) return undefined
+  return timestamp > Date.now() ? undefined : timestamp
 }
 
 function normalizeProgressElapsed(value: unknown) {
@@ -263,19 +271,22 @@ function normalizeProgressElapsed(value: unknown) {
 }
 
 function applyRuntimeProgress(message: Message, data: any = {}) {
-  const fallbackToCreatedAt = message.status === 'streaming' || Boolean(data.startedAt ?? data.started_at)
-  const startedAt = fallbackToCreatedAt
-    ? normalizeProgressTimestamp(data.startedAt ?? data.started_at) ||
-      normalizeProgressTimestamp(message.startedAt ?? message.started_at) ||
-      messageCreatedAtMs(message)
-    : normalizeProgressTimestamp(data.startedAt ?? data.started_at) || normalizeProgressTimestamp(message.startedAt ?? message.started_at)
-  const elapsedSeconds = normalizeProgressElapsed(data.elapsedSeconds ?? data.elapsed_seconds ?? message.elapsedSeconds ?? message.elapsed_seconds)
+  const existingStartedAt = normalizeProgressTimestamp(message.startedAt ?? message.started_at)
+  const incomingStartedAt = normalizeProgressTimestamp(data.startedAt ?? data.started_at)
+  const fallbackStartedAt = message.status === 'streaming' ? messageCreatedAtMs(message) : undefined
+  const startedAt = existingStartedAt || incomingStartedAt || fallbackStartedAt
+  const incomingElapsed = normalizeProgressElapsed(data.elapsedSeconds ?? data.elapsed_seconds)
+  const existingElapsed = currentRuntimeElapsed(message)
+  const elapsedSeconds =
+    message.status === 'streaming'
+      ? Math.max(existingElapsed, incomingElapsed ?? 0)
+      : (incomingElapsed ?? normalizeProgressElapsed(message.elapsedSeconds ?? message.elapsed_seconds))
   if (startedAt !== undefined) {
     message.startedAt = startedAt
     message.started_at = startedAt
   }
-  if (elapsedSeconds !== undefined || message.status === 'streaming') {
-    message.elapsedSeconds = elapsedSeconds ?? 0
+  if (elapsedSeconds !== undefined) {
+    message.elapsedSeconds = elapsedSeconds
     message.elapsed_seconds = message.elapsedSeconds
   }
   message.progressDetail = data.detail || data.progressDetail || data.progress_detail || message.progressDetail || message.progress_detail
@@ -1658,9 +1669,12 @@ async function send() {
     messages.value = messages.value.filter((message) => message.id !== draftUserId && message.id !== draftAssistantId)
     if (userMessage) upsertMessage(userMessage)
     if (assistantMessage) {
-      assistantMessage.startedAt = assistantMessage.startedAt || assistantMessage.started_at || assistantDraft.startedAt
+      assistantMessage.startedAt = assistantDraft.startedAt
       assistantMessage.started_at = assistantMessage.startedAt
-      assistantMessage.elapsedSeconds = assistantMessage.elapsedSeconds ?? assistantMessage.elapsed_seconds ?? assistantDraft.elapsedSeconds
+      assistantMessage.elapsedSeconds = Math.max(
+        assistantDraft.elapsedSeconds ?? 0,
+        normalizeProgressElapsed(assistantMessage.elapsedSeconds ?? assistantMessage.elapsed_seconds) ?? 0
+      )
       assistantMessage.elapsed_seconds = assistantMessage.elapsedSeconds
       upsertMessage(assistantMessage)
     }

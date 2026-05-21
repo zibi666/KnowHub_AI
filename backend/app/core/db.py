@@ -53,6 +53,9 @@ async def ensure_lightweight_migrations(conn) -> None:
         result = await conn.execute(text("SHOW COLUMNS FROM user_quotas LIKE 'image_settings_json'"))
         if result.first() is None:
             await conn.execute(text("ALTER TABLE user_quotas ADD COLUMN image_settings_json JSON NULL"))
+        result = await conn.execute(text("SHOW COLUMNS FROM messages LIKE 'first_token_seconds'"))
+        if result.first() is None:
+            await conn.execute(text("ALTER TABLE messages ADD COLUMN first_token_seconds INT NULL"))
         return
 
     if settings.database_url.startswith("sqlite"):
@@ -66,3 +69,7 @@ async def ensure_lightweight_migrations(conn) -> None:
         existing_quota = {row[1] for row in result.fetchall()}
         if "image_settings_json" not in existing_quota:
             await conn.execute(text("ALTER TABLE user_quotas ADD COLUMN image_settings_json JSON"))
+        result = await conn.execute(text("PRAGMA table_info(messages)"))
+        existing_messages = {row[1] for row in result.fetchall()}
+        if "first_token_seconds" not in existing_messages:
+            await conn.execute(text("ALTER TABLE messages ADD COLUMN first_token_seconds INTEGER"))

@@ -280,12 +280,26 @@ def test_message_out_keeps_final_elapsed_for_completed_assistant():
     message = make_message("a1", role="assistant", status="completed", seconds=1, content="done")
     message.model = "gpt-5.5"
     message.updated_at = message.created_at + timedelta(seconds=7)
+    message.first_token_seconds = 3
 
     result = MessageOut.from_message(message)
 
-    assert result.elapsed_seconds == 7
+    assert result.elapsed_seconds == 3
+    assert result.first_token_seconds == 3
     assert result.started_at is not None
     assert result.progress_phase == "completed"
+
+
+def test_message_out_omits_final_elapsed_for_legacy_completed_assistant():
+    message = make_message("a1", role="assistant", status="completed", seconds=1, content="done")
+    message.model = "gpt-5.5"
+    message.updated_at = message.created_at + timedelta(seconds=7)
+
+    result = MessageOut.from_message(message)
+
+    assert result.elapsed_seconds is None
+    assert result.first_token_seconds is None
+    assert result.started_at is not None
 
 
 def test_message_out_includes_image_progress_for_streaming_image():

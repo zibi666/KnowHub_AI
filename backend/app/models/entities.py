@@ -135,6 +135,7 @@ class Message(Base, TimestampMixin):
     completion_tokens: Mapped[int] = mapped_column(Integer, default=0, nullable=False)
     total_tokens: Mapped[int] = mapped_column(Integer, default=0, nullable=False)
     tokens_source: Mapped[str | None] = mapped_column(String(20), nullable=True)
+    first_token_seconds: Mapped[int | None] = mapped_column(Integer, nullable=True)
 
     conversation: Mapped[Conversation] = relationship(back_populates="messages")
     attachments: Mapped[list[MessageAttachment]] = relationship(cascade="all, delete-orphan")

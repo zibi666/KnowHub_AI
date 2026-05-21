@@ -120,21 +120,25 @@ def message_progress_event_data(message: Message | None = None, *, started_at: d
     }
 
 
+def first_token_progress_event_data(message: Message | None = None) -> dict:
+    progress = message_progress_event_data(message)
+    first_token_seconds = getattr(message, "first_token_seconds", None) if message else None
+    if first_token_seconds is not None:
+        progress["elapsed_seconds"] = int(first_token_seconds)
+        progress["elapsedSeconds"] = int(first_token_seconds)
+    return progress
+
+
 def final_progress_from_message(message: Message) -> dict:
     created_at = message.created_at
-    finished_at = getattr(message, "updated_at", None) or created_at
-    elapsed_seconds = 0
+    first_token_seconds = getattr(message, "first_token_seconds", None)
+    elapsed_seconds = int(first_token_seconds) if first_token_seconds is not None else None
     started_at_ms = None
     if created_at:
         if created_at.tzinfo is None:
             created_at = created_at.replace(tzinfo=timezone.utc)
         else:
             created_at = created_at.astimezone(timezone.utc)
-        if finished_at.tzinfo is None:
-            finished_at = finished_at.replace(tzinfo=timezone.utc)
-        else:
-            finished_at = finished_at.astimezone(timezone.utc)
-        elapsed_seconds = max(0, int((finished_at - created_at).total_seconds()))
         started_at_ms = int(created_at.timestamp() * 1000)
     return {
         "elapsedSeconds": elapsed_seconds,
@@ -746,6 +750,7 @@ async def stream_chat(user_id: str, payload: SendMessageRequest, conversation_id
         pending_next = asyncio.ensure_future(_safe_anext(stream))
         first_provider_event_logged = False
         first_token_logged = False
+        first_token_seconds: int | None = None
         try:
             while True:
                 done, _ = await asyncio.wait({pending_next}, timeout=settings.stream_ping_interval_seconds)
@@ -776,6 +781,7 @@ async def stream_chat(user_id: str, payload: SendMessageRequest, conversation_id
                     buffer.append(text)
                     if not first_token_logged:
                         first_token_logged = True
+                        first_token_seconds = int(time.perf_counter() - request_started)
                         perf_logger.info(
                             "chat_timing first_token user=%s conv=%s elapsed_ms=%d",
                             user_id,
@@ -795,6 +801,7 @@ async def stream_chat(user_id: str, payload: SendMessageRequest, conversation_id
                         buffer.append(remaining)
                         if not first_token_logged:
                             first_token_logged = True
+                            first_token_seconds = int(time.perf_counter() - request_started)
                             perf_logger.info(
                                 "chat_timing completed_text_as_first_token user=%s conv=%s elapsed_ms=%d chars=%d",
                                 user_id,
@@ -873,6 +880,7 @@ async def stream_chat(user_id: str, payload: SendMessageRequest, conversation_id
                 assistant.completion_tokens = completion_tokens
                 assistant.total_tokens = total_tokens
                 assistant.tokens_source = tokens_source
+                assistant.first_token_seconds = first_token_seconds
                 await db.commit()
         except Exception as exc:
             logger.exception(
@@ -1309,6 +1317,7 @@ async def _persist_assistant_partial(
     completion_tokens: int | None = None,
     total_tokens: int | None = None,
     tokens_source: str | None = None,
+    first_token_seconds: int | None = None,
 ) -> None:
     async with SessionLocal() as db:
         assistant = await db.get(Message, assistant_message_id)
@@ -1322,6 +1331,8 @@ async def _persist_assistant_partial(
             assistant.total_tokens = total_tokens
         if tokens_source is not None:
             assistant.tokens_source = tokens_source
+        if first_token_seconds is not None and assistant.first_token_seconds is None:
+            assistant.first_token_seconds = max(0, int(first_token_seconds))
         await db.commit()
 
 
@@ -1467,6 +1478,7 @@ async def run_chat_generation_job(
         ).__aiter__()
         pending_next = asyncio.ensure_future(_safe_anext(stream))
         last_persist = time.perf_counter()
+        first_token_seconds: int | None = None
         try:
             while True:
                 done, _ = await asyncio.wait({pending_next}, timeout=settings.stream_ping_interval_seconds)
@@ -1495,11 +1507,17 @@ async def run_chat_generation_job(
 
                 if event.event == "token":
                     text = event.data["text"]
+                    if first_token_seconds is None:
+                        first_token_seconds = int(time.perf_counter() - request_started)
                     buffer.append(text)
                     content = "".join(buffer)
                     now = time.perf_counter()
                     if now - last_persist >= 0.35 or len(text) >= 80:
-                        await _persist_assistant_partial(assistant_message_id, content)
+                        await _persist_assistant_partial(
+                            assistant_message_id,
+                            content,
+                            first_token_seconds=first_token_seconds,
+                        )
                         last_persist = now
                     await publish_conversation_event(
                         conversation_id,
@@ -1517,9 +1535,15 @@ async def run_chat_generation_job(
                     current = "".join(buffer)
                     remaining = remaining_completed_text(text, current)
                     if remaining:
+                        if first_token_seconds is None:
+                            first_token_seconds = int(time.perf_counter() - request_started)
                         buffer.append(remaining)
                         content = "".join(buffer)
-                        await _persist_assistant_partial(assistant_message_id, content)
+                        await _persist_assistant_partial(
+                            assistant_message_id,
+                            content,
+                            first_token_seconds=first_token_seconds,
+                        )
                         await publish_conversation_event(
                             conversation_id,
                             "message_delta",
@@ -1580,8 +1604,9 @@ async def run_chat_generation_job(
             assistant.completion_tokens = completion_tokens
             assistant.total_tokens = total_tokens
             assistant.tokens_source = tokens_source
+            assistant.first_token_seconds = first_token_seconds
             await db.commit()
-            progress = message_progress_event_data(assistant)
+            progress = first_token_progress_event_data(assistant)
 
         try:
             async with SessionLocal() as db:

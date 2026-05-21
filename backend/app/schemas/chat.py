@@ -37,6 +37,7 @@ class MessageOut(ApiModel):
     completion_tokens: int = 0
     total_tokens: int = 0
     tokens_source: str | None = None
+    first_token_seconds: int | None = None
     created_at: datetime
     attachments: list[AttachmentOut] = []
     image_progress: dict | None = None
@@ -81,6 +82,7 @@ class MessageOut(ApiModel):
             completion_tokens=getattr(message, "completion_tokens", 0) or 0,
             total_tokens=getattr(message, "total_tokens", 0) or 0,
             tokens_source=getattr(message, "tokens_source", None),
+            first_token_seconds=getattr(message, "first_token_seconds", None),
             created_at=getattr(message, "created_at"),
             attachments=attachments or [],
             image_progress=image_progress,

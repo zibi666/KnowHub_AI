@@ -29,6 +29,8 @@ export interface Message {
   completionTokens?: number
   totalTokens: number
   tokensSource?: string
+  firstTokenSeconds?: number | null
+  first_token_seconds?: number | null
   createdAt: string
   attachments?: Attachment[]
   generatedImageSize?: string
