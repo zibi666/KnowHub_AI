@@ -273,7 +273,7 @@ async def image_generation_stream(
                             progress_index = parsed_index + 1 if parsed_index < partial_images else parsed_index
                         except (TypeError, ValueError):
                             progress_index = partial_seen
-                    perf_logger.info(
+                    logger.info(
                         "upstream_image_event partial model=%s index=%d total=%d b64_len=%d",
                         upstream_model,
                         progress_index,
@@ -292,7 +292,7 @@ async def image_generation_stream(
                     )
                 elif event_type.endswith("completed") or event_type == "image.completed":
                     b64_json = extract_image_b64(chunk)
-                    perf_logger.info(
+                    logger.info(
                         "upstream_image_event completed model=%s has_b64=%s",
                         upstream_model,
                         bool(b64_json),

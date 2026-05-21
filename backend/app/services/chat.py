@@ -1403,9 +1403,11 @@ async def run_image_generation_job(
             },
         )
 
+        progress_received = False
+
         async def _consume_image_stream() -> None:
-            nonlocal final_b64, final_format
-            perf_logger.info(
+            nonlocal final_b64, final_format, progress_received
+            logger.info(
                 "image_stream_consume start user=%s conv=%s msg=%s model=%s partial_images=%d",
                 user_id, conversation_id, assistant_message_id, model, 3,
             )
@@ -1419,7 +1421,8 @@ async def run_image_generation_job(
             )
             async for event in stream:
                 if event.event == "image_progress":
-                    perf_logger.info(
+                    progress_received = True
+                    logger.info(
                         "image_stream_consume progress user=%s conv=%s msg=%s index=%s total=%s b64_len=%d",
                         user_id, conversation_id, assistant_message_id,
                         event.data["index"], event.data["total"], len(event.data.get("b64_json", "")),
@@ -1443,7 +1446,7 @@ async def run_image_generation_job(
                         },
                     )
                 elif event.event == "image_completed":
-                    perf_logger.info(
+                    logger.info(
                         "image_stream_consume completed user=%s conv=%s msg=%s b64_len=%d",
                         user_id, conversation_id, assistant_message_id, len(event.data.get("b64_json", "")),
                     )
@@ -1466,25 +1469,26 @@ async def run_image_generation_job(
                 if done:
                     generation_task.result()
                     break
-                status_tick += 1
-                phase, detail = image_status_detail(elapsed_seconds)
-                await publish_conversation_event(
-                    conversation_id,
-                    "image_status",
-                    {
-                        "conversation_id": conversation_id,
-                        "message_id": assistant_message_id,
-                        "index": 0,
-                        "total": 1,
-                        "output_format": image_output_format,
-                        "outputFormat": image_output_format,
-                        "size": image_size,
-                        "detail": detail,
-                        "phase": phase,
-                        "tick": status_tick,
-                        **progress,
-                    },
-                )
+                if not progress_received:
+                    status_tick += 1
+                    phase, detail = image_status_detail(elapsed_seconds)
+                    await publish_conversation_event(
+                        conversation_id,
+                        "image_status",
+                        {
+                            "conversation_id": conversation_id,
+                            "message_id": assistant_message_id,
+                            "index": 0,
+                            "total": 1,
+                            "output_format": image_output_format,
+                            "outputFormat": image_output_format,
+                            "size": image_size,
+                            "detail": detail,
+                            "phase": phase,
+                            "tick": status_tick,
+                            **progress,
+                        },
+                    )
         finally:
             if not generation_task.done():
                 generation_task.cancel()

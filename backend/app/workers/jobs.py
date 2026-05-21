@@ -89,6 +89,14 @@ async def chat_generation_job(
 
 
 async def startup(ctx):
+    import logging
+    import sys
+
+    logging.basicConfig(
+        level=logging.INFO,
+        format="%(asctime)s [%(name)s] %(levelname)s %(message)s",
+        stream=sys.stderr,
+    )
     return None
 
 
