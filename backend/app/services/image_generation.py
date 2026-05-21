@@ -388,6 +388,15 @@ async def post_image_generation_json_with_curl(
         stdout, stderr = await process.communicate()
         response_text = Path(response_path).read_text(encoding="utf-8", errors="replace")
         if process.returncode != 0:
+            if response_text.strip():
+                logger.warning(
+                    "image_generation curl returned nonzero with response body returncode=%s stderr=%s",
+                    process.returncode,
+                    stderr.decode("utf-8", errors="replace").strip()[:300],
+                )
+                status_text = stdout.decode("utf-8", errors="replace").strip()
+                status_code = int(status_text[-3:]) if status_text and status_text[-3:].isdigit() else 200
+                return ImageGenerationHTTPResponse(status_code=status_code, text=response_text)
             error_text = stderr.decode("utf-8", errors="replace").strip() or response_text[:500]
             raise api_error("UPSTREAM_ERROR", f"图像生成请求传输失败：{error_text[:500]}")
         status_text = stdout.decode("utf-8", errors="replace").strip()

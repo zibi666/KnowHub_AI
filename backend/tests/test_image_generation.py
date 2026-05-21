@@ -1,9 +1,14 @@
 import asyncio
+from pathlib import Path
 
 import pytest
 from fastapi import HTTPException
 
-from app.services.image_generation import ImageGenerationHTTPResponse, image_generation_nonstream
+from app.services.image_generation import (
+    ImageGenerationHTTPResponse,
+    image_generation_nonstream,
+    post_image_generation_json_with_curl,
+)
 
 
 class DummyTransport:
@@ -160,3 +165,45 @@ def test_image_generation_nonstream_surfaces_transport_error(monkeypatch):
 
     with pytest.raises(RuntimeError):
         asyncio.run(image_generation_nonstream("sk-test", "gpt-image-2", "draw", "u1", None))
+
+
+def test_curl_transport_uses_body_when_tls_eof_happens(monkeypatch, tmp_path):
+    import app.services.image_generation as image_generation
+
+    created_paths: list[Path] = []
+
+    class DummyTempFile:
+        def __init__(self, mode, encoding=None, delete=False, suffix=""):
+            self.path = tmp_path / f"temp-{len(created_paths)}{suffix}"
+            created_paths.append(self.path)
+            self.file = self.path.open(mode, encoding=encoding)
+            self.name = str(self.path)
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, exc_type, exc, tb):
+            self.file.close()
+
+        def write(self, value):
+            return self.file.write(value)
+
+    class DummyProcess:
+        returncode = 56
+
+        async def communicate(self):
+            response_path = created_paths[2]
+            response_path.write_text('{"data":[{"b64_json":"abc","output_format":"png"}]}', encoding="utf-8")
+            return b"200", b"curl: (56) OpenSSL SSL_read: unexpected eof while reading"
+
+    async def dummy_create_subprocess_exec(*args, **kwargs):
+        return DummyProcess()
+
+    monkeypatch.setattr(image_generation.tempfile, "NamedTemporaryFile", DummyTempFile)
+    monkeypatch.setattr(image_generation.asyncio, "create_subprocess_exec", dummy_create_subprocess_exec)
+
+    response = asyncio.run(post_image_generation_json_with_curl("curl", "sk-test", "https://example.test", {"prompt": "draw"}))
+
+    assert response.status_code == 200
+    assert '"b64_json":"abc"' in response.text
+    assert all(not path.exists() for path in created_paths)
