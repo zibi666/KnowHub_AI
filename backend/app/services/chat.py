@@ -43,7 +43,6 @@ from app.services.image_generation import (
     effective_image_output_format,
     filter_available_models_for_request,
     image_generation_stream,
-    image_generation_stream_final,
     image_model_is_available,
     is_image_generation_model,
     official_available_models,
@@ -52,7 +51,7 @@ from app.services.image_generation import (
 from app.services.usage import record_usage
 
 DEFAULT_CHAT_MODEL = "gpt-5.5"
-IMAGE_GENERATION_MAX_WAIT_SECONDS = 10 * 60
+IMAGE_GENERATION_MAX_WAIT_SECONDS = 14 * 60
 
 _STREAM_END = object()
 
@@ -1404,16 +1403,42 @@ async def run_image_generation_job(
             },
         )
 
-        status_tick = 0
-        generation_task = asyncio.create_task(
-            image_generation_stream_final(
+        async def _consume_image_stream() -> None:
+            nonlocal final_b64, final_format
+            stream = image_generation_stream(
                 api_key=api_key,
                 model=model,
                 prompt=prompt,
                 user_id=user_id,
                 image_settings=image_settings,
+                partial_images=3,
             )
-        )
+            async for event in stream:
+                if event.event == "image_progress":
+                    await publish_conversation_event(
+                        conversation_id,
+                        "image_progress",
+                        {
+                            "conversation_id": conversation_id,
+                            "message_id": assistant_message_id,
+                            "b64_json": event.data["b64_json"],
+                            "b64Json": event.data["b64_json"],
+                            "index": event.data["index"],
+                            "total": event.data["total"],
+                            "output_format": event.data.get("output_format", image_output_format),
+                            "outputFormat": event.data.get("output_format", image_output_format),
+                            "size": image_size,
+                            "phase": "rendering",
+                            "detail": f"已收到第 {event.data['index']}/{event.data['total']} 张进度图",
+                            **message_progress_event_data(started_at=assistant_started_at),
+                        },
+                    )
+                elif event.event == "image_completed":
+                    final_b64 = event.data["b64_json"]
+                    final_format = event.data.get("output_format", image_output_format)
+
+        status_tick = 0
+        generation_task = asyncio.create_task(_consume_image_stream())
         try:
             while True:
                 progress = message_progress_event_data(started_at=assistant_started_at)
@@ -1426,25 +1451,7 @@ async def run_image_generation_job(
                 progress = message_progress_event_data(started_at=assistant_started_at)
                 elapsed_seconds = int(progress["elapsed_seconds"] or 0)
                 if done:
-                    generated = generation_task.result()
-                    final_b64 = generated.b64_json
-                    final_format = generated.output_format
-                    await publish_conversation_event(
-                        conversation_id,
-                        "image_status",
-                        {
-                            "conversation_id": conversation_id,
-                            "message_id": assistant_message_id,
-                            "index": 1,
-                            "total": 1,
-                            "output_format": final_format,
-                            "outputFormat": final_format,
-                            "size": image_size,
-                            "detail": "图片已返回，正在保存到本地并生成预览。",
-                            "phase": "saving",
-                            **progress,
-                        },
-                    )
+                    generation_task.result()
                     break
                 status_tick += 1
                 phase, detail = image_status_detail(elapsed_seconds)

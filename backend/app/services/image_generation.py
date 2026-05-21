@@ -310,7 +310,7 @@ async def image_generation_stream_final(
             prompt=prompt,
             user_id=user_id,
             image_settings=image_settings,
-            partial_images=0,
+            partial_images=1,
         )
         async for event in stream:
             if event.event != "image_completed":
@@ -376,13 +376,7 @@ async def post_image_generation_json(
 ) -> ImageGenerationHTTPResponse:
     curl_path = shutil.which("curl")
     if curl_path:
-        try:
-            return await post_image_generation_json_with_curl(curl_path, api_key, url, payload)
-        except HTTPException as exc:
-            if isinstance(exc.detail, dict) and exc.detail.get("code") == "IMAGE_TRANSPORT_LOST":
-                logger.warning("curl transport lost, falling back to httpx for %s", url)
-                return await post_image_generation_json_with_httpx(api_key, url, payload)
-            raise
+        return await post_image_generation_json_with_curl(curl_path, api_key, url, payload)
     return await post_image_generation_json_with_httpx(api_key, url, payload)
 
 

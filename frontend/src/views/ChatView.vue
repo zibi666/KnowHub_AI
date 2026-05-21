@@ -388,7 +388,7 @@ function applyImageProgress(message: Message, data: any = {}) {
     normalizeProgressElapsed(data.elapsedSeconds ?? data.elapsed_seconds) ?? 0
   )
   message.imageProgress = {
-    b64Json: '',
+    b64Json: data.b64Json || data.b64_json || existing?.b64Json || existing?.b64_json || '',
     index: Number(data.index || existing?.index || 0),
     total: Number(data.total || existing?.total || 1),
     outputFormat: data.outputFormat || data.output_format || existing?.outputFormat || existing?.output_format || 'png',

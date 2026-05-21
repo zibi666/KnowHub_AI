@@ -188,7 +188,7 @@ def test_image_generation_stream_final_reads_completed_image(monkeypatch):
 
     assert result.b64_json == "abc"
     assert result.output_format == "webp"
-    assert calls[0]["partial_images"] == 0
+    assert calls[0]["partial_images"] == 1
 
 
 def test_curl_transport_uses_body_when_tls_eof_happens(monkeypatch, tmp_path):
