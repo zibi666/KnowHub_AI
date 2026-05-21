@@ -49,7 +49,12 @@ const fileAttachments = computed(() => (props.message.attachments || []).filter(
 const showGeneratedImageProgress = computed(() => props.message.role === 'assistant' && props.message.status === 'streaming' && props.message.imageProgress)
 const generatedImageFrameStyle = computed(() => generatedImageFrameFromSize(props.message.imageProgress?.size || props.message.generatedImageSize))
 const generatedImageProgressSrc = computed(() => {
-  return ''
+  const progress = props.message.imageProgress
+  if (!progress) return ''
+  const b64Json = progress.b64Json || progress.b64_json
+  if (!b64Json) return ''
+  const format = progress.outputFormat === 'jpeg' || progress.output_format === 'jpeg' ? 'jpeg' : progress.outputFormat || progress.output_format || 'png'
+  return `data:image/${format};base64,${b64Json}`
 })
 const generatedImageElapsed = computed(() => {
   const progress = props.message.imageProgress

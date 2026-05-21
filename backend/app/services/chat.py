@@ -1405,6 +1405,10 @@ async def run_image_generation_job(
 
         async def _consume_image_stream() -> None:
             nonlocal final_b64, final_format
+            perf_logger.info(
+                "image_stream_consume start user=%s conv=%s msg=%s model=%s partial_images=%d",
+                user_id, conversation_id, assistant_message_id, model, 3,
+            )
             stream = image_generation_stream(
                 api_key=api_key,
                 model=model,
@@ -1415,6 +1419,11 @@ async def run_image_generation_job(
             )
             async for event in stream:
                 if event.event == "image_progress":
+                    perf_logger.info(
+                        "image_stream_consume progress user=%s conv=%s msg=%s index=%s total=%s b64_len=%d",
+                        user_id, conversation_id, assistant_message_id,
+                        event.data["index"], event.data["total"], len(event.data.get("b64_json", "")),
+                    )
                     await publish_conversation_event(
                         conversation_id,
                         "image_progress",
@@ -1434,6 +1443,10 @@ async def run_image_generation_job(
                         },
                     )
                 elif event.event == "image_completed":
+                    perf_logger.info(
+                        "image_stream_consume completed user=%s conv=%s msg=%s b64_len=%d",
+                        user_id, conversation_id, assistant_message_id, len(event.data.get("b64_json", "")),
+                    )
                     final_b64 = event.data["b64_json"]
                     final_format = event.data.get("output_format", image_output_format)
 
