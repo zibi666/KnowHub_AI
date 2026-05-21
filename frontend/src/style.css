@@ -2433,17 +2433,9 @@ body,
   pointer-events: none;
   align-items: center;
   gap: 0.55rem;
-  border: 1px solid color-mix(in srgb, var(--input-border) 72%, transparent);
-  border-radius: 15px;
-  background:
-    linear-gradient(180deg, color-mix(in srgb, var(--surface-bg) 72%, #ffffff 6%), color-mix(in srgb, var(--surface-bg) 58%, transparent)),
-    color-mix(in srgb, var(--surface-bg) 56%, transparent);
-  box-shadow:
-    0 16px 42px rgba(0, 0, 0, 0.24),
-    inset 0 1px 0 color-mix(in srgb, #ffffff 10%, transparent);
-  padding: 0.34rem 0.42rem;
-  backdrop-filter: blur(22px) saturate(128%);
-  -webkit-backdrop-filter: blur(22px) saturate(128%);
+  border: 0;
+  background: transparent;
+  padding: 0;
 }
 
 .top-model-controls {
@@ -2454,13 +2446,15 @@ body,
   min-width: 0;
   max-width: 100%;
   overflow: visible;
-  border: 0;
-  border-radius: 0;
-  background: transparent;
-  box-shadow: none;
-  padding: 0;
-  backdrop-filter: none;
-  -webkit-backdrop-filter: none;
+  border: 1px solid color-mix(in srgb, var(--input-border) 30%, transparent);
+  border-radius: 12px;
+  background: color-mix(in srgb, var(--input-bg) 22%, transparent);
+  box-shadow:
+    0 6px 18px rgba(0, 0, 0, 0.08),
+    inset 0 1px 0 color-mix(in srgb, #ffffff 4%, transparent);
+  padding: 0.05rem 0.12rem;
+  backdrop-filter: blur(8px) saturate(108%);
+  -webkit-backdrop-filter: blur(8px) saturate(108%);
 }
 
 .top-icon-button {
@@ -2522,7 +2516,7 @@ body,
   color: var(--muted);
   font-size: 0.82rem;
   line-height: 1;
-  padding: 0.44rem 0.58rem;
+  padding: 0.48rem 0.78rem;
   overflow: hidden;
   white-space: nowrap;
 }
@@ -4298,12 +4292,12 @@ body,
     left: 0.7rem;
     right: 0.7rem;
     top: 0.7rem;
-    border-radius: 13px;
-    padding: 0.24rem 0.3rem;
   }
 
   .top-model-controls {
     gap: 0.12rem;
+    width: fit-content;
+    padding: 0.04rem 0.1rem;
   }
 
   .top-icon-button {
@@ -4315,14 +4309,11 @@ body,
     justify-self: start;
     width: 100%;
     max-width: calc(100vw - 1.4rem);
-    gap: 0.46rem;
-    padding: 0.34rem 0.46rem;
   }
 
   .chat-header-info span:last-child {
     flex-basis: auto;
     max-width: none;
-    padding-left: 0.46rem;
   }
 
   .chat-main.is-empty-chat .chat-footer {
