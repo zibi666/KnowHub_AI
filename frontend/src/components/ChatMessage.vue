@@ -89,6 +89,10 @@ const generatedImageProgressLabel = computed(() => {
   const progress = props.message.imageProgress
   if (!progress) return '等待模型响应'
   if (progress.phase === 'returned' || progress.phase === 'saving') return '正在保存图片'
+  const index = Number(progress.index || 0)
+  const total = Number(progress.total || 0)
+  if (index > 0 && total > 0) return `已生成 ${index}/${total} 张`
+  if (index > 0) return `已生成第 ${index} 张`
   if (progress.phase === 'rendering_long') return '高质量生成中'
   if (progress.phase === 'rendering') return '正在绘制'
   if (progress.phase === 'queued') return '排队与构图'

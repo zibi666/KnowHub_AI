@@ -259,7 +259,7 @@ def image_progress_event_data(
     display_index = max(index, 1)
     return {
         "text": "正在生成图片",
-        "detail": detail or f"已收到第 {display_index}/{total} 张中间图，正在继续细化。",
+        "detail": detail or f"已生成 {display_index}/{total} 张中间图，正在继续细化。",
         "b64_json": b64_json,
         "b64Json": b64_json,
         "index": display_index,
