@@ -181,6 +181,26 @@ def image_generation_error_code(exc: Exception | None = None) -> str:
     return "UPSTREAM_ERROR"
 
 
+def chat_generation_error_message(exc: HTTPException) -> str:
+    detail = exc.detail
+    if not isinstance(detail, dict):
+        return str(detail)
+    code = str(detail.get("code") or "")
+    message = str(detail.get("message") or "")
+    if code == "KEY_GROUP_REQUIRED":
+        group_name = str(detail.get("groupName") or "对应")
+        return f"当前模型需要 {group_name} 分组下的可用密钥，请先在 API 管理中添加。"
+    if code == "KEY_GROUP_CHOICE_REQUIRED":
+        return message or "请选择当前模型要使用的 API Key。"
+    if code == "API_KEY_INVALID":
+        return message or "上游拒绝了当前 API Key，请在设置里更新后重试。"
+    if code == "MODEL_NOT_AVAILABLE":
+        return message or "当前模型不可用，请切换模型或联系管理员。"
+    if code == "KEY_REQUIRED":
+        return message or "请先绑定模型 API Key。"
+    return message or code or "回复生成失败，请稍后重试。"
+
+
 def is_transient_image_generation_error(exc: Exception | None) -> bool:
     return isinstance(exc, (httpx.RemoteProtocolError, httpx.ReadError, httpx.ConnectError, httpx.TimeoutException))
 
@@ -1811,6 +1831,7 @@ async def run_chat_generation_job(
 
         settings = get_settings()
         async with SessionLocal() as db:
+            quota = await db.get(UserQuota, user_id)
             context_bundle = await build_context_bundle(
                 db,
                 user_id,
@@ -2090,10 +2111,9 @@ async def run_chat_generation_job(
         )
     except HTTPException as exc:
         code = "UPSTREAM_ERROR"
-        message = str(exc.detail)
+        message = chat_generation_error_message(exc)
         if isinstance(exc.detail, dict):
             code = exc.detail.get("code", code)
-            message = exc.detail.get("message", message)
         content = "".join(buffer)
         await _persist_assistant_partial(
             assistant_message_id,

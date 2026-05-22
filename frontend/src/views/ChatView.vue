@@ -1597,6 +1597,9 @@ function applyConversationEvent(event: string, data: any) {
       if (typeof data.content === 'string' && data.content.trim()) freezeFirstTokenSeconds(message, data)
       message.status = data.status || (event === 'message_completed' ? 'completed' : 'failed_no_output')
       if (typeof data.content === 'string') message.content = data.content
+      if (event === 'message_failed' && !message.content.trim() && typeof data.message === 'string' && data.message.trim()) {
+        message.content = data.message.trim()
+      }
       if (message.status !== 'streaming') message.imageProgress = undefined
     }
     syncActiveRequestState()
@@ -1803,6 +1806,13 @@ function modelKeyChoiceFromError(err: ApiError, model: string): ModelKeyChoice {
   }
 }
 
+async function refreshModelSelectionState() {
+  await loadModels()
+  if (settingsOpen.value && (settingsTab.value === 'api' || settingsTab.value === 'groups')) {
+    await loadApiSettings()
+  }
+}
+
 function closeModelKeyChoice() {
   modelKeyChoice.value = null
   modelKeyChoiceSaving.value = false
@@ -1819,7 +1829,7 @@ async function saveSelectedModel(apiKeyId?: string) {
     previousSelectedModel.value = selectedModel.value
     modelKeyChoice.value = null
     modelKeyChoiceSaving.value = false
-    await loadContextStats()
+    await Promise.all([loadContextStats(), refreshModelSelectionState()])
   } catch (err) {
     if (err instanceof ApiError && err.code === 'KEY_GROUP_CHOICE_REQUIRED') {
       modelKeyChoice.value = modelKeyChoiceFromError(err, selectedModel.value)
