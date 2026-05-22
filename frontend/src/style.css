@@ -1259,6 +1259,25 @@ body,
   transform: translateY(-1px);
 }
 
+.admin-danger-button {
+  border: 1px solid color-mix(in srgb, #dc2626 45%, var(--input-border));
+  background: color-mix(in srgb, #dc2626 14%, transparent);
+  color: #fca5a5;
+  transition: background 150ms ease, border-color 150ms ease, color 150ms ease, transform 150ms ease;
+}
+
+.admin-danger-button:hover:not(:disabled) {
+  border-color: color-mix(in srgb, #ef4444 72%, var(--input-border));
+  background: color-mix(in srgb, #dc2626 24%, transparent);
+  color: #fecaca;
+  transform: translateY(-1px);
+}
+
+.admin-danger-button:disabled {
+  cursor: not-allowed;
+  opacity: 0.5;
+}
+
 .settings-primary:disabled,
 .settings-secondary:disabled {
   cursor: not-allowed;

@@ -30,7 +30,7 @@ from app.security.passwords import hash_password
 from app.services.api_keys import create_api_key_for_user, has_any_api_key
 from app.services.audit import write_audit
 from app.services.dead_letters import list_dead_letters
-from app.services.maintenance import preview_cleanup, run_cleanup
+from app.services.maintenance import preview_cleanup, purge_user, run_cleanup
 from app.services.runtime_settings import load_runtime_settings, save_runtime_settings
 
 router = APIRouter(prefix="/admin", tags=["admin"])
@@ -113,6 +113,8 @@ async def update_user(
                 raise api_error("VALIDATION_ERROR", "用户名已存在", status_code=400)
             user.username = username
     if payload.status:
+        if payload.status not in {"active", "disabled"}:
+            raise api_error("VALIDATION_ERROR", "用户状态只能设置为启用或禁用", status_code=422)
         user.status = payload.status
     if payload.role:
         user.role = payload.role
@@ -129,6 +131,24 @@ async def update_user(
         must_change_password=user.must_change_password,
         has_api_key=await has_any_api_key(db, user.id),
     )
+
+
+@router.delete("/users/{user_id}")
+async def delete_user(
+    user_id: str,
+    admin: User = Depends(get_admin_user),
+    db: AsyncSession = Depends(get_session),
+):
+    if user_id == admin.id:
+        raise api_error("VALIDATION_ERROR", "不能删除当前登录的管理员账号", status_code=400)
+    user = await db.get(User, user_id)
+    if not user:
+        raise api_error("FORBIDDEN", "User not found")
+    await write_audit(db, "user.delete_requested", actor_user_id=admin.id, target_type="user", target_id=user_id)
+    result = await purge_user(db, user_id)
+    await write_audit(db, "user.deleted", actor_user_id=admin.id, target_type="user", target_id=user_id)
+    await db.commit()
+    return result
 
 
 @router.post("/users/{user_id}/api-key", response_model=UserOut)

@@ -1,12 +1,15 @@
 <script setup lang="ts">
 import { computed, onMounted, ref } from 'vue'
 import { useRouter } from 'vue-router'
+import { X } from 'lucide-vue-next'
 import { apiFetch } from '../api/client'
 import AppSelect from '../components/AppSelect.vue'
+import { useAuthStore } from '../stores/auth'
 import type { ApiKeyEntry, ApiKeyGroup, User, UserQuota } from '../types'
 import { copyText } from '../utils/clipboard'
 
 const router = useRouter()
+const auth = useAuthStore()
 const users = ref<User[]>([])
 const analytics = ref<any>(null)
 const deadLetters = ref<any[]>([])
@@ -15,6 +18,8 @@ const loginPassword = ref('')
 const cleanupKind = ref('pending_cos')
 const cleanupPreview = ref<any>(null)
 const cleanupConfirming = ref(false)
+const deleteConfirmUser = ref<User | null>(null)
+const deleteConfirming = ref(false)
 const reasoningModels = ref('')
 const notice = ref('')
 const userDrafts = ref<Record<string, { username: string; role: string; status: string; password: string }>>({})
@@ -55,8 +60,7 @@ const userRoleOptions = [
 
 const userStatusOptions = [
   { value: 'active', label: '启用' },
-  { value: 'disabled', label: '禁用' },
-  { value: 'purging', label: '删除中' }
+  { value: 'disabled', label: '禁用' }
 ]
 
 const groupOptions = computed(() => [
@@ -64,12 +68,16 @@ const groupOptions = computed(() => [
   ...groups.value.map((group) => ({ value: group.id, label: group.name, hint: group.description || undefined }))
 ])
 
+function editableUserStatus(status: string) {
+  return status === 'disabled' ? 'disabled' : 'active'
+}
+
 function draftFor(user: User) {
   if (!userDrafts.value[user.id]) {
     userDrafts.value[user.id] = {
       username: user.username,
       role: user.role,
-      status: user.status,
+      status: editableUserStatus(user.status),
       password: ''
     }
   }
@@ -118,7 +126,7 @@ async function load() {
       {
         username: user.username,
         role: user.role,
-        status: user.status,
+        status: editableUserStatus(user.status),
         password: ''
       }
     ])
@@ -156,14 +164,6 @@ async function createUser() {
   await load()
 }
 
-async function updateUser(user: User, status: string) {
-  await apiFetch(`/admin/users/${user.id}`, {
-    method: 'PATCH',
-    body: JSON.stringify({ status })
-  })
-  await load()
-}
-
 async function saveUser(user: User) {
   const draft = userDrafts.value[user.id]
   const quotaDraft = quotaDraftFor(user)
@@ -185,6 +185,32 @@ async function saveUser(user: User) {
   })
   notice.value = '用户信息已保存'
   await load()
+}
+
+function openDeleteUserConfirm(user: User) {
+  if (user.id === auth.user?.id) return
+  deleteConfirmUser.value = user
+}
+
+function closeDeleteUserConfirm() {
+  if (!deleteConfirming.value) deleteConfirmUser.value = null
+}
+
+async function confirmDeleteUser() {
+  if (!deleteConfirmUser.value || deleteConfirming.value) return
+  deleteConfirming.value = true
+  try {
+    await apiFetch(`/admin/users/${deleteConfirmUser.value.id}`, { method: 'DELETE' })
+    notice.value = `用户 ${deleteConfirmUser.value.username} 已删除`
+    if (selectedKeyUser.value?.id === deleteConfirmUser.value.id) {
+      selectedKeyUser.value = null
+      selectedUserKeys.value = []
+    }
+    deleteConfirmUser.value = null
+    await load()
+  } finally {
+    deleteConfirming.value = false
+  }
 }
 
 async function loadSelectedUserKeys(user: User) {
@@ -373,8 +399,14 @@ onMounted(load)
                 <div class="flex flex-wrap gap-2">
                   <input v-model="draftFor(user).password" class="app-input rounded-md px-2 py-1 text-xs" type="password" placeholder="新登录密码" />
                   <button class="app-primary-button rounded px-2 py-1" @click="saveUser(user)">保存</button>
-                  <button v-if="user.status === 'active'" class="app-secondary-button rounded px-2 py-1" @click="updateUser(user, 'disabled')">禁用</button>
-                  <button v-else class="app-secondary-button rounded px-2 py-1" @click="updateUser(user, 'active')">启用</button>
+                  <button
+                    class="admin-danger-button rounded px-2 py-1"
+                    :disabled="user.id === auth.user?.id"
+                    :title="user.id === auth.user?.id ? '不能删除当前登录账号' : '删除用户'"
+                    @click="openDeleteUserConfirm(user)"
+                  >
+                    删除
+                  </button>
                 </div>
               </td>
             </tr>
@@ -454,5 +486,24 @@ onMounted(load)
         </table>
       </div>
     </section>
+    <Transition name="dialog-pop">
+      <div v-if="deleteConfirmUser" class="confirm-modal-backdrop" role="presentation" @click.self="closeDeleteUserConfirm">
+        <div class="confirm-modal" role="dialog" aria-modal="true" aria-labelledby="delete-user-title">
+          <div class="confirm-modal-header">
+            <h2 id="delete-user-title">删除用户</h2>
+            <button class="confirm-modal-close" type="button" title="关闭" aria-label="关闭" :disabled="deleteConfirming" @click="closeDeleteUserConfirm">
+              <X :size="17" />
+            </button>
+          </div>
+          <p>确定要删除用户「{{ deleteConfirmUser.username }}」吗？该用户的会话、附件、密钥和用量记录会一起删除。</p>
+          <div class="confirm-modal-actions">
+            <button class="confirm-secondary-button" type="button" :disabled="deleteConfirming" @click="closeDeleteUserConfirm">取消</button>
+            <button class="confirm-danger-button" type="button" :disabled="deleteConfirming" @click="confirmDeleteUser">
+              {{ deleteConfirming ? '删除中...' : '确认删除' }}
+            </button>
+          </div>
+        </div>
+      </div>
+    </Transition>
   </main>
 </template>
