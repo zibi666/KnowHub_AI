@@ -420,13 +420,6 @@ function applyImageProgress(message: Message, data: any = {}) {
   message.image_progress = message.imageProgress
 }
 
-function imageProgressPreviewDataUrl(progress?: ImageProgress) {
-  const b64Json = progress?.b64Json || progress?.b64_json
-  if (!b64Json) return ''
-  const format = progress?.outputFormat === 'jpeg' || progress?.output_format === 'jpeg' ? 'jpeg' : progress?.outputFormat || progress?.output_format || 'png'
-  return `data:image/${format};base64,${b64Json}`
-}
-
 function normalizeImageSettings(data: any): ImageGenerationSettings {
   return {
     size: data?.size || 'auto',
@@ -1313,6 +1306,12 @@ function mergeImageMessageIntoExisting(existing: Message, incoming: Message) {
   if (existing.status === 'streaming') {
     applyImageProgress(existing, {
       ...(incomingProgress || {}),
+      b64Json: existingProgress?.b64Json || existingProgress?.b64_json || undefined,
+      b64_json: existingProgress?.b64_json || existingProgress?.b64Json || undefined,
+      index: existingProgress?.index,
+      total: existingProgress?.total,
+      outputFormat: existingProgress?.outputFormat || existingProgress?.output_format || undefined,
+      output_format: existingProgress?.output_format || existingProgress?.outputFormat || undefined,
       elapsedSeconds,
       startedAt,
       phase: incomingProgress?.phase || incoming.progressPhase || incoming.progress_phase || existingProgress?.phase,
@@ -1433,10 +1432,8 @@ function applyConversationEvent(event: string, data: any) {
       applyRuntimeProgress(message, data)
       if (data.attachment) {
         const attachments = message.attachments || []
-        const previewDataUrl = data.attachment.previewDataUrl || imageProgressPreviewDataUrl(message.imageProgress)
-        const attachment = previewDataUrl ? { ...data.attachment, previewDataUrl } : data.attachment
         if (!attachments.some((attachment) => attachment.id === data.attachment.id)) {
-          message.attachments = [...attachments, attachment]
+          message.attachments = [...attachments, data.attachment]
         }
       }
       message.status = data.status || 'completed'

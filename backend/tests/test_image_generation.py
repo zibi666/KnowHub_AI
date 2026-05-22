@@ -6,6 +6,7 @@ from fastapi import HTTPException
 
 from app.providers.openai_compatible import StreamEvent
 from app.services.image_generation import (
+    IMAGE_STREAM_PARTIAL_IMAGES,
     ImageGenerationHTTPResponse,
     image_generation_stream_final,
     image_generation_nonstream,
@@ -188,7 +189,64 @@ def test_image_generation_stream_final_reads_completed_image(monkeypatch):
 
     assert result.b64_json == "abc"
     assert result.output_format == "webp"
-    assert calls[0]["partial_images"] == 1
+    assert calls[0]["partial_images"] == IMAGE_STREAM_PARTIAL_IMAGES
+
+
+def test_image_generation_stream_forces_three_partial_images(monkeypatch):
+    import app.services.image_generation as image_generation
+
+    captured = {}
+
+    class DummyResponse:
+        status_code = 200
+
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, exc_type, exc, tb):
+            return False
+
+        async def aiter_bytes(self):
+            yield (
+                'event: image_generation.completed\n'
+                'data: {"type":"image_generation.completed","b64_json":"abc","output_format":"png"}\n\n'
+            ).encode("utf-8")
+
+    class DummyClient:
+        def __init__(self, *args, **kwargs):
+            pass
+
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, exc_type, exc, tb):
+            return False
+
+        def stream(self, method, url, headers, json):
+            captured["payload"] = json
+            return DummyResponse()
+
+    monkeypatch.setattr(image_generation.httpx, "AsyncClient", DummyClient)
+    monkeypatch.setattr(image_generation.httpx, "AsyncHTTPTransport", lambda *args, **kwargs: object())
+
+    async def collect():
+        events = []
+        async for event in image_generation.image_generation_stream(
+            "sk-test",
+            "gpt-image-2",
+            "draw",
+            "u1",
+            partial_images=1,
+        ):
+            events.append(event)
+        return events
+
+    events = asyncio.run(collect())
+
+    assert captured["payload"]["stream"] is True
+    assert captured["payload"]["partial_images"] == IMAGE_STREAM_PARTIAL_IMAGES
+    assert events[-1].event == "image_completed"
+    assert events[-1].data["b64_json"] == "abc"
 
 
 def test_curl_transport_uses_body_when_tls_eof_happens(monkeypatch, tmp_path):

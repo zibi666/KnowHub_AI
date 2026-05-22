@@ -40,6 +40,7 @@ from app.services.dead_letters import push_dead_letter
 from app.services.image_generation import (
     DEFAULT_IMAGE_SETTINGS,
     ImageGenerationStreamTransportError,
+    IMAGE_STREAM_PARTIAL_IMAGES,
     effective_image_output_format,
     filter_available_models_for_request,
     image_generation_stream,
@@ -1141,7 +1142,7 @@ async def stream_image_generation_chat(
             prompt=prompt,
             user_id=user_id,
             image_settings=image_settings,
-            partial_images=1,
+            partial_images=IMAGE_STREAM_PARTIAL_IMAGES,
         ).__aiter__()
         pending_next = asyncio.ensure_future(_safe_anext(stream))
         try:
@@ -1170,15 +1171,8 @@ async def stream_image_generation_chat(
                     break
                 pending_next = asyncio.ensure_future(_safe_anext(stream))
                 if event.event == "image_progress":
-                    yield json_line(
-                        "image_progress",
-                        {
-                            **event.data,
-                            "detail": "已收到进度图，正在等待最终图片。",
-                            "phase": "rendering",
-                            **message_progress_event_data(started_at=assistant_started_at),
-                        },
-                    )
+                    # 不向前端转发进度图，仅等待最终图片
+                    pass
                 elif event.event == "image_completed":
                     final_b64 = event.data.get("b64_json") or ""
                     final_format = event.data.get("output_format") or "png"
@@ -1409,7 +1403,7 @@ async def run_image_generation_job(
             nonlocal final_b64, final_format, progress_received
             logger.info(
                 "image_stream_consume start user=%s conv=%s msg=%s model=%s partial_images=%d",
-                user_id, conversation_id, assistant_message_id, model, 3,
+                user_id, conversation_id, assistant_message_id, model, IMAGE_STREAM_PARTIAL_IMAGES,
             )
             stream = image_generation_stream(
                 api_key=api_key,
@@ -1417,40 +1411,23 @@ async def run_image_generation_job(
                 prompt=prompt,
                 user_id=user_id,
                 image_settings=image_settings,
-                partial_images=3,
+                partial_images=IMAGE_STREAM_PARTIAL_IMAGES,
             )
             async for event in stream:
                 if event.event == "image_progress":
                     progress_received = True
+                    b64 = event.data.get("b64_json", "")
                     logger.info(
                         "image_stream_consume progress user=%s conv=%s msg=%s index=%s total=%s b64_len=%d",
                         user_id, conversation_id, assistant_message_id,
-                        event.data["index"], event.data["total"], len(event.data.get("b64_json", "")),
-                    )
-                    await publish_conversation_event(
-                        conversation_id,
-                        "image_progress",
-                        {
-                            "conversation_id": conversation_id,
-                            "message_id": assistant_message_id,
-                            "b64_json": event.data["b64_json"],
-                            "b64Json": event.data["b64_json"],
-                            "index": event.data["index"],
-                            "total": event.data["total"],
-                            "output_format": event.data.get("output_format", image_output_format),
-                            "outputFormat": event.data.get("output_format", image_output_format),
-                            "size": image_size,
-                            "phase": "rendering",
-                            "detail": f"已收到第 {event.data['index']}/{event.data['total']} 张进度图",
-                            **message_progress_event_data(started_at=assistant_started_at),
-                        },
+                        event.data["index"], event.data["total"], len(b64),
                     )
                 elif event.event == "image_completed":
                     logger.info(
                         "image_stream_consume completed user=%s conv=%s msg=%s b64_len=%d",
                         user_id, conversation_id, assistant_message_id, len(event.data.get("b64_json", "")),
                     )
-                    final_b64 = event.data["b64_json"]
+                    final_b64 = event.data.get("b64_json", "")
                     final_format = event.data.get("output_format", image_output_format)
 
         status_tick = 0
@@ -1469,9 +1446,9 @@ async def run_image_generation_job(
                 if done:
                     generation_task.result()
                     break
-                if not progress_received:
-                    status_tick += 1
-                    phase, detail = image_status_detail(elapsed_seconds)
+                status_tick += 1
+                phase, detail = image_status_detail(elapsed_seconds)
+                if not progress_received or status_tick % 15 == 0:
                     await publish_conversation_event(
                         conversation_id,
                         "image_status",

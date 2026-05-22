@@ -61,6 +61,7 @@ IMAGE_BACKGROUND_OPTIONS = {"auto", "transparent", "opaque"}
 IMAGE_FORMAT_OPTIONS = {"png", "jpeg", "webp"}
 IMAGE_MODERATION_OPTIONS = {"auto", "low"}
 IMAGE_GENERATION_HTTP_TIMEOUT_SECONDS = 15 * 60
+IMAGE_STREAM_PARTIAL_IMAGES = 3
 IMAGE_TRANSPORT_LOST_MESSAGE = (
     "图像生成的网络连接在读取结果时断开，可能上游已经完成并计费，但本地没有收到完整图片数据。"
     "请稍后确认记录后再决定是否重试，避免重复扣费。"
@@ -217,12 +218,13 @@ async def image_generation_stream(
     prompt: str,
     user_id: str,
     image_settings: dict[str, Any] | None = None,
-    partial_images: int = 1,
+    partial_images: int = IMAGE_STREAM_PARTIAL_IMAGES,
 ) -> AsyncIterator[StreamEvent]:
     settings = get_settings()
     upstream_model, payload = image_generation_payload(model, prompt, user_id, image_settings)
     generation_settings = normalize_image_settings(image_settings)
     output_format = effective_image_output_format(generation_settings)
+    partial_images = IMAGE_STREAM_PARTIAL_IMAGES
     headers = {
         "Authorization": f"Bearer {api_key}",
         "Content-Type": "application/json",
@@ -388,7 +390,7 @@ async def image_generation_stream_final(
             prompt=prompt,
             user_id=user_id,
             image_settings=image_settings,
-            partial_images=1,
+            partial_images=IMAGE_STREAM_PARTIAL_IMAGES,
         )
         async for event in stream:
             if event.event != "image_completed":
