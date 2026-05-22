@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { computed, onMounted, ref } from 'vue'
+import { computed, onBeforeUnmount, onMounted, ref } from 'vue'
 import { useRouter } from 'vue-router'
 import { X } from 'lucide-vue-next'
 import { apiFetch } from '../api/client'
@@ -22,6 +22,7 @@ const deleteConfirmUser = ref<User | null>(null)
 const deleteConfirming = ref(false)
 const reasoningModels = ref('')
 const notice = ref('')
+let noticeTimer: ReturnType<typeof window.setTimeout> | null = null
 const userDrafts = ref<Record<string, { username: string; role: string; status: string; password: string }>>({})
 const quotaDrafts = ref<Record<string, { uploadRateLimitPerHour: number }>>({})
 const groups = ref<ApiKeyGroup[]>([])
@@ -35,8 +36,7 @@ const metricLabels: Record<string, string> = {
   conversations: '会话数',
   messages: '消息数',
   attachments: '附件数',
-  totalTokens: '总 Token',
-  estimatedCosBytes: 'COS 估算流量'
+  totalTokens: '总 Token'
 }
 
 const cleanupKindLabels: Record<string, string> = {
@@ -68,8 +68,22 @@ const groupOptions = computed(() => [
   ...groups.value.map((group) => ({ value: group.id, label: group.name, hint: group.description || undefined }))
 ])
 
+const visibleAnalytics = computed(() => {
+  const source = analytics.value || {}
+  return Object.fromEntries(Object.entries(source).filter(([key]) => key !== 'estimatedCosBytes'))
+})
+
 function editableUserStatus(status: string) {
   return status === 'disabled' ? 'disabled' : 'active'
+}
+
+function showNotice(message: string) {
+  notice.value = message
+  if (noticeTimer) window.clearTimeout(noticeTimer)
+  noticeTimer = window.setTimeout(() => {
+    notice.value = ''
+    noticeTimer = null
+  }, 2600)
 }
 
 function draftFor(user: User) {
@@ -161,6 +175,7 @@ async function createUser() {
   })
   username.value = ''
   loginPassword.value = ''
+  showNotice('用户已创建')
   await load()
 }
 
@@ -183,7 +198,7 @@ async function saveUser(user: User) {
       uploadRateLimitPerHour: Math.max(0, Number(quotaDraft.uploadRateLimitPerHour) || 0)
     })
   })
-  notice.value = '用户信息已保存'
+  showNotice('用户信息已保存')
   await load()
 }
 
@@ -201,7 +216,7 @@ async function confirmDeleteUser() {
   deleteConfirming.value = true
   try {
     await apiFetch(`/admin/users/${deleteConfirmUser.value.id}`, { method: 'DELETE' })
-    notice.value = `用户 ${deleteConfirmUser.value.username} 已删除`
+    showNotice(`用户 ${deleteConfirmUser.value.username} 已删除`)
     if (selectedKeyUser.value?.id === deleteConfirmUser.value.id) {
       selectedKeyUser.value = null
       selectedUserKeys.value = []
@@ -231,7 +246,7 @@ async function createAdminKey() {
     })
   })
   adminKeyDraft.value = { name: '默认密钥', apiKey: '', groupId: '', makeActive: true }
-  notice.value = '用户密钥已添加'
+  showNotice('用户密钥已添加')
   await load()
 }
 
@@ -242,21 +257,21 @@ async function saveAdminKey(key: ApiKeyEntry) {
     method: 'PATCH',
     body: JSON.stringify({ name: draft.name, groupId: draft.groupId || null })
   })
-  notice.value = '用户密钥已保存'
+  showNotice('用户密钥已保存')
   await loadSelectedUserKeys(selectedKeyUser.value)
 }
 
 async function activateAdminKey(key: ApiKeyEntry) {
   if (!selectedKeyUser.value) return
   await apiFetch<ApiKeyEntry>(`/admin/users/${selectedKeyUser.value.id}/api-keys/${key.id}/activate`, { method: 'POST' })
-  notice.value = '已切换该用户当前密钥'
+  showNotice('已切换该用户当前密钥')
   await loadSelectedUserKeys(selectedKeyUser.value)
 }
 
 async function deleteAdminKey(key: ApiKeyEntry) {
   if (!selectedKeyUser.value) return
   await apiFetch(`/admin/users/${selectedKeyUser.value.id}/api-keys/${key.id}`, { method: 'DELETE' })
-  notice.value = '用户密钥已删除'
+  showNotice('用户密钥已删除')
   await load()
 }
 
@@ -264,7 +279,7 @@ async function copyAdminKey(key: ApiKeyEntry) {
   if (!selectedKeyUser.value) return
   const result = await apiFetch<{ apiKey: string }>(`/admin/users/${selectedKeyUser.value.id}/api-keys/${key.id}/secret`)
   await copyText(result.apiKey)
-  notice.value = '密钥已复制'
+  showNotice('密钥已复制')
 }
 
 async function previewCleanup() {
@@ -285,7 +300,7 @@ async function confirmCleanup() {
         confirmToken: cleanupPreview.value.confirmToken
       })
     })
-    notice.value = `清理完成：${JSON.stringify(result.result)}`
+    showNotice(`清理完成：${JSON.stringify(result.result)}`)
     cleanupPreview.value = null
     await load()
   } finally {
@@ -299,10 +314,13 @@ async function saveReasoningModels() {
     method: 'PATCH',
     body: JSON.stringify({ models })
   })
-  notice.value = 'Reasoning 模型列表已保存'
+  showNotice('Reasoning 模型列表已保存')
 }
 
 onMounted(load)
+onBeforeUnmount(() => {
+  if (noticeTimer) window.clearTimeout(noticeTimer)
+})
 </script>
 
 <template>
@@ -311,10 +329,12 @@ onMounted(load)
       <button class="app-secondary-button text-sm rounded-md px-3 py-1" @click="router.push('/')">返回</button>
       <h1 class="ml-4 font-semibold">管理后台</h1>
     </header>
+    <Transition name="admin-toast">
+      <div v-if="notice" class="admin-toast" role="status" aria-live="polite">{{ notice }}</div>
+    </Transition>
     <section class="max-w-6xl mx-auto p-5 space-y-5">
-      <p v-if="notice" class="app-card rounded-lg p-3 text-sm text-green-700">{{ notice }}</p>
       <div class="grid grid-cols-5 gap-3">
-        <div v-for="(value, key) in analytics" :key="key" class="app-card rounded-lg p-4">
+        <div v-for="(value, key) in visibleAnalytics" :key="key" class="app-card rounded-lg p-4">
           <div class="app-muted text-xs">{{ metricLabels[String(key)] || key }}</div>
           <div class="text-xl font-semibold">{{ value }}</div>
         </div>

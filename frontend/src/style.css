@@ -376,6 +376,39 @@ body,
   min-width: 900px;
 }
 
+.admin-toast {
+  position: fixed;
+  top: 72px;
+  right: 24px;
+  z-index: 80;
+  max-width: min(360px, calc(100vw - 32px));
+  border: 1px solid color-mix(in srgb, #22c55e 42%, var(--input-border));
+  border-radius: 8px;
+  background: color-mix(in srgb, #052e16 82%, var(--panel-bg));
+  box-shadow: 0 18px 42px rgb(0 0 0 / 32%);
+  color: #dcfce7;
+  font-size: 0.875rem;
+  line-height: 1.45;
+  padding: 0.75rem 0.95rem;
+}
+
+.admin-toast-enter-active,
+.admin-toast-leave-active {
+  transition: opacity 180ms ease, transform 180ms ease;
+}
+
+.admin-toast-enter-from,
+.admin-toast-leave-to {
+  opacity: 0;
+  transform: translateY(-8px);
+}
+
+.admin-toast-enter-to,
+.admin-toast-leave-from {
+  opacity: 1;
+  transform: translateY(0);
+}
+
 .chat-sidebar {
   position: relative;
   z-index: 30;
