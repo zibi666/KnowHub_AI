@@ -244,6 +244,55 @@ def image_progress_from_message(message: Message) -> dict:
     }
 
 
+def image_progress_event_data(
+    event_data: dict,
+    *,
+    model: str,
+    image_size: str | None,
+    started_at: datetime | None = None,
+    detail: str | None = None,
+) -> dict:
+    b64_json = event_data.get("b64_json") or ""
+    output_format = event_data.get("output_format") or "png"
+    index = int(event_data.get("index") or 0)
+    total = int(event_data.get("total") or IMAGE_STREAM_PARTIAL_IMAGES)
+    display_index = max(index, 1)
+    return {
+        "text": "正在生成图片",
+        "detail": detail or f"已收到第 {display_index}/{total} 张中间图，正在继续细化。",
+        "b64_json": b64_json,
+        "b64Json": b64_json,
+        "index": display_index,
+        "total": total,
+        "output_format": output_format,
+        "outputFormat": output_format,
+        "phase": "rendering",
+        "model": model,
+        "size": image_size,
+        **message_progress_event_data(started_at=started_at),
+    }
+
+
+def image_saving_event_data(
+    b64_json: str,
+    output_format: str,
+    *,
+    model: str,
+    image_size: str | None,
+    started_at: datetime | None = None,
+) -> dict:
+    return {
+        **image_progress_event_data(
+            {"b64_json": b64_json, "index": 1, "total": 1, "output_format": output_format},
+            model=model,
+            image_size=image_size,
+            started_at=started_at,
+            detail="最终图已返回，正在保存为下载附件。",
+        ),
+        "phase": "saving",
+    }
+
+
 async def publish_conversation_event(conversation_id: str, event: str, data: dict) -> None:
     try:
         redis = await create_pool(redis_settings())
@@ -1171,8 +1220,15 @@ async def stream_image_generation_chat(
                     break
                 pending_next = asyncio.ensure_future(_safe_anext(stream))
                 if event.event == "image_progress":
-                    # 不向前端转发进度图，仅等待最终图片
-                    pass
+                    yield json_line(
+                        "image_progress",
+                        image_progress_event_data(
+                            event.data,
+                            model=model,
+                            image_size=image_size,
+                            started_at=assistant_started_at,
+                        ),
+                    )
                 elif event.event == "image_completed":
                     final_b64 = event.data.get("b64_json") or ""
                     final_format = event.data.get("output_format") or "png"
@@ -1189,17 +1245,13 @@ async def stream_image_generation_chat(
             "image_status",
             {
                 "text": "图片已生成",
-                "detail": "图片已返回，正在生成下载附件。",
-                "b64_json": final_b64,
-                "b64Json": final_b64,
-                "output_format": final_format,
-                "outputFormat": final_format,
-                "index": 1,
-                "total": 1,
-                "phase": "returned",
-                "model": model,
-                "size": image_size,
-                **message_progress_event_data(started_at=assistant_started_at),
+                **image_saving_event_data(
+                    final_b64,
+                    final_format,
+                    model=model,
+                    image_size=image_size,
+                    started_at=assistant_started_at,
+                ),
             },
         )
 
@@ -1422,6 +1474,20 @@ async def run_image_generation_job(
                         user_id, conversation_id, assistant_message_id,
                         event.data["index"], event.data["total"], len(b64),
                     )
+                    await publish_conversation_event(
+                        conversation_id,
+                        "image_progress",
+                        {
+                            "conversation_id": conversation_id,
+                            "message_id": assistant_message_id,
+                            **image_progress_event_data(
+                                event.data,
+                                model=model,
+                                image_size=image_size,
+                                started_at=assistant_started_at,
+                            ),
+                        },
+                    )
                 elif event.event == "image_completed":
                     logger.info(
                         "image_stream_consume completed user=%s conv=%s msg=%s b64_len=%d",
@@ -1474,6 +1540,22 @@ async def run_image_generation_job(
 
         if not final_b64:
             raise RuntimeError("image generation completed without image data")
+
+        await publish_conversation_event(
+            conversation_id,
+            "image_status",
+            {
+                "conversation_id": conversation_id,
+                "message_id": assistant_message_id,
+                **image_saving_event_data(
+                    final_b64,
+                    final_format,
+                    model=model,
+                    image_size=image_size,
+                    started_at=assistant_started_at,
+                ),
+            },
+        )
 
         save_started = time.perf_counter()
         async with SessionLocal() as db:

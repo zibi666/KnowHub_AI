@@ -249,6 +249,107 @@ def test_image_generation_stream_forces_three_partial_images(monkeypatch):
     assert events[-1].data["b64_json"] == "abc"
 
 
+def test_image_generation_stream_emits_each_partial_image(monkeypatch):
+    import app.services.image_generation as image_generation
+
+    class DummyResponse:
+        status_code = 200
+
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, exc_type, exc, tb):
+            return False
+
+        async def aiter_bytes(self):
+            chunks = [
+                (
+                    'event: image_generation.partial_image\n'
+                    'data: {"type":"image_generation.partial_image","partial_image_index":0,"b64_json":"partial-0","output_format":"png"}\n\n'
+                ),
+                (
+                    'event: image_generation.partial_image\n'
+                    'data: {"type":"image_generation.partial_image","partial_image_index":1,"b64_json":"partial-1","output_format":"png"}\n\n'
+                ),
+                (
+                    'event: image_generation.completed\n'
+                    'data: {"type":"image_generation.completed","b64_json":"final","output_format":"png"}\n\n'
+                ),
+            ]
+            for chunk in chunks:
+                yield chunk.encode("utf-8")
+
+    class DummyClient:
+        def __init__(self, *args, **kwargs):
+            pass
+
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, exc_type, exc, tb):
+            return False
+
+        def stream(self, method, url, headers, json):
+            return DummyResponse()
+
+    monkeypatch.setattr(image_generation.httpx, "AsyncClient", DummyClient)
+    monkeypatch.setattr(image_generation.httpx, "AsyncHTTPTransport", lambda *args, **kwargs: object())
+
+    async def collect():
+        events = []
+        async for event in image_generation.image_generation_stream("sk-test", "gpt-image-2", "draw", "u1"):
+            events.append(event)
+        return events
+
+    events = asyncio.run(collect())
+
+    assert [event.event for event in events] == ["image_progress", "image_progress", "image_completed"]
+    assert events[0].data["b64_json"] == "partial-0"
+    assert events[0].data["index"] == 1
+    assert events[0].data["total"] == IMAGE_STREAM_PARTIAL_IMAGES
+    assert events[1].data["b64_json"] == "partial-1"
+    assert events[1].data["index"] == 2
+    assert events[2].data["b64_json"] == "final"
+
+
+def test_chat_image_progress_event_data_contains_frontend_fields():
+    from app.services.chat import image_progress_event_data
+
+    payload = image_progress_event_data(
+        {
+            "b64_json": "partial",
+            "index": 2,
+            "total": IMAGE_STREAM_PARTIAL_IMAGES,
+            "output_format": "webp",
+        },
+        model="gpt-image-2",
+        image_size="1024x1024",
+    )
+
+    assert payload["b64_json"] == "partial"
+    assert payload["b64Json"] == "partial"
+    assert payload["output_format"] == "webp"
+    assert payload["outputFormat"] == "webp"
+    assert payload["index"] == 2
+    assert payload["total"] == IMAGE_STREAM_PARTIAL_IMAGES
+    assert payload["phase"] == "rendering"
+    assert payload["size"] == "1024x1024"
+
+
+def test_chat_image_saving_event_data_contains_final_preview_fields():
+    from app.services.chat import image_saving_event_data
+
+    payload = image_saving_event_data("final", "png", model="gpt-image-2", image_size="1024x1024")
+
+    assert payload["b64_json"] == "final"
+    assert payload["b64Json"] == "final"
+    assert payload["output_format"] == "png"
+    assert payload["outputFormat"] == "png"
+    assert payload["phase"] == "saving"
+    assert payload["detail"] == "最终图已返回，正在保存为下载附件。"
+    assert payload["size"] == "1024x1024"
+
+
 def test_curl_transport_uses_body_when_tls_eof_happens(monkeypatch, tmp_path):
     import app.services.image_generation as image_generation
 

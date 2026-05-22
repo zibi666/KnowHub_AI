@@ -46,6 +46,7 @@ const SIDEBAR_STORAGE_KEY = 'private-gpt-sidebar-collapsed'
 const WELCOME_STORAGE_KEY = 'private-gpt-welcome-message'
 const WELCOME_SIZE_STORAGE_KEY = 'private-gpt-welcome-font-size'
 const CURRENT_CONVERSATION_STORAGE_KEY = 'private-gpt-current-conversation'
+const IMAGE_FINALIZATION_MIN_MS = 800
 
 type ReasoningEffort = 'low' | 'medium' | 'high' | 'xhigh'
 const reasoningOptions: Array<{ value: ReasoningEffort; label: string; hint: string }> = [
@@ -207,6 +208,7 @@ let activeConversationLoad = 0
 let imagePollingTimer: number | null = null
 let conversationEventSource: EventSource | null = null
 let conversationEventSourceId: string | null = null
+const imageFinalizationTimers = new Map<string, number>()
 
 const currentConversation = computed(() => conversations.value.find((item) => item.id === currentId.value))
 const currentConversationStreaming = computed(() => messages.value.some((message) => message.status === 'streaming'))
@@ -1282,6 +1284,36 @@ function mergeMessageIntoExisting(existing: Message, incoming: Message, preserve
   moveMessageToDisplayPosition(existing)
 }
 
+function clearImageFinalizationTimer(messageId?: string | null) {
+  if (!messageId) return
+  const timer = imageFinalizationTimers.get(messageId)
+  if (timer === undefined) return
+  window.clearTimeout(timer)
+  imageFinalizationTimers.delete(messageId)
+}
+
+function clearAllImageFinalizationTimers() {
+  for (const timer of imageFinalizationTimers.values()) {
+    window.clearTimeout(timer)
+  }
+  imageFinalizationTimers.clear()
+}
+
+function finishImageFinalization(messageId: string, data: any = {}) {
+  imageFinalizationTimers.delete(messageId)
+  const message = findMessage(messageId)
+  if (!message) return
+  message.status = data.status || 'completed'
+  if (typeof data.content === 'string') message.content = data.content
+  message.imageProgress = undefined
+  message.image_progress = undefined
+  syncActiveRequestState()
+  stopImagePolling()
+  void loadConversations()
+  void loadContextStats()
+  scheduleScrollToBottom(true)
+}
+
 function mergeImageMessageIntoExisting(existing: Message, incoming: Message) {
   const existingProgress = existing.imageProgress || existing.image_progress
   const incomingProgress = incoming.imageProgress || incoming.image_progress
@@ -1421,6 +1453,7 @@ function applyConversationEvent(event: string, data: any) {
       void refreshMessageById(messageId)
       return
     }
+    clearImageFinalizationTimer(message.id)
     applyImageProgress(message, data)
     syncActiveRequestState()
     syncImagePolling()
@@ -1436,14 +1469,31 @@ function applyConversationEvent(event: string, data: any) {
           message.attachments = [...attachments, data.attachment]
         }
       }
-      message.status = data.status || 'completed'
-      if (typeof data.content === 'string') message.content = data.content
-      if (message.status !== 'streaming') message.imageProgress = undefined
+      message.status = 'streaming'
+      const progress = message.imageProgress || message.image_progress
+      applyImageProgress(message, {
+        b64Json: progress?.b64Json || progress?.b64_json || '',
+        b64_json: progress?.b64_json || progress?.b64Json || '',
+        outputFormat: progress?.outputFormat || progress?.output_format || 'png',
+        output_format: progress?.output_format || progress?.outputFormat || 'png',
+        index: progress?.index || 1,
+        total: progress?.total || 1,
+        phase: 'saving',
+        detail: '最终图已保存，正在准备下载按钮。',
+        size: data.size || progress?.size || message.generatedImageSize
+      })
+      clearImageFinalizationTimer(message.id)
+      const activeLoad = activeConversationLoad
+      const timer = window.setTimeout(() => {
+        if (activeConversationLoad !== activeLoad || currentId.value !== (conversationId || currentId.value)) {
+          imageFinalizationTimers.delete(message.id)
+          return
+        }
+        finishImageFinalization(message.id, data)
+      }, IMAGE_FINALIZATION_MIN_MS)
+      imageFinalizationTimers.set(message.id, timer)
     }
     syncActiveRequestState()
-    stopImagePolling()
-    void loadConversations()
-    void loadContextStats()
     scheduleScrollToBottom(true)
     return
   }
@@ -1622,6 +1672,7 @@ function newChat() {
   activeConversationLoad++
   cancelPendingScroll()
   cancelPendingStreamFlush()
+  clearAllImageFinalizationTimers()
   stopImagePolling()
   stopConversationEvents()
   currentId.value = null
@@ -1688,6 +1739,7 @@ async function openConversation(id: string, focusMessageId?: string | null) {
   const loadId = ++activeConversationLoad
   cancelPendingScroll()
   cancelPendingStreamFlush()
+  clearAllImageFinalizationTimers()
   stopImagePolling()
   currentId.value = id
   window.localStorage.setItem(CURRENT_CONVERSATION_STORAGE_KEY, id)
@@ -2183,6 +2235,7 @@ onMounted(async () => {
 })
 
 onUnmounted(() => {
+  clearAllImageFinalizationTimers()
   stopImagePolling()
   stopConversationEvents()
   cancelPendingScroll()
