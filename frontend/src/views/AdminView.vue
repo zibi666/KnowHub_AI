@@ -15,7 +15,7 @@ const analytics = ref<any>(null)
 const deadLetters = ref<any[]>([])
 const username = ref('')
 const loginPassword = ref('')
-const cleanupKind = ref('pending_cos')
+const cleanupKind = ref('unused_image_attachments_7d')
 const cleanupPreview = ref<any>(null)
 const cleanupConfirming = ref(false)
 const deleteConfirmUser = ref<User | null>(null)
@@ -40,6 +40,7 @@ const metricLabels: Record<string, string> = {
 }
 
 const cleanupKindLabels: Record<string, string> = {
+  unused_image_attachments_7d: '7天未使用图片',
   pending_cos: '未提交上传',
   soft_deleted_attachments: '软删除附件',
   expired_attachments: '过期附件',
@@ -47,6 +48,11 @@ const cleanupKindLabels: Record<string, string> = {
 }
 
 const cleanupKindOptions = [
+  {
+    value: 'unused_image_attachments_7d',
+    label: '7天未使用图片',
+    hint: '删除超过 7 天且没有挂到任何聊天消息里的图片'
+  },
   { value: 'pending_cos', label: '未提交上传' },
   { value: 'soft_deleted_attachments', label: '软删除附件' },
   { value: 'expired_attachments', label: '过期附件' },

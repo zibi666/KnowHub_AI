@@ -285,7 +285,13 @@ async def cleanup_preview(
     admin: User = Depends(get_admin_user),
     db: AsyncSession = Depends(get_session),
 ):
-    if payload.kind not in {"soft_deleted_attachments", "orphan_attachments", "expired_attachments", "pending_cos"}:
+    if payload.kind not in {
+        "unused_image_attachments_7d",
+        "soft_deleted_attachments",
+        "orphan_attachments",
+        "expired_attachments",
+        "pending_cos",
+    }:
         raise api_error("MODEL_NOT_AVAILABLE", "Unsupported cleanup kind", status_code=400)
     preview = await preview_cleanup(db, payload.kind)
     token = secrets.token_urlsafe(24)
