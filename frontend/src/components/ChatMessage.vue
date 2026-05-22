@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { computed, onUnmounted, ref, watch, type CSSProperties } from 'vue'
+import { computed, nextTick, onMounted, onUnmounted, ref, watch, type CSSProperties } from 'vue'
 import { Check, ChevronDown, ChevronUp, Copy, Download, FileText } from 'lucide-vue-next'
 import MarkdownMessage from './MarkdownMessage.vue'
 import type { Attachment, Message } from '../types'
@@ -8,16 +8,19 @@ import { copyText } from '../utils/clipboard'
 const props = defineProps<{ message: Message }>()
 const emit = defineEmits<{ previewAttachment: [attachment: Attachment] }>()
 
-const USER_COLLAPSE_CHARACTER_LIMIT = 120
-const USER_COLLAPSE_LINE_LIMIT = 3
+const USER_COLLAPSE_VISIBLE_LINES = 3
 
 const isExpanded = ref(false)
 const nowMs = ref(Date.now())
 const copyState = ref<'idle' | 'copied' | 'failed'>('idle')
+const userMessageContentRef = ref<HTMLElement | null>(null)
+const userMessageTextRef = ref<HTMLElement | null>(null)
+const userMessageOverflows = ref(false)
 const imageLayouts = ref<Record<string, { className: string; style: CSSProperties }>>({})
 let progressTimer: number | null = null
 let copyStateTimer: number | null = null
-const lineCount = computed(() => props.message.content.split(/\r\n|\n|\r/).length)
+let measureFrame: number | null = null
+let userMessageResizeObserver: ResizeObserver | null = null
 const isStreaming = computed(() => props.message.status === 'streaming')
 const isUserMessage = computed(() => props.message.role === 'user')
 const isLiveDraft = computed(() => isStreaming.value && props.message.id.startsWith('stream-'))
@@ -32,12 +35,7 @@ const emptyAssistantFailureText = computed(() => {
   if (props.message.status === 'interrupted') return '回复已中断'
   return ''
 })
-const canCollapse = computed(
-  () => {
-    if (!isUserMessage.value || isStreaming.value) return false
-    return props.message.content.length > USER_COLLAPSE_CHARACTER_LIMIT || lineCount.value > USER_COLLAPSE_LINE_LIMIT
-  }
-)
+const canCollapse = computed(() => isUserMessage.value && !isStreaming.value && userMessageOverflows.value)
 const isCollapsed = computed(() => canCollapse.value && !isExpanded.value)
 const collapseButtonLabel = computed(() => (isCollapsed.value ? '展开全文' : '收起'))
 const copyButtonLabel = computed(() => (copyState.value === 'copied' ? '已复制' : copyState.value === 'failed' ? '复制失败' : '复制'))
@@ -223,12 +221,72 @@ async function copyUserMessage() {
   }, 1200)
 }
 
+function measureUserMessageOverflow() {
+  const text = userMessageTextRef.value
+  const parent = text?.parentElement
+  if (!text || !parent || !isUserMessage.value || isStreaming.value) {
+    userMessageOverflows.value = false
+    return
+  }
+
+  const styles = window.getComputedStyle(text)
+  const fontSize = Number.parseFloat(styles.fontSize) || 16
+  const lineHeight = Number.parseFloat(styles.lineHeight) || fontSize * 1.58
+  const maxCollapsedHeight = lineHeight * USER_COLLAPSE_VISIBLE_LINES
+  const width = text.getBoundingClientRect().width
+  if (!width) {
+    userMessageOverflows.value = false
+    return
+  }
+
+  const clone = text.cloneNode(true) as HTMLElement
+  clone.style.position = 'absolute'
+  clone.style.visibility = 'hidden'
+  clone.style.pointerEvents = 'none'
+  clone.style.width = `${width}px`
+  clone.style.height = 'auto'
+  clone.style.maxHeight = 'none'
+  clone.style.overflow = 'visible'
+  clone.style.display = 'block'
+  clone.style.webkitLineClamp = 'unset'
+  clone.style.webkitBoxOrient = 'initial'
+  parent.appendChild(clone)
+  userMessageOverflows.value = clone.scrollHeight - maxCollapsedHeight > 1
+  parent.removeChild(clone)
+}
+
+function scheduleUserMessageOverflowMeasure() {
+  if (measureFrame !== null) window.cancelAnimationFrame(measureFrame)
+  measureFrame = window.requestAnimationFrame(() => {
+    measureFrame = null
+    measureUserMessageOverflow()
+  })
+}
+
 watch(
   () => props.message.id,
   () => {
     isExpanded.value = false
+    userMessageOverflows.value = false
+    void nextTick(scheduleUserMessageOverflowMeasure)
   }
 )
+
+watch(
+  () => props.message.content,
+  () => {
+    if (!canCollapse.value) isExpanded.value = false
+    void nextTick(scheduleUserMessageOverflowMeasure)
+  }
+)
+
+onMounted(() => {
+  void nextTick(scheduleUserMessageOverflowMeasure)
+  if (typeof ResizeObserver !== 'undefined' && userMessageContentRef.value) {
+    userMessageResizeObserver = new ResizeObserver(scheduleUserMessageOverflowMeasure)
+    userMessageResizeObserver.observe(userMessageContentRef.value)
+  }
+})
 
 watch(
   () => Boolean(props.message.role === 'assistant' && props.message.status === 'streaming'),
@@ -250,6 +308,8 @@ watch(
 onUnmounted(() => {
   if (progressTimer !== null) window.clearInterval(progressTimer)
   if (copyStateTimer !== null) window.clearTimeout(copyStateTimer)
+  if (measureFrame !== null) window.cancelAnimationFrame(measureFrame)
+  userMessageResizeObserver?.disconnect()
 })
 </script>
 
@@ -273,7 +333,7 @@ onUnmounted(() => {
               <img :src="attachmentImageSrc(attachment)" :alt="attachment.filename" @load="handleImageLoad(attachment, $event)" />
             </button>
           </div>
-          <div v-if="message.content.trim()" class="message-user-content">
+          <div v-if="message.content.trim()" ref="userMessageContentRef" class="message-user-content">
             <div class="message-bubble message-user">
               <div class="message-collapsible" :class="collapsibleClasses">
                 <button
@@ -288,7 +348,7 @@ onUnmounted(() => {
                   <ChevronUp v-else :size="16" />
                 </button>
                 <div class="message-collapsible-content">
-                  <div class="plain-user-message">{{ message.content }}</div>
+                  <div ref="userMessageTextRef" class="plain-user-message">{{ message.content }}</div>
                 </div>
               </div>
             </div>
