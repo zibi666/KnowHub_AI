@@ -1,6 +1,6 @@
 # KnowHub AI
 
-KnowHub AI 是一个面向个人和小团队的私有化 GPT 风格 Web 应用。项目当前维护在 `design/lm` 分支，当前版本为 `V4.3.2`，支持聊天、图像生成、附件解析、账号管理、用量统计和 Docker Compose 一键部署。
+KnowHub AI 是一个面向个人和小团队的私有化 GPT 风格 Web 应用。项目当前维护在 `design/lm` 分支，当前版本为 `V4.3.3`，支持聊天、图像生成、附件解析、账号管理、用量统计和 Docker Compose 一键部署。
 
 ## 功能特性
 
