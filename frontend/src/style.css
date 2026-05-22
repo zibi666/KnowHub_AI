@@ -2813,6 +2813,14 @@ body,
   transform: translateY(0);
 }
 
+.message-assistant-actions {
+  display: inline-flex;
+  min-height: 1.75rem;
+  align-items: center;
+  justify-content: flex-start;
+  margin-top: 0.55rem;
+}
+
 .message-copy-button {
   display: inline-flex;
   width: 1.75rem;
@@ -2846,6 +2854,10 @@ body,
 
 .message-copy-button.is-failed {
   color: #ff6b6b;
+}
+
+.message-assistant-copy-button {
+  color: color-mix(in srgb, var(--assistant) 72%, transparent);
 }
 
 .message-image-card {

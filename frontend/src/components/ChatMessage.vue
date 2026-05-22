@@ -35,6 +35,7 @@ const emptyAssistantFailureText = computed(() => {
   if (props.message.status === 'interrupted') return '回复已中断'
   return ''
 })
+const showAssistantCopyAction = computed(() => props.message.role === 'assistant' && !isStreaming.value && props.message.content.trim())
 const canCollapse = computed(() => isUserMessage.value && !isStreaming.value && userMessageOverflows.value)
 const isCollapsed = computed(() => canCollapse.value && !isExpanded.value)
 const collapseButtonLabel = computed(() => (isCollapsed.value ? '展开全文' : '收起'))
@@ -207,7 +208,7 @@ function attachmentKindClass(item: Attachment) {
   return 'kind-file'
 }
 
-async function copyUserMessage() {
+async function copyMessage() {
   const content = props.message.content
   if (!content.trim()) return
 
@@ -363,7 +364,7 @@ onUnmounted(() => {
                 :class="{ 'is-copied': copyState === 'copied', 'is-failed': copyState === 'failed' }"
                 :title="copyButtonLabel"
                 :aria-label="copyButtonLabel"
-                @click="copyUserMessage"
+                @click="copyMessage"
               >
                 <Check v-if="copyState === 'copied'" :size="16" />
                 <Copy v-else :size="16" />
@@ -458,6 +459,19 @@ onUnmounted(() => {
             </div>
           </div>
         </template>
+        <div v-if="showAssistantCopyAction" class="message-assistant-actions" aria-live="polite">
+          <button
+            class="message-copy-button message-assistant-copy-button"
+            type="button"
+            :class="{ 'is-copied': copyState === 'copied', 'is-failed': copyState === 'failed' }"
+            :title="copyButtonLabel"
+            :aria-label="copyButtonLabel"
+            @click="copyMessage"
+          >
+            <Check v-if="copyState === 'copied'" :size="16" />
+            <Copy v-else :size="16" />
+          </button>
+        </div>
       </div>
     </div>
   </article>
