@@ -826,13 +826,30 @@ body,
 }
 
 .sidebar-brand {
+  display: inline-flex;
   min-width: 0;
+  align-items: center;
+  gap: 0.48rem;
   color: var(--text);
   font-size: 1.02rem;
   font-weight: 850;
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
+}
+
+.sidebar-brand-icon {
+  width: 1.75rem;
+  height: 1.75rem;
+  flex: 0 0 auto;
+  border-radius: 0.55rem;
+  object-fit: contain;
+}
+
+.sidebar-brand span {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
 }
 
 .chat-sidebar-footer {
@@ -3268,6 +3285,7 @@ body,
 }
 
 .chat-footer {
+  --empty-footer-anchor-shift: -50%;
   pointer-events: auto;
   position: absolute;
   left: 50%;
@@ -3297,7 +3315,7 @@ body,
   top: 50%;
   bottom: auto;
   width: min(820px, calc(100vw - 3rem));
-  transform: translate(-50%, -50%);
+  transform: translate(-50%, var(--empty-footer-anchor-shift));
 }
 
 .scroll-bottom-button {
@@ -3340,12 +3358,13 @@ body,
 }
 
 .composer-card {
+  --composer-radius: 2rem;
   pointer-events: auto;
   position: relative;
   width: 100%;
   min-height: 4rem;
   border: 1px solid color-mix(in srgb, var(--input-border) 74%, transparent);
-  border-radius: 22px;
+  border-radius: var(--composer-radius);
   background: color-mix(in srgb, var(--input-bg) 76%, transparent);
   box-shadow: 0 18px 52px rgba(0, 0, 0, 0.26);
   backdrop-filter: blur(18px) saturate(122%);
@@ -3363,7 +3382,7 @@ body,
   position: absolute;
   inset: -18px -22px;
   z-index: -1;
-  border-radius: 34px;
+  border-radius: calc(var(--composer-radius) + 12px);
   content: "";
   background: color-mix(in srgb, var(--surface-bg) 18%, transparent);
   filter: blur(20px);
@@ -3383,12 +3402,12 @@ body,
 }
 
 .composer-card.is-expanded {
-  border-radius: 22px;
+  border-radius: var(--composer-radius);
 }
 
 .composer-card.is-empty-composer {
   min-height: 4rem;
-  border-radius: 999px;
+  border-radius: var(--composer-radius);
   background: color-mix(in srgb, var(--input-bg) 92%, #ffffff 2%);
   box-shadow:
     0 20px 64px rgba(0, 0, 0, 0.34),
@@ -3397,7 +3416,7 @@ body,
 
 .composer-card.is-empty-composer::before {
   inset: -20px -42px;
-  border-radius: 999px;
+  border-radius: calc(var(--composer-radius) + 18px);
   background: color-mix(in srgb, var(--bubble-bg) 14%, transparent);
   filter: blur(18px);
   opacity: 0.42;
@@ -3422,7 +3441,7 @@ body,
 
 .chat-shell.theme-light .composer-card.is-empty-composer::before {
   inset: -14px -30px -26px;
-  border-radius: 999px;
+  border-radius: calc(var(--composer-radius) + 18px);
   background: color-mix(in srgb, var(--bubble-bg) 12%, #ffffff 48%);
   filter: blur(18px);
   opacity: 0.52;
@@ -3445,6 +3464,10 @@ body,
 
 .composer-card.is-drag-active::after {
   box-shadow: inset 0 0 0 1px color-mix(in srgb, var(--bubble-bg) 70%, transparent);
+}
+
+.composer-card.is-scrollable {
+  overflow: hidden;
 }
 
 .composer-expand-button {
@@ -3617,8 +3640,9 @@ body,
   position: relative;
   z-index: 1;
   width: 100%;
-  min-height: 4.4rem;
-  max-height: min(34vh, 20rem);
+  box-sizing: border-box;
+  min-height: 3.35rem;
+  max-height: min(32vh, 19rem);
   resize: none;
   border: 0;
   border-radius: 0;
@@ -3626,14 +3650,15 @@ body,
   color: var(--text);
   outline: none;
   overflow-y: auto;
-  padding: 0.76rem 4.35rem 0.58rem 1.08rem;
+  overflow-x: hidden;
+  padding: 0.88rem 2.1rem 0.08rem 1.3rem;
   font-size: 1rem;
   line-height: 1.45;
-  overflow-wrap: anywhere;
+  overflow-wrap: break-word;
   scrollbar-gutter: stable;
   scrollbar-width: none;
   white-space: pre-wrap;
-  word-break: break-word;
+  word-break: keep-all;
   transition:
     height 320ms var(--ease-out-soft),
     padding 320ms var(--ease-out-soft);
@@ -3642,10 +3667,12 @@ body,
 .composer-card.is-empty-composer .composer-input {
   min-height: 4rem;
   max-height: min(30vh, 14rem);
-  padding: 1.2rem 5.6rem 0.98rem 3.55rem;
+  padding: 1.28rem 5.6rem;
+  padding-left: 3.55rem;
   overflow-y: auto;
   line-height: 1.45;
   white-space: pre-wrap;
+  word-break: keep-all;
 }
 
 .composer-card:has(.composer-attachments) .composer-input {
@@ -3659,7 +3686,38 @@ body,
 }
 
 .composer-input::-webkit-scrollbar {
-  display: none;
+  width: 0.42rem;
+}
+
+.composer-input::-webkit-scrollbar-track {
+  background: transparent;
+}
+
+.composer-input::-webkit-scrollbar-thumb {
+  border-radius: 999px;
+  background: transparent;
+}
+
+.composer-card.is-scrollable .composer-input {
+  padding-right: 2.55rem;
+  scrollbar-width: thin;
+  scrollbar-color: color-mix(in srgb, var(--text) 18%, transparent) transparent;
+}
+
+.composer-card.is-scrollable .composer-input::-webkit-scrollbar-thumb {
+  background: color-mix(in srgb, var(--text) 18%, transparent);
+}
+
+.chat-shell.theme-dark .composer-card.is-scrollable .composer-input {
+  scrollbar-color: rgba(32, 32, 32, 0.88) transparent;
+}
+
+.chat-shell.theme-dark .composer-card.is-scrollable .composer-input::-webkit-scrollbar-thumb {
+  background: rgba(32, 32, 32, 0.88);
+}
+
+.chat-shell.theme-dark .composer-card.is-scrollable .composer-input::-webkit-scrollbar-thumb:hover {
+  background: rgba(52, 52, 52, 0.94);
 }
 
 .composer-input::placeholder {
@@ -3675,7 +3733,8 @@ body,
   flex-wrap: wrap;
   gap: 0.45rem 0.6rem;
   border-top: 0;
-  padding: 0.3rem 0.7rem 0.62rem;
+  min-height: 3rem;
+  padding: 0.2rem 0.86rem 0.62rem;
 }
 
 .composer-card.is-empty-composer .composer-toolbar {

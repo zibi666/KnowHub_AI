@@ -111,6 +111,8 @@ const streaming = ref(false)
 const pendingAttachments = ref<Attachment[]>([])
 const uploadingAttachmentNames = ref<string[]>([])
 const composerDragActive = ref(false)
+const composerCompact = ref(true)
+const composerScrollable = ref(false)
 const attachmentPreviewOpen = ref(false)
 const attachmentPreview = ref<Attachment | null>(null)
 const attachmentPreviewText = ref('')
@@ -134,6 +136,7 @@ const contextStats = ref({
   tokensSource: 'estimated' as 'estimated' | 'actual'
 })
 const messageScroller = ref<HTMLElement | null>(null)
+const chatFooter = ref<HTMLElement | null>(null)
 const showScrollToBottom = ref(false)
 let userHasScrolledUp = false
 let programmaticScrollUntil = 0
@@ -164,6 +167,8 @@ const selectedGroupId = ref('ungrouped')
 const selectedGroupKeys = ref<ApiKeyEntry[]>([])
 const groupKeysLoading = ref(false)
 const deletingConversationId = ref<string | null>(null)
+const deleteConfirmOpen = ref(false)
+const conversationPendingDelete = ref<Conversation | null>(null)
 const renamingConversationId = ref<string | null>(null)
 const renameSaving = ref(false)
 const renameDialogOpen = ref(false)
@@ -196,6 +201,8 @@ const imageSettings = ref<ImageGenerationSettings>({
 })
 
 let scrollFrame: number | null = null
+let composerResizeFrame: number | null = null
+let composerMeasureElement: HTMLDivElement | null = null
 let activeConversationLoad = 0
 let imagePollingTimer: number | null = null
 let conversationEventSource: EventSource | null = null
@@ -218,14 +225,18 @@ const defaultWelcomeMessage = computed(() => {
 const effectiveWelcomeMessage = computed(() => welcomeMessage.value.trim() || defaultWelcomeMessage.value)
 const isEmptyChat = computed(() => !messagesLoading.value && messages.value.length === 0)
 const hasConversationFrame = computed(() => messagesLoading.value || messages.value.length > 0)
-const composerClasses = computed(() => ({
-  'is-expanded': composerExpanded.value,
-  'is-drag-active': composerDragActive.value,
-  'is-empty-composer':
+const canUseCompactComposer = computed(
+  () =>
     isEmptyChat.value &&
     !composerExpanded.value &&
     pendingAttachments.value.length === 0 &&
     uploadingAttachmentNames.value.length === 0
+)
+const composerClasses = computed(() => ({
+  'is-expanded': composerExpanded.value,
+  'is-drag-active': composerDragActive.value,
+  'is-empty-composer': canUseCompactComposer.value && composerCompact.value,
+  'is-scrollable': composerScrollable.value
 }))
 
 function isImageAttachment(item: Attachment) {
@@ -247,9 +258,19 @@ function messageIsImageGeneration(message: Message) {
   return ['image-2', 'image-1.5', 'image-1', 'gpt-image-2', 'gpt-image-1.5', 'gpt-image-1'].includes((message.model || '').toLowerCase())
 }
 
+function parseApiDateMs(value: unknown) {
+  if (typeof value === 'number') return Number.isFinite(value) ? value : undefined
+  if (typeof value !== 'string') return undefined
+  const trimmed = value.trim()
+  if (!trimmed) return undefined
+  const hasTimezone = /(?:z|[+-]\d{2}:?\d{2})$/i.test(trimmed)
+  const timestamp = new Date(hasTimezone ? trimmed : `${trimmed}Z`).getTime()
+  return Number.isFinite(timestamp) ? timestamp : undefined
+}
+
 function messageCreatedAtMs(message: Message) {
-  const createdAt = new Date(message.createdAt).getTime()
-  return Number.isFinite(createdAt) ? Math.min(createdAt, Date.now()) : Date.now()
+  const createdAt = parseApiDateMs(message.createdAt)
+  return createdAt !== undefined ? Math.min(createdAt, Date.now()) : Date.now()
 }
 
 function currentRuntimeElapsed(message: Message) {
@@ -316,9 +337,7 @@ function applyRuntimeProgress(message: Message, data: any = {}) {
   const incomingStartedAt = normalizeProgressTimestamp(data.startedAt ?? data.started_at)
   const fallbackStartedAt = message.status === 'streaming' ? messageCreatedAtMs(message) : undefined
   const now = Date.now()
-  const startedAt = [existingStartedAt, incomingStartedAt, fallbackStartedAt, message.status === 'streaming' ? now : undefined]
-    .filter((value): value is number => value !== undefined)
-    .reduce<number | undefined>((earliest, value) => (earliest === undefined ? value : Math.min(earliest, value)), undefined)
+  const startedAt = existingStartedAt ?? incomingStartedAt ?? fallbackStartedAt ?? (message.status === 'streaming' ? now : undefined)
   const firstTokenSeconds = incomingFirstTokenSeconds(data)
   const incomingElapsed = normalizeProgressElapsed(data.elapsedSeconds ?? data.elapsed_seconds)
   const existingElapsed = currentRuntimeElapsed(message)
@@ -569,7 +588,7 @@ const MESSAGE_ROLE_ORDER: Record<Message['role'], number> = {
 }
 
 function compareMessagesForDisplay(a: Message, b: Message) {
-  const timeDelta = new Date(a.createdAt || 0).getTime() - new Date(b.createdAt || 0).getTime()
+  const timeDelta = (parseApiDateMs(a.createdAt) ?? 0) - (parseApiDateMs(b.createdAt) ?? 0)
   if (timeDelta !== 0) return timeDelta
   const roleDelta = (MESSAGE_ROLE_ORDER[a.role] ?? 3) - (MESSAGE_ROLE_ORDER[b.role] ?? 3)
   if (roleDelta !== 0) return roleDelta
@@ -741,8 +760,9 @@ function setApiKeyDraftGroup(key: ApiKeyEntry, groupId: string | number) {
 }
 
 function formatSearchDate(value: string) {
-  const date = new Date(value)
-  if (Number.isNaN(date.getTime())) return ''
+  const timestamp = parseApiDateMs(value)
+  if (timestamp === undefined) return ''
+  const date = new Date(timestamp)
   const now = new Date()
   const startOfToday = new Date(now.getFullYear(), now.getMonth(), now.getDate()).getTime()
   const startOfDate = new Date(date.getFullYear(), date.getMonth(), date.getDate()).getTime()
@@ -754,8 +774,7 @@ function formatSearchDate(value: string) {
 }
 
 function conversationUpdatedAtMs(conversation: Conversation) {
-  const timestamp = new Date(conversation.updatedAt).getTime()
-  return Number.isFinite(timestamp) ? timestamp : 0
+  return parseApiDateMs(conversation.updatedAt) ?? 0
 }
 
 function sortConversationsByUpdatedAt(items: Conversation[]) {
@@ -1772,12 +1791,27 @@ async function saveConversationTitle() {
   }
 }
 
-async function deleteConversation(conversation: Conversation) {
+function requestDeleteConversation(conversation: Conversation) {
   if (deletingConversationId.value || (conversation.id === currentId.value && currentConversationStreaming.value)) return
+  conversationPendingDelete.value = conversation
+  deleteConfirmOpen.value = true
+}
+
+function closeDeleteConfirm() {
+  if (deletingConversationId.value) return
+  deleteConfirmOpen.value = false
+  conversationPendingDelete.value = null
+}
+
+async function confirmDeleteConversation() {
+  const conversation = conversationPendingDelete.value
+  if (!conversation || deletingConversationId.value || (conversation.id === currentId.value && currentConversationStreaming.value)) return
   deletingConversationId.value = conversation.id
   try {
     await apiFetch(`/conversations/${conversation.id}`, { method: 'DELETE' })
     conversations.value = conversations.value.filter((item) => item.id !== conversation.id)
+    deleteConfirmOpen.value = false
+    conversationPendingDelete.value = null
     if (currentId.value === conversation.id) {
       const nextConversation = conversations.value[0]
       if (nextConversation) {
@@ -2013,11 +2047,103 @@ function handleComposerKeydown(event: KeyboardEvent) {
   void send()
 }
 
+function ensureComposerMeasureElement() {
+  if (composerMeasureElement) return composerMeasureElement
+  composerMeasureElement = document.createElement('div')
+  composerMeasureElement.setAttribute('aria-hidden', 'true')
+  composerMeasureElement.className = 'composer-card is-empty-composer composer-measure-card'
+  composerMeasureElement.style.position = 'fixed'
+  composerMeasureElement.style.left = '-10000px'
+  composerMeasureElement.style.top = '0'
+  composerMeasureElement.style.visibility = 'hidden'
+  composerMeasureElement.style.pointerEvents = 'none'
+  composerMeasureElement.style.contain = 'layout style'
+  const measureInput = document.createElement('textarea')
+  measureInput.className = 'composer-input'
+  measureInput.rows = 1
+  measureInput.tabIndex = -1
+  measureInput.readOnly = true
+  composerMeasureElement.appendChild(measureInput)
+  document.body.appendChild(composerMeasureElement)
+  return composerMeasureElement
+}
+
+function isComposerTextSingleLine(textarea: HTMLTextAreaElement) {
+  const value = textarea.value
+  if (!value) return true
+  const measure = ensureComposerMeasureElement()
+  const measureInput = measure.querySelector<HTMLTextAreaElement>('.composer-input')
+  if (!measureInput) return false
+
+  measure.style.width = `${textarea.getBoundingClientRect().width || textarea.clientWidth}px`
+  measureInput.value = value
+  measureInput.style.height = 'auto'
+  return measureInput.scrollHeight <= measureInput.clientHeight + 1
+}
+
+function updateEmptyFooterAnchorShift() {
+  if (!isEmptyChat.value) return
+  const footer = chatFooter.value
+  if (!footer) return
+
+  const footerHeight = footer.getBoundingClientRect().height
+  if (footerHeight > 0) {
+    footer.style.setProperty('--empty-footer-anchor-shift', `${-(footerHeight / 2)}px`)
+  }
+}
+
+function composerMaxInputHeight(textarea: HTMLTextAreaElement, cssMaxHeight: number | null) {
+  let maxHeight = cssMaxHeight ?? Number.POSITIVE_INFINITY
+  if (!isEmptyChat.value || composerCompact.value) return maxHeight
+
+  const card = textarea.closest<HTMLElement>('.composer-card')
+  const cardRect = card?.getBoundingClientRect()
+  const textareaRect = textarea.getBoundingClientRect()
+  const bottomChrome = cardRect ? Math.max(0, cardRect.bottom - textareaRect.bottom) : 0
+  const bottomGap = Math.max(48, Math.min(72, window.innerHeight * 0.07))
+  const viewportMaxHeight = window.innerHeight - textareaRect.top - bottomChrome - bottomGap
+  if (viewportMaxHeight > 0) {
+    maxHeight = Math.min(maxHeight, viewportMaxHeight)
+  }
+
+  const minHeight = Number.parseFloat(getComputedStyle(textarea).minHeight)
+  return Number.isFinite(minHeight) ? Math.max(minHeight, maxHeight) : maxHeight
+}
+
 function resizeComposerInput() {
   const textarea = composerInput.value
   if (!textarea) return
+
+  const previousCompact = composerCompact.value
+  if (canUseCompactComposer.value && previousCompact) {
+    updateEmptyFooterAnchorShift()
+  }
+  if (!canUseCompactComposer.value) {
+    composerCompact.value = false
+  } else {
+    composerCompact.value = isComposerTextSingleLine(textarea)
+  }
+  if (previousCompact !== composerCompact.value) {
+    void nextTick().then(resizeComposerInput)
+  }
+
   textarea.style.height = 'auto'
-  textarea.style.height = `${textarea.scrollHeight}px`
+  const maxHeight = Number.parseFloat(getComputedStyle(textarea).maxHeight)
+  const nextMaxHeight = composerMaxInputHeight(textarea, Number.isFinite(maxHeight) ? maxHeight : null)
+  const nextHeight = Math.min(textarea.scrollHeight, nextMaxHeight)
+  textarea.style.height = `${nextHeight}px`
+  composerScrollable.value = textarea.scrollHeight > nextHeight
+  textarea.style.overflowY = composerScrollable.value ? 'auto' : 'hidden'
+}
+
+function scheduleComposerResize() {
+  if (composerResizeFrame !== null) {
+    window.cancelAnimationFrame(composerResizeFrame)
+  }
+  composerResizeFrame = window.requestAnimationFrame(() => {
+    composerResizeFrame = null
+    resizeComposerInput()
+  })
 }
 
 watch(input, async () => {
@@ -2029,6 +2155,14 @@ watch(composerExpanded, async () => {
   await nextTick()
   resizeComposerInput()
 })
+
+watch(
+  () => canUseCompactComposer.value,
+  async () => {
+    await nextTick()
+    resizeComposerInput()
+  }
+)
 
 function closeFloatingMenus() {
   settingsMenuOpen.value = false
@@ -2048,12 +2182,20 @@ onMounted(async () => {
   }
   await nextTick()
   resizeComposerInput()
+  window.addEventListener('resize', scheduleComposerResize)
 })
 
 onUnmounted(() => {
   stopImagePolling()
   stopConversationEvents()
   cancelPendingScroll()
+  if (composerResizeFrame !== null) {
+    window.cancelAnimationFrame(composerResizeFrame)
+    composerResizeFrame = null
+  }
+  composerMeasureElement?.remove()
+  composerMeasureElement = null
+  window.removeEventListener('resize', scheduleComposerResize)
 })
 </script>
 
@@ -2068,7 +2210,10 @@ onUnmounted(() => {
       <div class="chat-sidebar-top">
         <div class="sidebar-top-actions">
           <div class="sidebar-title-row">
-            <div class="sidebar-brand">KnowHub</div>
+            <div class="sidebar-brand">
+              <img class="sidebar-brand-icon" src="/brand/knowhub-icon.png" alt="" aria-hidden="true" />
+              <span>KnowHub</span>
+            </div>
             <button
               class="sidebar-collapse-button"
               type="button"
@@ -2133,7 +2278,7 @@ onUnmounted(() => {
               title="删除对话"
               aria-label="删除对话"
               :disabled="deletingConversationId === conversation.id || (conversation.id === currentId && currentConversationStreaming)"
-              @click.stop="deleteConversation(conversation)"
+              @click.stop="requestDeleteConversation(conversation)"
             >
               <X :size="15" />
             </button>
@@ -2257,7 +2402,7 @@ onUnmounted(() => {
         </div>
       </section>
 
-      <footer class="chat-footer p-4">
+      <footer ref="chatFooter" class="chat-footer p-4">
         <Transition name="welcome-rise">
           <div v-if="isEmptyChat" class="empty-welcome">
             {{ effectiveWelcomeMessage }}
@@ -2329,6 +2474,7 @@ onUnmounted(() => {
             ref="composerInput"
             v-model="input"
             class="composer-input"
+            rows="1"
             placeholder="输入消息，按 Enter 发送，Shift + Enter 换行"
             @keydown.enter="handleComposerKeydown"
           />
@@ -2929,6 +3075,26 @@ onUnmounted(() => {
             <button type="submit" class="rename-primary-button" :disabled="renameSaving || !renameDraft.trim()">保存</button>
           </div>
         </form>
+      </div>
+    </Transition>
+
+    <Transition name="dialog-pop">
+      <div v-if="deleteConfirmOpen" class="confirm-modal-backdrop" @click.self="closeDeleteConfirm">
+        <section class="confirm-modal" role="dialog" aria-modal="true" aria-label="确认删除对话">
+          <div class="confirm-modal-header">
+            <h2>删除对话？</h2>
+            <button type="button" class="confirm-modal-close" title="关闭" aria-label="关闭" @click="closeDeleteConfirm">
+              <X :size="18" />
+            </button>
+          </div>
+          <p>对话「{{ conversationPendingDelete?.title || '未命名对话' }}」删除后将从侧边栏移除。</p>
+          <div class="confirm-modal-actions">
+            <button type="button" class="confirm-secondary-button" :disabled="Boolean(deletingConversationId)" @click="closeDeleteConfirm">取消</button>
+            <button type="button" class="confirm-danger-button" :disabled="Boolean(deletingConversationId)" @click="confirmDeleteConversation">
+              {{ deletingConversationId ? '删除中...' : '确认删除' }}
+            </button>
+          </div>
+        </section>
       </div>
     </Transition>
 
