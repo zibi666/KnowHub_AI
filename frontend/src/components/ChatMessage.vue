@@ -1,8 +1,9 @@
 <script setup lang="ts">
 import { computed, onUnmounted, ref, watch, type CSSProperties } from 'vue'
-import { ChevronDown, ChevronUp, Download, FileText } from 'lucide-vue-next'
+import { Check, ChevronDown, ChevronUp, Copy, Download, FileText } from 'lucide-vue-next'
 import MarkdownMessage from './MarkdownMessage.vue'
 import type { Attachment, Message } from '../types'
+import { copyText } from '../utils/clipboard'
 
 const props = defineProps<{ message: Message }>()
 const emit = defineEmits<{ previewAttachment: [attachment: Attachment] }>()
@@ -12,8 +13,10 @@ const USER_COLLAPSE_LINE_LIMIT = 3
 
 const isExpanded = ref(false)
 const nowMs = ref(Date.now())
+const copyState = ref<'idle' | 'copied' | 'failed'>('idle')
 const imageLayouts = ref<Record<string, { className: string; style: CSSProperties }>>({})
 let progressTimer: number | null = null
+let copyStateTimer: number | null = null
 const lineCount = computed(() => props.message.content.split(/\r\n|\n|\r/).length)
 const isStreaming = computed(() => props.message.status === 'streaming')
 const isUserMessage = computed(() => props.message.role === 'user')
@@ -37,6 +40,7 @@ const canCollapse = computed(
 )
 const isCollapsed = computed(() => canCollapse.value && !isExpanded.value)
 const collapseButtonLabel = computed(() => (isCollapsed.value ? '展开全文' : '收起'))
+const copyButtonLabel = computed(() => (copyState.value === 'copied' ? '已复制' : copyState.value === 'failed' ? '复制失败' : '复制'))
 const collapsibleClasses = computed(() => ({
   'has-collapse': canCollapse.value,
   'is-collapsed': isCollapsed.value,
@@ -201,6 +205,24 @@ function attachmentKindClass(item: Attachment) {
   return 'kind-file'
 }
 
+async function copyUserMessage() {
+  const content = props.message.content
+  if (!content.trim()) return
+
+  try {
+    await copyText(content)
+    copyState.value = 'copied'
+  } catch {
+    copyState.value = 'failed'
+  }
+
+  if (copyStateTimer !== null) window.clearTimeout(copyStateTimer)
+  copyStateTimer = window.setTimeout(() => {
+    copyState.value = 'idle'
+    copyStateTimer = null
+  }, 1200)
+}
+
 watch(
   () => props.message.id,
   () => {
@@ -227,6 +249,7 @@ watch(
 
 onUnmounted(() => {
   if (progressTimer !== null) window.clearInterval(progressTimer)
+  if (copyStateTimer !== null) window.clearTimeout(copyStateTimer)
 })
 </script>
 
@@ -250,22 +273,37 @@ onUnmounted(() => {
               <img :src="attachmentImageSrc(attachment)" :alt="attachment.filename" @load="handleImageLoad(attachment, $event)" />
             </button>
           </div>
-          <div v-if="message.content.trim()" class="message-bubble message-user">
-            <div class="message-collapsible" :class="collapsibleClasses">
-              <button
-                v-if="canCollapse"
-                class="message-collapse-button"
-                type="button"
-                :aria-expanded="isExpanded"
-                :title="collapseButtonLabel"
-                @click="isExpanded = !isExpanded"
-              >
-                <ChevronDown v-if="isCollapsed" :size="16" />
-                <ChevronUp v-else :size="16" />
-              </button>
-              <div class="message-collapsible-content">
-                <div class="plain-user-message">{{ message.content }}</div>
+          <div v-if="message.content.trim()" class="message-user-content">
+            <div class="message-bubble message-user">
+              <div class="message-collapsible" :class="collapsibleClasses">
+                <button
+                  v-if="canCollapse"
+                  class="message-collapse-button"
+                  type="button"
+                  :aria-expanded="isExpanded"
+                  :title="collapseButtonLabel"
+                  @click="isExpanded = !isExpanded"
+                >
+                  <ChevronDown v-if="isCollapsed" :size="16" />
+                  <ChevronUp v-else :size="16" />
+                </button>
+                <div class="message-collapsible-content">
+                  <div class="plain-user-message">{{ message.content }}</div>
+                </div>
               </div>
+            </div>
+            <div class="message-user-actions" aria-live="polite">
+              <button
+                class="message-copy-button"
+                type="button"
+                :class="{ 'is-copied': copyState === 'copied', 'is-failed': copyState === 'failed' }"
+                :title="copyButtonLabel"
+                :aria-label="copyButtonLabel"
+                @click="copyUserMessage"
+              >
+                <Check v-if="copyState === 'copied'" :size="16" />
+                <Copy v-else :size="16" />
+              </button>
             </div>
           </div>
           <div v-if="fileAttachments.length" class="message-attachments">

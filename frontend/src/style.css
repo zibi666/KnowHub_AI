@@ -2789,6 +2789,66 @@ body,
   max-width: min(100%, 70vw);
 }
 
+.message-user-content {
+  display: grid;
+  justify-items: end;
+  gap: 0.45rem;
+  max-width: 100%;
+}
+
+.message-user-actions {
+  display: inline-flex;
+  min-height: 1.75rem;
+  align-items: center;
+  justify-content: flex-end;
+  opacity: 0;
+  pointer-events: none;
+  transform: translateY(-2px);
+  transition: opacity 150ms ease, transform 150ms ease;
+}
+
+.message-user-content:hover .message-user-actions,
+.message-user-content:focus-within .message-user-actions {
+  opacity: 1;
+  pointer-events: auto;
+  transform: translateY(0);
+}
+
+.message-copy-button {
+  display: inline-flex;
+  width: 1.75rem;
+  height: 1.75rem;
+  align-items: center;
+  justify-content: center;
+  border: 0;
+  border-radius: 999px;
+  background: transparent;
+  color: color-mix(in srgb, var(--text) 72%, transparent);
+  transition: background 150ms ease, color 150ms ease, transform 150ms ease;
+}
+
+.message-copy-button:hover {
+  background: var(--control-hover);
+  color: var(--text);
+}
+
+.message-copy-button:focus-visible {
+  outline: 2px solid color-mix(in srgb, var(--bubble-bg) 70%, #ffffff);
+  outline-offset: 2px;
+}
+
+.message-copy-button:active {
+  transform: translateY(1px);
+}
+
+.message-copy-button.is-copied {
+  color: #2fbf71;
+}
+
+.message-copy-button.is-failed {
+  color: #ff6b6b;
+}
+
 .message-image-card {
   display: grid;
   width: 168px;
