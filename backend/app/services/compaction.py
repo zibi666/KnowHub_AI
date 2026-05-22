@@ -11,7 +11,7 @@ from app.core.config import get_settings
 from app.models.entities import Conversation, ConversationCompaction, Message, UserApiKey
 from app.providers.openai_compatible import OpenAICompatibleProvider, estimate_tokens_text
 from app.security.crypto import decrypt_api_key
-from app.services.api_keys import get_active_api_key
+from app.services.api_keys import chat_api_key
 from app.services.context import build_message_branch, order_messages_chronologically, parse_json_object, prompt_hash, wrap_untrusted
 
 logger = logging.getLogger("app.services.compaction")
@@ -183,7 +183,7 @@ async def compact_conversation(
 
     settings = get_settings()
     preferred = settings.preferred_compaction_models
-    api_key_row = await get_active_api_key(db, user_id)
+    api_key_row = await chat_api_key(db, user_id)
     available = api_key_row.available_models_json if api_key_row else None
     summary_model = _select_summary_model(preferred, available)
 

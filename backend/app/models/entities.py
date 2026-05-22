@@ -61,6 +61,8 @@ class ApiKeyGroup(Base, TimestampMixin):
     id: Mapped[str] = mapped_column(String(36), primary_key=True, default=uuid_str)
     name: Mapped[str] = mapped_column(String(80), unique=True, index=True, nullable=False)
     description: Mapped[str | None] = mapped_column(String(255), nullable=True)
+    purpose: Mapped[str] = mapped_column(String(20), default="none", nullable=False)
+    is_system: Mapped[bool] = mapped_column(Boolean, default=False, nullable=False)
 
 
 class UserApiKey(Base, TimestampMixin):

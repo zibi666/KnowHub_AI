@@ -69,10 +69,10 @@ const userStatusOptions = [
   { value: 'disabled', label: '禁用' }
 ]
 
-const groupOptions = computed(() => [
-  { value: '', label: '不分组' },
-  ...groups.value.map((group) => ({ value: group.id, label: group.name, hint: group.description || undefined }))
-])
+const defaultChatGroup = computed(() => groups.value.find((group) => group.purpose === 'chat') || groups.value[0] || null)
+const groupOptions = computed(() =>
+  groups.value.map((group) => ({ value: group.id, label: group.name, hint: group.description || undefined }))
+)
 
 const visibleAnalytics = computed(() => {
   const source = analytics.value || {}
@@ -106,7 +106,7 @@ function draftFor(user: User) {
 
 function keyDraftFor(key: ApiKeyEntry) {
   if (!keyDrafts.value[key.id]) {
-    keyDrafts.value[key.id] = { name: key.name, groupId: key.groupId || '' }
+    keyDrafts.value[key.id] = { name: key.name, groupId: key.groupId || defaultChatGroup.value?.id || '' }
   }
   return keyDrafts.value[key.id]
 }
@@ -157,6 +157,9 @@ async function load() {
   const reasoning = await apiFetch<{ models: string[] }>('/admin/settings/reasoning-models')
   reasoningModels.value = reasoning.models.join(', ')
   groups.value = await apiFetch<ApiKeyGroup[]>('/api-key-groups')
+  if (!adminKeyDraft.value.groupId || !groups.value.some((group) => group.id === adminKeyDraft.value.groupId)) {
+    adminKeyDraft.value.groupId = defaultChatGroup.value?.id || ''
+  }
   if (selectedKeyUser.value) {
     const refreshed = users.value.find((user) => user.id === selectedKeyUser.value?.id)
     selectedKeyUser.value = refreshed || null
@@ -237,7 +240,9 @@ async function confirmDeleteUser() {
 async function loadSelectedUserKeys(user: User) {
   selectedKeyUser.value = user
   selectedUserKeys.value = await apiFetch<ApiKeyEntry[]>(`/admin/users/${user.id}/api-keys`)
-  keyDrafts.value = Object.fromEntries(selectedUserKeys.value.map((key) => [key.id, { name: key.name, groupId: key.groupId || '' }]))
+  keyDrafts.value = Object.fromEntries(
+    selectedUserKeys.value.map((key) => [key.id, { name: key.name, groupId: key.groupId || defaultChatGroup.value?.id || '' }])
+  )
 }
 
 async function createAdminKey() {
@@ -247,11 +252,11 @@ async function createAdminKey() {
     body: JSON.stringify({
       name: adminKeyDraft.value.name,
       apiKey: adminKeyDraft.value.apiKey,
-      groupId: adminKeyDraft.value.groupId || null,
+      groupId: adminKeyDraft.value.groupId || defaultChatGroup.value?.id || null,
       makeActive: adminKeyDraft.value.makeActive
     })
   })
-  adminKeyDraft.value = { name: '默认密钥', apiKey: '', groupId: '', makeActive: true }
+  adminKeyDraft.value = { name: '默认密钥', apiKey: '', groupId: defaultChatGroup.value?.id || '', makeActive: true }
   showNotice('用户密钥已添加')
   await load()
 }
@@ -261,7 +266,7 @@ async function saveAdminKey(key: ApiKeyEntry) {
   const draft = keyDraftFor(key)
   await apiFetch<ApiKeyEntry>(`/admin/users/${selectedKeyUser.value.id}/api-keys/${key.id}`, {
     method: 'PATCH',
-    body: JSON.stringify({ name: draft.name, groupId: draft.groupId || null })
+    body: JSON.stringify({ name: draft.name, groupId: draft.groupId || defaultChatGroup.value?.id || null })
   })
   showNotice('用户密钥已保存')
   await loadSelectedUserKeys(selectedKeyUser.value)

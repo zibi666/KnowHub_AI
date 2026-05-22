@@ -33,7 +33,7 @@ from app.providers.openai_compatible import OpenAICompatibleProvider, estimate_t
 from app.schemas.chat import SendMessageRequest
 from app.security.crypto import decrypt_api_key
 from app.services.attachments import image_attachment_to_data_url, is_image_attachment
-from app.services.api_keys import get_active_api_key
+from app.services.api_keys import resolve_api_key_for_model
 from app.services.compaction import compact_conversation
 from app.services.context import build_context_bundle, build_current_message_branch, build_message_branch
 from app.services.dead_letters import push_dead_letter
@@ -412,7 +412,15 @@ async def prepare_chat_messages(user_id: str, payload: SendMessageRequest, conve
     created_conversation_id: str | None = None
     async with SessionLocal() as db:
         quota = await db.get(UserQuota, user_id)
-        api_key_row = await get_active_api_key(db, user_id)
+        requested_model = model or (quota.default_model if quota else None) or DEFAULT_CHAT_MODEL
+        api_key_row = await resolve_api_key_for_model(
+            db,
+            user_id,
+            requested_model,
+            quota=quota,
+            commit=False,
+            require_choice=True,
+        )
         if not api_key_row:
             raise HTTPException(status_code=400, detail={"code": "KEY_REQUIRED", "message": "请先绑定模型 API Key"})
         available_models = api_key_row.available_models_json or []
@@ -426,6 +434,17 @@ async def prepare_chat_messages(user_id: str, payload: SendMessageRequest, conve
             raise HTTPException(status_code=400, detail={"code": "MODEL_NOT_AVAILABLE", "message": "当前模型不在管理员允许范围内"})
         if api_key_row.available_models_json and not image_model_is_available(model, available_models):
             raise HTTPException(status_code=400, detail={"code": "MODEL_NOT_AVAILABLE", "message": "当前 API Key 不支持该模型"})
+        if model != requested_model:
+            api_key_row = await resolve_api_key_for_model(
+                db,
+                user_id,
+                model,
+                quota=quota,
+                commit=False,
+                require_choice=True,
+            )
+            if not api_key_row:
+                raise HTTPException(status_code=400, detail={"code": "KEY_REQUIRED", "message": "请先绑定模型 API Key"})
         if conversation_id is None:
             title = (payload.content.strip() or "新对话")[:30]
             conversation = Conversation(user_id=user_id, title=title)
@@ -605,7 +624,15 @@ async def stream_chat(user_id: str, payload: SendMessageRequest, conversation_id
 
     async with SessionLocal() as db:
         quota = await db.get(UserQuota, user_id)
-        api_key_row = await get_active_api_key(db, user_id)
+        requested_model = model or (quota.default_model if quota else None) or DEFAULT_CHAT_MODEL
+        api_key_row = await resolve_api_key_for_model(
+            db,
+            user_id,
+            requested_model,
+            quota=quota,
+            commit=False,
+            require_choice=True,
+        )
         if not api_key_row:
             yield json_line("error", {"code": "KEY_REQUIRED", "message": "请先绑定模型 API Key", "retryable": False})
             return
@@ -622,6 +649,18 @@ async def stream_chat(user_id: str, payload: SendMessageRequest, conversation_id
         if api_key_row.available_models_json and not image_model_is_available(model, available_models):
             yield json_line("error", {"code": "MODEL_NOT_AVAILABLE", "message": "当前 API Key 不支持该模型", "retryable": False})
             return
+        if model != requested_model:
+            api_key_row = await resolve_api_key_for_model(
+                db,
+                user_id,
+                model,
+                quota=quota,
+                commit=False,
+                require_choice=True,
+            )
+            if not api_key_row:
+                yield json_line("error", {"code": "KEY_REQUIRED", "message": "请先绑定模型 API Key", "retryable": False})
+                return
         if conversation_id is None:
             title = (payload.content.strip() or "新对话")[:30]
             conversation = Conversation(user_id=user_id, title=title)
@@ -810,7 +849,15 @@ async def stream_chat(user_id: str, payload: SendMessageRequest, conversation_id
                     if attachment.parse_status == "success" and is_image_attachment(attachment)
                 ][: settings.vision_image_max_count]
             attach_images_to_current_user_message(context, image_attachments)
-            api_key_row = await get_active_api_key(db, user_id)
+            api_key_row = await resolve_api_key_for_model(
+                db,
+                user_id,
+                model,
+                quota=quota,
+                commit=False,
+                require_choice=True,
+                allow_auto_choose_multiple=True,
+            )
             if not api_key_row:
                 yield json_line("error", {"code": "KEY_REQUIRED", "message": "请先绑定模型 API Key", "retryable": False})
                 return
@@ -1164,7 +1211,15 @@ async def stream_image_generation_chat(
             assistant = await db.get(Message, assistant_message_id)
             assistant_started_at = assistant.created_at if assistant else None
             quota = await db.get(UserQuota, user_id)
-            api_key_row = await get_active_api_key(db, user_id)
+            api_key_row = await resolve_api_key_for_model(
+                db,
+                user_id,
+                model,
+                quota=quota,
+                commit=False,
+                require_choice=True,
+                allow_auto_choose_multiple=True,
+            )
             if not api_key_row:
                 yield json_line("error", {"code": "KEY_REQUIRED", "message": "请先绑定模型 API Key", "retryable": False})
                 return
@@ -1421,7 +1476,15 @@ async def run_image_generation_job(
             assistant.content = "正在生成图片"
             assistant.status = "streaming"
             quota = await db.get(UserQuota, user_id)
-            api_key_row = await get_active_api_key(db, user_id)
+            api_key_row = await resolve_api_key_for_model(
+                db,
+                user_id,
+                model,
+                quota=quota,
+                commit=False,
+                require_choice=True,
+                allow_auto_choose_multiple=True,
+            )
             if not api_key_row:
                 assistant.content = "请先绑定模型 API Key"
                 assistant.status = "failed_no_output"
@@ -1780,7 +1843,15 @@ async def run_chat_generation_job(
                     if attachment.parse_status == "success" and is_image_attachment(attachment)
                 ][: settings.vision_image_max_count]
             attach_images_to_current_user_message(context, image_attachments)
-            api_key_row = await get_active_api_key(db, user_id)
+            api_key_row = await resolve_api_key_for_model(
+                db,
+                user_id,
+                model,
+                quota=quota,
+                commit=False,
+                require_choice=True,
+                allow_auto_choose_multiple=True,
+            )
             if not api_key_row:
                 raise HTTPException(status_code=400, detail={"code": "KEY_REQUIRED", "message": "璇峰厛缁戝畾妯″瀷 API Key"})
             api_key = decrypt_api_key(api_key_row.ciphertext)

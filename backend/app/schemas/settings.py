@@ -5,6 +5,7 @@ from app.schemas.base import ApiModel
 
 class UpdateModelRequest(ApiModel):
     model: str
+    api_key_id: str | None = None
 
 
 class UpdateCompactionRequest(ApiModel):

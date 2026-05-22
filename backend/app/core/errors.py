@@ -9,6 +9,8 @@ ERROR_STATUS = {
     "INVALID_CREDENTIALS": 401,
     "API_KEY_INVALID": 401,
     "MODEL_NOT_AVAILABLE": 400,
+    "KEY_GROUP_REQUIRED": 400,
+    "KEY_GROUP_CHOICE_REQUIRED": 409,
     "ATTACHMENT_NOT_READY": 409,
     "VISION_MODEL_REQUIRED": 400,
     "QUOTA_EXCEEDED": 429,
@@ -28,9 +30,13 @@ def api_error(
     message: str | None = None,
     status_code: int | None = None,
     headers: dict[str, str] | None = None,
+    extra: dict | None = None,
 ) -> HTTPException:
+    detail = {"code": code, "message": message or code}
+    if extra:
+        detail.update(extra)
     return HTTPException(
         status_code=status_code or ERROR_STATUS.get(code, 400),
-        detail={"code": code, "message": message or code},
+        detail=detail,
         headers=headers,
     )

@@ -19,7 +19,7 @@ from app.core.config import get_settings
 from app.models.entities import Attachment, AttachmentChunk
 from app.providers.openai_compatible import OpenAICompatibleProvider, estimate_tokens_text
 from app.security.crypto import decrypt_api_key
-from app.services.api_keys import get_active_api_key
+from app.services.api_keys import chat_api_key
 
 TEXT_EXTENSIONS = {
     ".txt",
@@ -210,7 +210,7 @@ def cosine_similarity(left: list[float], right: list[float]) -> float:
 
 
 async def active_plain_api_key(db: AsyncSession, user_id: str) -> str | None:
-    api_key = await get_active_api_key(db, user_id)
+    api_key = await chat_api_key(db, user_id)
     if not api_key:
         return None
     return decrypt_api_key(api_key.ciphertext)

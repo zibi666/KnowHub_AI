@@ -11,7 +11,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from app.core.config import get_settings
 from app.models.entities import Attachment, AttachmentChunk, ConversationCompaction, Message
 from app.providers.openai_compatible import OpenAICompatibleProvider, estimate_tokens_text
-from app.services.api_keys import get_active_api_key
+from app.services.api_keys import chat_api_key
 from app.security.crypto import decrypt_api_key
 from app.services.attachments import cosine_similarity
 
@@ -328,7 +328,7 @@ async def build_rag_attachment_context_blocks(
     if not usable_chunks:
         return []
 
-    api_key = await get_active_api_key(db, user_id)
+    api_key = await chat_api_key(db, user_id)
     if not api_key:
         return []
 

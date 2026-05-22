@@ -6,11 +6,13 @@ export function readCookie(name: string): string | null {
 export class ApiError extends Error {
   code: string
   status: number
+  detail: Record<string, any>
 
-  constructor(code: string, message: string, status: number) {
+  constructor(code: string, message: string, status: number, detail: Record<string, any> = {}) {
     super(localizeApiMessage(code, message))
     this.code = code
     this.status = status
+    this.detail = detail
   }
 }
 
@@ -20,6 +22,8 @@ const ERROR_MESSAGES: Record<string, string> = {
   INVALID_CREDENTIALS: '账号或密码错误，或登录已失效',
   API_KEY_INVALID: '模型 API Key 无效，请在设置中更新',
   MODEL_NOT_AVAILABLE: '当前模型不可用，请切换模型或联系管理员',
+  KEY_GROUP_REQUIRED: '当前模型需要对应分组下的 API Key',
+  KEY_GROUP_CHOICE_REQUIRED: '请选择用于当前模型的 API Key',
   ATTACHMENT_NOT_READY: '附件仍在解析中，请稍后再试',
   VISION_MODEL_REQUIRED: '当前模型不支持图片理解，请切换到支持视觉的模型',
   QUOTA_EXCEEDED: '已达到额度上限',
@@ -50,7 +54,7 @@ export async function apiFetch<T>(path: string, init: RequestInit = {}): Promise
   if (!response.ok) {
     const payload = await response.json().catch(() => null)
     const detail = payload?.detail || {}
-    throw new ApiError(detail.code || 'HTTP_ERROR', detail.message || response.statusText, response.status)
+    throw new ApiError(detail.code || 'HTTP_ERROR', detail.message || response.statusText, response.status, detail)
   }
   return response.json() as Promise<T>
 }
@@ -118,7 +122,7 @@ export async function streamJsonLines(
   if (!response.ok || !response.body) {
     const payload = await response.json().catch(() => null)
     const detail = payload?.detail || {}
-    throw new ApiError(detail.code || 'HTTP_ERROR', detail.message || response.statusText, response.status)
+    throw new ApiError(detail.code || 'HTTP_ERROR', detail.message || response.statusText, response.status, detail)
   }
   const reader = response.body.getReader()
   const decoder = new TextDecoder()

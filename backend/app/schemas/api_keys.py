@@ -7,6 +7,8 @@ class ApiKeyGroupOut(ApiModel):
     id: str
     name: str
     description: str | None = None
+    purpose: str = "none"
+    is_system: bool = False
 
 
 class ApiKeyOut(ApiModel):
@@ -44,3 +46,4 @@ class UpdateApiKeyRequest(ApiModel):
 class ApiKeyGroupRequest(ApiModel):
     name: str
     description: str | None = None
+    purpose: str = "none"

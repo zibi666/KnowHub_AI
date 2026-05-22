@@ -120,6 +120,8 @@ export interface ApiKeyGroup {
   id: string
   name: string
   description?: string
+  purpose: 'none' | 'chat' | 'image'
+  isSystem: boolean
 }
 
 export interface ApiKeyEntry {

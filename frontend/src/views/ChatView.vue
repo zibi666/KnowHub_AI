@@ -23,6 +23,20 @@ import { copyText } from '../utils/clipboard'
 
 type ThemeMode = 'dark' | 'light'
 type SettingsTab = 'appearance' | 'image' | 'api' | 'groups' | 'account'
+type GroupPurpose = 'none' | 'chat' | 'image'
+
+type ModelKeyChoice = {
+  model: string
+  purpose: GroupPurpose
+  groupName: string
+  candidateKeys: Array<{
+    id: string
+    name: string
+    groupName?: string | null
+    maskedKey?: string
+    last4?: string
+  }>
+}
 
 const bubbleOptions = [
   { value: 'blue', label: '蓝色', bg: '#075a9f', hover: '#0b65b8', shadow: 'rgba(0,78,150,0.25)' },
@@ -167,9 +181,12 @@ const settingsError = ref('')
 const settingsLoading = ref(false)
 const apiKeys = ref<ApiKeyEntry[]>([])
 const apiKeyGroups = ref<ApiKeyGroup[]>([])
-const selectedGroupId = ref('ungrouped')
+const selectedGroupId = ref('')
 const selectedGroupKeys = ref<ApiKeyEntry[]>([])
 const groupKeysLoading = ref(false)
+const modelKeyChoice = ref<ModelKeyChoice | null>(null)
+const modelKeyChoiceSaving = ref(false)
+const previousSelectedModel = ref(DEFAULT_MODEL)
 const deletingConversationId = ref<string | null>(null)
 const deleteConfirmOpen = ref(false)
 const conversationPendingDelete = ref<Conversation | null>(null)
@@ -180,14 +197,23 @@ const renameDraft = ref('')
 const renameError = ref('')
 const selectedApiKeyGroup = computed(() => apiKeyGroups.value.find((group) => group.id === selectedGroupId.value) || null)
 const modelOptions = computed(() => models.value.map((model) => ({ value: model, label: model })))
-const groupOptions = computed(() => [
-  { value: '', label: '未分组' },
-  ...apiKeyGroups.value.map((group) => ({ value: group.id, label: group.name, hint: group.description || undefined }))
-])
+const groupOptions = computed(() =>
+  apiKeyGroups.value.map((group) => ({
+    value: group.id,
+    label: group.name,
+    hint: `${groupPurposeLabel(group.purpose)}${group.description ? ` · ${group.description}` : ''}`
+  }))
+)
+const groupPurposeOptions = [
+  { value: 'none', label: '仅管理' },
+  { value: 'chat', label: '聊天模型' },
+  { value: 'image', label: '图像模型' }
+]
+const defaultChatGroup = computed(() => apiKeyGroups.value.find((group) => group.purpose === 'chat') || apiKeyGroups.value[0] || null)
 const keyDrafts = ref<Record<string, { name: string; groupId: string }>>({})
-const groupDrafts = ref<Record<string, { name: string; description: string }>>({})
+const groupDrafts = ref<Record<string, { name: string; description: string; purpose: GroupPurpose }>>({})
 const newApiKey = ref({ name: '默认密钥', apiKey: '', groupId: '', makeActive: true })
-const newGroup = ref({ name: '', description: '' })
+const newGroup = ref<{ name: string; description: string; purpose: GroupPurpose }>({ name: '', description: '', purpose: 'none' })
 const profileUsername = ref('')
 const profilePassword = ref('')
 const currentPassword = ref('')
@@ -254,9 +280,8 @@ function selectedModelSupportsVision() {
 }
 
 function selectedModelIsImageGeneration() {
-  return ['image-2', 'image-1.5', 'image-1', 'gpt-image-2', 'gpt-image-1.5', 'gpt-image-1'].includes(
-    (selectedModel.value || '').toLowerCase()
-  )
+  const model = (selectedModel.value || '').toLowerCase()
+  return model.startsWith('gpt-image-') || model.startsWith('image-')
 }
 
 function messageIsImageGeneration(message: Message) {
@@ -791,6 +816,12 @@ function setApiKeyDraftGroup(key: ApiKeyEntry, groupId: string | number) {
   keyDraftFor(key).groupId = String(groupId)
 }
 
+function groupPurposeLabel(purpose?: string) {
+  if (purpose === 'chat') return '聊天模型'
+  if (purpose === 'image') return '图像模型'
+  return '仅管理'
+}
+
 function formatSearchDate(value: string) {
   const timestamp = parseApiDateMs(value)
   if (timestamp === undefined) return ''
@@ -875,21 +906,21 @@ function resetSettingsMessages() {
 
 function keyDraftFor(key: ApiKeyEntry) {
   if (!keyDrafts.value[key.id]) {
-    keyDrafts.value[key.id] = { name: key.name, groupId: key.groupId || '' }
+    keyDrafts.value[key.id] = { name: key.name, groupId: key.groupId || defaultChatGroup.value?.id || '' }
   }
   return keyDrafts.value[key.id]
 }
 
 function groupDraftFor(group: ApiKeyGroup) {
   if (!groupDrafts.value[group.id]) {
-    groupDrafts.value[group.id] = { name: group.name, description: group.description || '' }
+    groupDrafts.value[group.id] = { name: group.name, description: group.description || '', purpose: group.purpose || 'none' }
   }
   return groupDrafts.value[group.id]
 }
 
 async function loadGroupKeys(groupId = selectedGroupId.value) {
-  if (auth.user?.role !== 'admin') return
-  selectedGroupId.value = groupId || 'ungrouped'
+  if (auth.user?.role !== 'admin' || !apiKeyGroups.value.length) return
+  selectedGroupId.value = groupId && apiKeyGroups.value.some((group) => group.id === groupId) ? groupId : apiKeyGroups.value[0].id
   groupKeysLoading.value = true
   try {
     selectedGroupKeys.value = await apiFetch<ApiKeyEntry[]>(
@@ -909,13 +940,18 @@ async function loadApiSettings() {
     const [keys, groups] = await Promise.all([apiFetch<ApiKeyEntry[]>('/api-keys'), apiFetch<ApiKeyGroup[]>('/api-key-groups')])
     apiKeys.value = keys
     apiKeyGroups.value = groups
-    if (!selectedGroupId.value) selectedGroupId.value = 'ungrouped'
-    if (selectedGroupId.value !== 'ungrouped' && !groups.some((group) => group.id === selectedGroupId.value)) {
-      selectedGroupId.value = 'ungrouped'
+    if (!selectedGroupId.value || !groups.some((group) => group.id === selectedGroupId.value)) {
+      selectedGroupId.value = groups[0]?.id || ''
     }
-    keyDrafts.value = Object.fromEntries(keys.map((key) => [key.id, { name: key.name, groupId: key.groupId || '' }]))
-    groupDrafts.value = Object.fromEntries(groups.map((group) => [group.id, { name: group.name, description: group.description || '' }]))
-    if (auth.user?.role === 'admin') await loadGroupKeys(selectedGroupId.value)
+    const chatGroupId = groups.find((group) => group.purpose === 'chat')?.id || groups[0]?.id || ''
+    if (!newApiKey.value.groupId || !groups.some((group) => group.id === newApiKey.value.groupId)) {
+      newApiKey.value.groupId = chatGroupId
+    }
+    keyDrafts.value = Object.fromEntries(keys.map((key) => [key.id, { name: key.name, groupId: key.groupId || chatGroupId }]))
+    groupDrafts.value = Object.fromEntries(
+      groups.map((group) => [group.id, { name: group.name, description: group.description || '', purpose: group.purpose || 'none' }])
+    )
+    if (auth.user?.role === 'admin' && selectedGroupId.value) await loadGroupKeys(selectedGroupId.value)
   } catch (err) {
     settingsError.value = err instanceof Error ? err.message : '加载 API 管理失败'
   } finally {
@@ -1008,7 +1044,7 @@ async function selectSettingsTab(tab: SettingsTab) {
   settingsTab.value = tab
   resetSettingsMessages()
   if ((tab === 'api' || tab === 'groups') && !apiKeys.value.length && !apiKeyGroups.value.length) await loadApiSettings()
-  if (tab === 'groups') await loadGroupKeys(selectedGroupId.value)
+  if (tab === 'groups' && apiKeyGroups.value.length) await loadGroupKeys(selectedGroupId.value)
   if (tab === 'image') await loadImageSettings()
 }
 
@@ -1020,11 +1056,11 @@ async function createApiKey() {
       body: JSON.stringify({
         name: newApiKey.value.name,
         apiKey: newApiKey.value.apiKey,
-        groupId: newApiKey.value.groupId || null,
+        groupId: newApiKey.value.groupId || defaultChatGroup.value?.id || null,
         makeActive: newApiKey.value.makeActive
       })
     })
-    newApiKey.value = { name: '默认密钥', apiKey: '', groupId: '', makeActive: true }
+    newApiKey.value = { name: '默认密钥', apiKey: '', groupId: defaultChatGroup.value?.id || '', makeActive: true }
     settingsNotice.value = '密钥已添加'
     await loadApiSettings()
     await auth.loadMe()
@@ -1040,7 +1076,7 @@ async function saveApiKey(key: ApiKeyEntry) {
   try {
     await apiFetch<ApiKeyEntry>(`/api-keys/${key.id}`, {
       method: 'PATCH',
-      body: JSON.stringify({ name: draft.name, groupId: draft.groupId || null })
+      body: JSON.stringify({ name: draft.name, groupId: draft.groupId || defaultChatGroup.value?.id || null })
     })
     settingsNotice.value = '密钥信息已保存'
     await loadApiSettings()
@@ -1097,7 +1133,7 @@ async function createApiKeyGroup() {
       body: JSON.stringify(newGroup.value)
     })
     selectedGroupId.value = created.id
-    newGroup.value = { name: '', description: '' }
+    newGroup.value = { name: '', description: '', purpose: 'none' }
     settingsNotice.value = '分组已创建'
     await loadApiSettings()
   } catch (err) {
@@ -1121,14 +1157,18 @@ async function saveApiKeyGroup(group: ApiKeyGroup) {
 
 async function deleteApiKeyGroup(group: ApiKeyGroup) {
   resetSettingsMessages()
-  if (!window.confirm(`删除分组「${group.name}」？该分组下的密钥会变为未分组。`)) return
+  if (group.isSystem) {
+    settingsError.value = '系统默认分组不能删除'
+    return
+  }
+  if (!window.confirm(`删除分组「${group.name}」？该分组下的密钥会自动迁回 gpt-chat 或 gpt-image。`)) return
   try {
     await apiFetch(`/admin/api-key-groups/${group.id}`, { method: 'DELETE' })
     if (selectedGroupId.value === group.id) {
-      selectedGroupId.value = 'ungrouped'
+      selectedGroupId.value = apiKeyGroups.value.find((item) => item.id !== group.id)?.id || ''
       selectedGroupKeys.value = []
     }
-    settingsNotice.value = '分组已删除，原分组下的密钥已变为未分组'
+    settingsNotice.value = '分组已删除，原分组密钥已迁回默认分组'
     await loadApiSettings()
   } catch (err) {
     settingsError.value = err instanceof Error ? err.message : '删除分组失败'
@@ -1742,6 +1782,7 @@ async function loadModels() {
     const result = await apiFetch<{ models: string[]; selectedModel?: string }>('/models')
     models.value = result.models
     selectedModel.value = preferredModel(result.models, result.selectedModel)
+    previousSelectedModel.value = selectedModel.value
   } catch (err) {
     models.value = [DEFAULT_MODEL]
     selectedModel.value = DEFAULT_MODEL
@@ -1753,22 +1794,63 @@ async function loadModels() {
   }
 }
 
-async function saveSelectedModel() {
+function modelKeyChoiceFromError(err: ApiError, model: string): ModelKeyChoice {
+  return {
+    model,
+    purpose: (err.detail?.purpose || 'none') as GroupPurpose,
+    groupName: String(err.detail?.groupName || ''),
+    candidateKeys: Array.isArray(err.detail?.candidateKeys) ? err.detail.candidateKeys : []
+  }
+}
+
+function closeModelKeyChoice() {
+  modelKeyChoice.value = null
+  modelKeyChoiceSaving.value = false
+  selectedModel.value = previousSelectedModel.value
+}
+
+async function saveSelectedModel(apiKeyId?: string) {
   if (!selectedModel.value) return
   try {
     await apiFetch('/settings/model', {
       method: 'PATCH',
-      body: JSON.stringify({ model: selectedModel.value })
+      body: JSON.stringify({ model: selectedModel.value, apiKeyId })
     })
+    previousSelectedModel.value = selectedModel.value
+    modelKeyChoice.value = null
+    modelKeyChoiceSaving.value = false
     await loadContextStats()
   } catch (err) {
-    if (err instanceof ApiError) error.value = err.message
+    if (err instanceof ApiError && err.code === 'KEY_GROUP_CHOICE_REQUIRED') {
+      modelKeyChoice.value = modelKeyChoiceFromError(err, selectedModel.value)
+      error.value = ''
+      return
+    }
+    if (err instanceof ApiError && err.code === 'KEY_GROUP_REQUIRED') {
+      const groupName = String(err.detail?.groupName || '对应')
+      error.value = `当前模型需要 ${groupName} 分组下的密钥，请先在 API 管理中添加。`
+      selectedModel.value = previousSelectedModel.value
+      await openSettings('api')
+      return
+    }
+    if (err instanceof ApiError) {
+      error.value = err.message
+      selectedModel.value = previousSelectedModel.value
+    }
   }
 }
 
 async function chooseModel(model: string) {
   selectedModel.value = model
   await saveSelectedModel()
+}
+
+async function chooseModelKey(keyId: string) {
+  if (!modelKeyChoice.value) return
+  modelKeyChoiceSaving.value = true
+  selectedModel.value = modelKeyChoice.value.model
+  await saveSelectedModel(keyId)
+  if (modelKeyChoice.value) modelKeyChoiceSaving.value = false
 }
 
 async function openConversation(id: string, focusMessageId?: string | null) {
@@ -2835,7 +2917,7 @@ onUnmounted(() => {
                         @update:model-value="setApiKeyDraftGroup(key, $event)"
                       />
                       <div class="settings-key-meta">
-                        <span>{{ key.groupName || '未分组' }}</span>
+                        <span>{{ key.groupName || 'gpt-chat' }}</span>
                         <span class="key-mask">{{ key.maskedKey }}</span>
                         <strong v-if="key.isActive">当前使用</strong>
                       </div>
@@ -2863,19 +2945,18 @@ onUnmounted(() => {
                       <h3>新建分组</h3>
                       <input v-model="newGroup.name" class="settings-input" placeholder="分组名称" />
                       <input v-model="newGroup.description" class="settings-input" placeholder="备注，可选" />
+                      <AppSelect
+                        v-model="newGroup.purpose"
+                        class="settings-select"
+                        button-class="settings-select-button"
+                        menu-class="settings-select-menu"
+                        option-class="settings-select-option"
+                        :options="groupPurposeOptions"
+                      />
                       <button class="settings-primary" type="submit">创建分组</button>
                     </form>
 
                     <div class="settings-group-list">
-                      <button
-                        class="settings-group-list-item"
-                        :class="{ active: selectedGroupId === 'ungrouped' }"
-                        type="button"
-                        @click="loadGroupKeys('ungrouped')"
-                      >
-                        <span>未分组</span>
-                        <small>系统默认</small>
-                      </button>
                       <button
                         v-for="group in apiKeyGroups"
                         :key="group.id"
@@ -2885,7 +2966,7 @@ onUnmounted(() => {
                         @click="loadGroupKeys(group.id)"
                       >
                         <span>{{ group.name }}</span>
-                        <small>{{ group.description || '无备注' }}</small>
+                        <small>{{ groupPurposeLabel(group.purpose) }}{{ group.isSystem ? ' · 默认' : '' }}</small>
                       </button>
                     </div>
                   </aside>
@@ -2893,7 +2974,7 @@ onUnmounted(() => {
                   <section class="settings-group-detail">
                     <div class="settings-card-header">
                       <div>
-                        <h3>{{ selectedGroupId === 'ungrouped' ? '未分组' : selectedApiKeyGroup?.name || '分组详情' }}</h3>
+                        <h3>{{ selectedApiKeyGroup?.name || '分组详情' }}</h3>
                         <p>当前分组下的密钥和所属用户。</p>
                       </div>
                       <button class="settings-secondary" :disabled="groupKeysLoading" @click="loadGroupKeys(selectedGroupId)">刷新密钥</button>
@@ -2904,14 +2985,25 @@ onUnmounted(() => {
                         v-model="groupDraftFor(selectedApiKeyGroup).name"
                         class="settings-input"
                         placeholder="分组名称"
+                        :disabled="selectedApiKeyGroup.isSystem"
                       />
                       <input
                         v-model="groupDraftFor(selectedApiKeyGroup).description"
                         class="settings-input"
                         placeholder="备注"
                       />
+                      <AppSelect
+                        :model-value="selectedApiKeyGroup.isSystem ? selectedApiKeyGroup.purpose : groupDraftFor(selectedApiKeyGroup).purpose"
+                        class="settings-select"
+                        button-class="settings-select-button"
+                        menu-class="settings-select-menu"
+                        option-class="settings-select-option"
+                        :options="groupPurposeOptions"
+                        :disabled="selectedApiKeyGroup.isSystem"
+                        @update:model-value="groupDraftFor(selectedApiKeyGroup).purpose = String($event) as GroupPurpose"
+                      />
                       <button class="settings-secondary" @click="saveApiKeyGroup(selectedApiKeyGroup)">保存</button>
-                      <button class="settings-danger" @click="deleteApiKeyGroup(selectedApiKeyGroup)">删除</button>
+                      <button v-if="!selectedApiKeyGroup.isSystem" class="settings-danger" @click="deleteApiKeyGroup(selectedApiKeyGroup)">删除</button>
                     </div>
 
                     <div class="settings-group-key-list">
@@ -2929,7 +3021,7 @@ onUnmounted(() => {
                           <span>{{ key.username || key.userId || '未知用户' }}</span>
                         </div>
                         <div class="settings-admin-key-meta">
-                          <span>{{ key.groupName || '未分组' }}</span>
+                          <span>{{ key.groupName || 'gpt-chat' }}</span>
                           <span class="key-mask">{{ key.maskedKey }}</span>
                           <strong v-if="key.isActive">用户当前使用</strong>
                           <button class="settings-inline-action" @click="copyApiKeySecret(key, key.userId)">复制</button>
@@ -3163,6 +3255,37 @@ onUnmounted(() => {
             <button type="submit" class="rename-primary-button" :disabled="renameSaving || !renameDraft.trim()">保存</button>
           </div>
         </form>
+      </div>
+    </Transition>
+
+    <Transition name="dialog-pop">
+      <div v-if="modelKeyChoice" class="confirm-modal-backdrop" @click.self="closeModelKeyChoice">
+        <section class="confirm-modal model-key-modal" role="dialog" aria-modal="true" aria-label="选择模型密钥">
+          <div class="confirm-modal-header">
+            <h2>选择密钥</h2>
+            <button type="button" class="confirm-modal-close" title="关闭" aria-label="关闭" @click="closeModelKeyChoice">
+              <X :size="18" />
+            </button>
+          </div>
+          <p>{{ modelKeyChoice.model }} 需要使用 {{ modelKeyChoice.groupName || groupPurposeLabel(modelKeyChoice.purpose) }} 分组下的密钥。</p>
+          <div class="model-key-choice-list">
+            <button
+              v-for="key in modelKeyChoice.candidateKeys"
+              :key="key.id"
+              type="button"
+              class="model-key-choice-row"
+              :disabled="modelKeyChoiceSaving"
+              @click="chooseModelKey(key.id)"
+            >
+              <strong>{{ key.name }}</strong>
+              <span>{{ key.groupName || modelKeyChoice.groupName }}</span>
+              <small>{{ key.maskedKey || (key.last4 ? `****${key.last4}` : '') }}</small>
+            </button>
+          </div>
+          <div class="confirm-modal-actions">
+            <button type="button" class="confirm-secondary-button" :disabled="modelKeyChoiceSaving" @click="closeModelKeyChoice">取消</button>
+          </div>
+        </section>
       </div>
     </Transition>
 

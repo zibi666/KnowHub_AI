@@ -59,6 +59,12 @@ async def ensure_lightweight_migrations(conn) -> None:
         result = await conn.execute(text("SHOW COLUMNS FROM messages LIKE 'first_token_seconds'"))
         if result.first() is None:
             await conn.execute(text("ALTER TABLE messages ADD COLUMN first_token_seconds INT NULL"))
+        result = await conn.execute(text("SHOW COLUMNS FROM api_key_groups LIKE 'purpose'"))
+        if result.first() is None:
+            await conn.execute(text("ALTER TABLE api_key_groups ADD COLUMN purpose VARCHAR(20) NOT NULL DEFAULT 'none'"))
+        result = await conn.execute(text("SHOW COLUMNS FROM api_key_groups LIKE 'is_system'"))
+        if result.first() is None:
+            await conn.execute(text("ALTER TABLE api_key_groups ADD COLUMN is_system BOOLEAN NOT NULL DEFAULT FALSE"))
         return
 
     if settings.database_url.startswith("sqlite"):
@@ -78,3 +84,9 @@ async def ensure_lightweight_migrations(conn) -> None:
         existing_messages = {row[1] for row in result.fetchall()}
         if "first_token_seconds" not in existing_messages:
             await conn.execute(text("ALTER TABLE messages ADD COLUMN first_token_seconds INTEGER"))
+        result = await conn.execute(text("PRAGMA table_info(api_key_groups)"))
+        existing_groups = {row[1] for row in result.fetchall()}
+        if "purpose" not in existing_groups:
+            await conn.execute(text("ALTER TABLE api_key_groups ADD COLUMN purpose VARCHAR(20) NOT NULL DEFAULT 'none'"))
+        if "is_system" not in existing_groups:
+            await conn.execute(text("ALTER TABLE api_key_groups ADD COLUMN is_system BOOLEAN NOT NULL DEFAULT 0"))
