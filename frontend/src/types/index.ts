@@ -137,3 +137,17 @@ export interface ApiKeyEntry {
   availableModels: string[]
   probedAt?: string | null
 }
+
+export interface UserQuota {
+  userId: string
+  maxStorageBytes: number
+  maxImageMb: number
+  maxDocumentMb: number
+  uploadRateLimitPerHour: number
+  dailyDownloadLimit: number
+  allowUpload: boolean
+  allowCodeUpload: boolean
+  modelWhitelistJson?: string[] | null
+  defaultModel?: string | null
+  autoCompactionEnabled: boolean
+}

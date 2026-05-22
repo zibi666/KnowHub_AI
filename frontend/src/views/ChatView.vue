@@ -47,6 +47,9 @@ const WELCOME_STORAGE_KEY = 'private-gpt-welcome-message'
 const WELCOME_SIZE_STORAGE_KEY = 'private-gpt-welcome-font-size'
 const CURRENT_CONVERSATION_STORAGE_KEY = 'private-gpt-current-conversation'
 const IMAGE_FINALIZATION_MIN_MS = 800
+const ATTACHMENT_IMAGE_MAX_EDGE = 1920
+const ATTACHMENT_IMAGE_QUALITY = 0.82
+const ATTACHMENT_IMAGE_MIN_COMPRESS_BYTES = 450 * 1024
 
 type ReasoningEffort = 'low' | 'medium' | 'high' | 'xhigh'
 const reasoningOptions: Array<{ value: ReasoningEffort; label: string; hint: string }> = [
@@ -463,6 +466,40 @@ function attachmentKindClass(item: Attachment | { filename: string; mimeSniffed?
 
 function attachmentDownloadUrl(id: string) {
   return `/api/attachments/${id}/download`
+}
+
+function compressedImageName(filename: string) {
+  const base = filename.replace(/\.[^.]+$/, '') || 'image'
+  return `${base}-compressed.jpg`
+}
+
+function canvasToBlob(canvas: HTMLCanvasElement, type: string, quality: number): Promise<Blob | null> {
+  return new Promise((resolve) => canvas.toBlob(resolve, type, quality))
+}
+
+async function compressImageFile(file: File): Promise<File> {
+  if (!file.type.startsWith('image/') || file.type === 'image/gif' || file.type === 'image/svg+xml') return file
+  if (file.size < ATTACHMENT_IMAGE_MIN_COMPRESS_BYTES) return file
+
+  const bitmap = await createImageBitmap(file)
+  try {
+    const scale = Math.min(1, ATTACHMENT_IMAGE_MAX_EDGE / Math.max(bitmap.width, bitmap.height))
+    const width = Math.max(1, Math.round(bitmap.width * scale))
+    const height = Math.max(1, Math.round(bitmap.height * scale))
+    const canvas = document.createElement('canvas')
+    canvas.width = width
+    canvas.height = height
+    const context = canvas.getContext('2d')
+    if (!context) return file
+    context.drawImage(bitmap, 0, 0, width, height)
+    const blob = await canvasToBlob(canvas, 'image/jpeg', ATTACHMENT_IMAGE_QUALITY)
+    if (!blob || blob.size >= file.size) return file
+    return new File([blob], compressedImageName(file.name), { type: 'image/jpeg', lastModified: file.lastModified })
+  } catch {
+    return file
+  } finally {
+    bitmap.close()
+  }
 }
 
 const userInitial = computed(() => auth.user?.username?.slice(0, 1).toUpperCase() || 'U')
@@ -1893,14 +1930,15 @@ async function loadContextStats() {
 async function uploadAttachmentFile(file: File) {
   uploadingAttachmentNames.value.push(file.name)
   try {
+    const uploadFile = await compressImageFile(file)
     const presign = await apiFetch<{ uploadId: string; uploadUrl: string; method: string }>('/attachments/presign', {
       method: 'POST',
-      body: JSON.stringify({ filename: file.name, contentType: file.type, sizeBytes: file.size })
+      body: JSON.stringify({ filename: uploadFile.name, contentType: uploadFile.type, sizeBytes: uploadFile.size })
     })
     const csrf = readCookie('csrf_token')
     const uploadResponse = await fetch(presign.uploadUrl, {
       method: presign.method,
-      body: file,
+      body: uploadFile,
       credentials: 'include',
       headers: csrf ? { 'X-CSRF-Token': csrf } : undefined
     })
@@ -1909,7 +1947,7 @@ async function uploadAttachmentFile(file: File) {
     }
     const attachment = await apiFetch<Attachment>('/attachments/commit', {
       method: 'POST',
-      body: JSON.stringify({ uploadId: presign.uploadId, filename: file.name, contentType: file.type })
+      body: JSON.stringify({ uploadId: presign.uploadId, filename: uploadFile.name, contentType: uploadFile.type })
     })
     pendingAttachments.value.push(attachment)
   } catch (err) {

@@ -151,7 +151,15 @@ async def first_login(
 
     await create_api_key_for_user(db, user.id, payload.api_key, name="默认密钥", make_active=True)
     if not await db.get(UserQuota, user.id):
-        db.add(UserQuota(user_id=user.id, max_storage_bytes=settings.default_storage_bytes))
+        db.add(
+            UserQuota(
+                user_id=user.id,
+                max_storage_bytes=settings.default_storage_bytes,
+                max_image_mb=settings.max_image_mb,
+                max_document_mb=settings.max_document_mb,
+                upload_rate_limit_per_hour=settings.upload_rate_limit_per_hour,
+            )
+        )
     await write_audit(db, "api_key.bound", actor_user_id=user.id, target_type="user", target_id=user.id)
     csrf = await set_session_cookies(response, user, False, settings)
     await db.commit()

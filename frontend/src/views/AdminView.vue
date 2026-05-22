@@ -3,7 +3,7 @@ import { computed, onMounted, ref } from 'vue'
 import { useRouter } from 'vue-router'
 import { apiFetch } from '../api/client'
 import AppSelect from '../components/AppSelect.vue'
-import type { ApiKeyEntry, ApiKeyGroup, User } from '../types'
+import type { ApiKeyEntry, ApiKeyGroup, User, UserQuota } from '../types'
 import { copyText } from '../utils/clipboard'
 
 const router = useRouter()
@@ -18,6 +18,7 @@ const cleanupConfirming = ref(false)
 const reasoningModels = ref('')
 const notice = ref('')
 const userDrafts = ref<Record<string, { username: string; role: string; status: string; password: string }>>({})
+const quotaDrafts = ref<Record<string, { uploadRateLimitPerHour: number }>>({})
 const groups = ref<ApiKeyGroup[]>([])
 const selectedKeyUser = ref<User | null>(null)
 const selectedUserKeys = ref<ApiKeyEntry[]>([])
@@ -82,6 +83,13 @@ function keyDraftFor(key: ApiKeyEntry) {
   return keyDrafts.value[key.id]
 }
 
+function quotaDraftFor(user: User) {
+  if (!quotaDrafts.value[user.id]) {
+    quotaDrafts.value[user.id] = { uploadRateLimitPerHour: 0 }
+  }
+  return quotaDrafts.value[user.id]
+}
+
 function setCleanupKind(value: string | number) {
   cleanupKind.value = String(value)
 }
@@ -115,6 +123,7 @@ async function load() {
       }
     ])
   )
+  await loadQuotaDrafts()
   analytics.value = await apiFetch('/admin/analytics')
   deadLetters.value = await apiFetch<any[]>('/admin/dead-letters')
   const reasoning = await apiFetch<{ models: string[] }>('/admin/settings/reasoning-models')
@@ -125,6 +134,16 @@ async function load() {
     selectedKeyUser.value = refreshed || null
     if (selectedKeyUser.value) await loadSelectedUserKeys(selectedKeyUser.value)
   }
+}
+
+async function loadQuotaDrafts() {
+  const entries = await Promise.all(
+    users.value.map(async (user) => {
+      const quota = await apiFetch<UserQuota>(`/admin/users/${user.id}/quotas`)
+      return [user.id, { uploadRateLimitPerHour: quota.uploadRateLimitPerHour }] as const
+    })
+  )
+  quotaDrafts.value = Object.fromEntries(entries)
 }
 
 async function createUser() {
@@ -147,6 +166,7 @@ async function updateUser(user: User, status: string) {
 
 async function saveUser(user: User) {
   const draft = userDrafts.value[user.id]
+  const quotaDraft = quotaDraftFor(user)
   if (!draft) return
   await apiFetch(`/admin/users/${user.id}`, {
     method: 'PATCH',
@@ -155,6 +175,12 @@ async function saveUser(user: User) {
       role: draft.role,
       status: draft.status,
       password: draft.password || undefined
+    })
+  })
+  await apiFetch(`/admin/users/${user.id}/quotas`, {
+    method: 'PATCH',
+    body: JSON.stringify({
+      uploadRateLimitPerHour: Math.max(0, Number(quotaDraft.uploadRateLimitPerHour) || 0)
     })
   })
   notice.value = '用户信息已保存'
@@ -304,7 +330,7 @@ onMounted(load)
       <div class="app-card rounded-lg overflow-visible">
         <table class="w-full text-sm">
           <thead class="app-table-head text-left">
-            <tr><th class="p-3">用户名</th><th class="p-3">角色</th><th class="p-3">状态</th><th class="p-3">需改密</th><th class="p-3">密钥</th><th class="p-3">操作</th></tr>
+            <tr><th class="p-3">用户名</th><th class="p-3">角色</th><th class="p-3">状态</th><th class="p-3">上传限流/小时</th><th class="p-3">需改密</th><th class="p-3">密钥</th><th class="p-3">操作</th></tr>
           </thead>
           <tbody>
             <tr v-for="user in users" :key="user.id" class="app-table-row">
@@ -326,6 +352,16 @@ onMounted(load)
                   :options="userStatusOptions"
                   @update:model-value="setUserStatus(user, $event)"
                 />
+              </td>
+              <td class="p-3">
+                <input
+                  v-model.number="quotaDraftFor(user).uploadRateLimitPerHour"
+                  class="app-input w-28 rounded-md px-2 py-1"
+                  min="0"
+                  type="number"
+                  title="0 表示不限流"
+                />
+                <div class="app-muted mt-1 text-[11px]">0 为不限</div>
               </td>
               <td class="p-3">{{ user.mustChangePassword ? '是' : '否' }}</td>
               <td class="p-3">

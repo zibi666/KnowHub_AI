@@ -62,10 +62,11 @@ class Settings(BaseSettings):
 
     max_image_mb: int = 5
     max_document_mb: int = 10
+    upload_rate_limit_per_hour: int = 0
     vision_model_patterns: str = "gpt-4o,gpt-4.1,gpt-5,o3,o4,vision,vl,gemini,claude"
     vision_image_max_edge: int = 1024
     vision_image_jpeg_quality: int = 82
-    vision_image_max_count: int = 4
+    vision_image_max_count: int = 8
     embedding_model: str = "text-embedding-3-small"
     embedding_max_chars_per_chunk: int = 1800
     embedding_chunk_overlap_chars: int = 200

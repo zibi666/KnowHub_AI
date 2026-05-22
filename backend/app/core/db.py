@@ -53,6 +53,9 @@ async def ensure_lightweight_migrations(conn) -> None:
         result = await conn.execute(text("SHOW COLUMNS FROM user_quotas LIKE 'image_settings_json'"))
         if result.first() is None:
             await conn.execute(text("ALTER TABLE user_quotas ADD COLUMN image_settings_json JSON NULL"))
+        result = await conn.execute(text("SHOW COLUMNS FROM user_quotas LIKE 'upload_rate_limit_per_hour'"))
+        if result.first() is None:
+            await conn.execute(text("ALTER TABLE user_quotas ADD COLUMN upload_rate_limit_per_hour INT NOT NULL DEFAULT 0"))
         result = await conn.execute(text("SHOW COLUMNS FROM messages LIKE 'first_token_seconds'"))
         if result.first() is None:
             await conn.execute(text("ALTER TABLE messages ADD COLUMN first_token_seconds INT NULL"))
@@ -69,6 +72,8 @@ async def ensure_lightweight_migrations(conn) -> None:
         existing_quota = {row[1] for row in result.fetchall()}
         if "image_settings_json" not in existing_quota:
             await conn.execute(text("ALTER TABLE user_quotas ADD COLUMN image_settings_json JSON"))
+        if "upload_rate_limit_per_hour" not in existing_quota:
+            await conn.execute(text("ALTER TABLE user_quotas ADD COLUMN upload_rate_limit_per_hour INTEGER NOT NULL DEFAULT 0"))
         result = await conn.execute(text("PRAGMA table_info(messages)"))
         existing_messages = {row[1] for row in result.fetchall()}
         if "first_token_seconds" not in existing_messages:

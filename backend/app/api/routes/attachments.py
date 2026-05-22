@@ -45,11 +45,12 @@ async def presign(
     user: User = Depends(get_current_user),
     db: AsyncSession = Depends(get_session),
 ) -> PresignResponse:
-    await check_fixed_window(f"upload:{user.id}", limit=10, window_seconds=3600)
     settings = get_settings()
     quota = await db.get(UserQuota, user.id)
     if not quota or not quota.allow_upload:
         raise api_error("FORBIDDEN", "当前用户未开启上传权限")
+    if quota.upload_rate_limit_per_hour > 0:
+        await check_fixed_window(f"upload:{user.id}", limit=quota.upload_rate_limit_per_hour, window_seconds=3600)
     suffix = Path(payload.filename).suffix.lower()
     if suffix in CODE_EXTENSIONS and not quota.allow_code_upload:
         raise api_error("FORBIDDEN", "当前用户未开启代码文件上传权限")

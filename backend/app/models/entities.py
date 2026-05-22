@@ -92,6 +92,7 @@ class UserQuota(Base, TimestampMixin):
     max_storage_bytes: Mapped[int] = mapped_column(BigInteger, nullable=False)
     max_image_mb: Mapped[int] = mapped_column(Integer, default=5, nullable=False)
     max_document_mb: Mapped[int] = mapped_column(Integer, default=10, nullable=False)
+    upload_rate_limit_per_hour: Mapped[int] = mapped_column(Integer, default=0, nullable=False)
     daily_download_limit: Mapped[int] = mapped_column(Integer, default=20, nullable=False)
     daily_token_limit: Mapped[int] = mapped_column(Integer, default=200000, nullable=False)
     monthly_token_limit: Mapped[int] = mapped_column(Integer, default=2000000, nullable=False)
