@@ -2893,19 +2893,19 @@ body,
 
 .message-user-actions {
   display: inline-flex;
-  min-height: 1.75rem;
+  min-height: 2.1rem;
   align-items: center;
   justify-content: flex-end;
-  opacity: 0;
-  pointer-events: none;
-  transform: translateY(-2px);
-  transition: opacity 150ms ease, transform 150ms ease;
-}
-
-.message-user-content:hover .message-user-actions {
+  padding-right: 0.08rem;
   opacity: 1;
   pointer-events: auto;
   transform: translateY(0);
+  transition: opacity 150ms ease, transform 150ms ease;
+}
+
+.message-user-content:hover .message-user-actions,
+.message-user-content:focus-within .message-user-actions {
+  opacity: 1;
 }
 
 .message-assistant-actions {
@@ -2949,6 +2949,20 @@ body,
 
 .message-copy-button.is-failed {
   color: #ff6b6b;
+}
+
+.message-user-actions .message-copy-button {
+  width: 2.1rem;
+  height: 2.1rem;
+  background: color-mix(in srgb, var(--text) 7%, transparent);
+  color: color-mix(in srgb, var(--text) 70%, transparent);
+  box-shadow: inset 0 0 0 1px color-mix(in srgb, var(--text) 9%, transparent);
+}
+
+.message-user-actions .message-copy-button:hover,
+.message-user-actions .message-copy-button:focus-visible {
+  background: color-mix(in srgb, var(--text) 12%, transparent);
+  color: var(--text);
 }
 
 .message-assistant-copy-button {

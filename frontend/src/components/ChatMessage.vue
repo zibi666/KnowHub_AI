@@ -24,7 +24,6 @@ let userMessageResizeObserver: ResizeObserver | null = null
 const isStreaming = computed(() => props.message.status === 'streaming')
 const isUserMessage = computed(() => props.message.role === 'user')
 const isLiveDraft = computed(() => isStreaming.value && props.message.id.startsWith('stream-'))
-const shouldRenderStreamingPlainText = computed(() => props.message.role === 'assistant' && isStreaming.value && props.message.content.trim())
 const showThinkingPanel = computed(
   () => props.message.role === 'assistant' && isStreaming.value && !props.message.content.trim() && !props.message.imageProgress
 )
@@ -453,8 +452,7 @@ onUnmounted(() => {
               <ChevronUp v-else :size="16" />
             </button>
             <div class="message-collapsible-content">
-              <div v-if="shouldRenderStreamingPlainText" class="streaming-plain-message">{{ message.content }}</div>
-              <MarkdownMessage v-else :content="message.content" />
+              <MarkdownMessage :content="message.content" :live="message.status === 'streaming'" />
               <span v-if="message.status === 'streaming'" class="typing-cursor" />
             </div>
           </div>
