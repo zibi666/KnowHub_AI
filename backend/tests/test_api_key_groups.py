@@ -7,6 +7,8 @@ from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine
 from app.core.db import Base
 from app.models.entities import ApiKeyGroup, User, UserApiKey, UserQuota
 from app.security.crypto import encrypt_api_key
+from app.schemas.settings import UpdateModelRequest
+from app.api.routes import models as model_routes
 from app.services import api_keys
 
 
@@ -95,7 +97,7 @@ def test_resolve_api_key_for_model_auto_selects_single_candidate():
         try:
             await _seed_user(db)
             groups = await api_keys.ensure_default_api_key_groups(db)
-            chat = _key("user-1", "chat", groups[api_keys.GROUP_PURPOSE_CHAT].id, ["gpt-5.5"])
+            chat = _key("user-1", "chat", groups[api_keys.GROUP_PURPOSE_CHAT].id, ["gpt-5.5"], active=True)
             image = _key("user-1", "image", groups[api_keys.GROUP_PURPOSE_IMAGE].id, ["gpt-image-2"])
             db.add_all([chat, image])
             await db.flush()
@@ -104,7 +106,108 @@ def test_resolve_api_key_for_model_auto_selects_single_candidate():
 
             assert selected.id == image.id
             assert image.is_active is True
-            assert chat.is_active is False
+            assert chat.is_active is True
+        finally:
+            await db.close()
+            await engine.dispose()
+
+    asyncio.run(run())
+
+
+def test_resolve_api_key_for_model_does_not_cross_group_even_if_active_key_supports_model():
+    async def run():
+        engine, db = await _make_session()
+        try:
+            await _seed_user(db)
+            groups = await api_keys.ensure_default_api_key_groups(db)
+            chat = _key(
+                "user-1",
+                "chat",
+                groups[api_keys.GROUP_PURPOSE_CHAT].id,
+                ["gpt-5.5", "gpt-image-2"],
+                active=True,
+            )
+            image = _key("user-1", "image", groups[api_keys.GROUP_PURPOSE_IMAGE].id, ["gpt-image-2"])
+            db.add_all([chat, image])
+            await db.flush()
+
+            selected = await api_keys.resolve_api_key_for_model(db, "user-1", "gpt-image-2")
+
+            assert selected.id == image.id
+            assert image.is_active is True
+            assert chat.is_active is True
+        finally:
+            await db.close()
+            await engine.dispose()
+
+    asyncio.run(run())
+
+
+def test_set_active_api_key_is_scoped_to_group_purpose():
+    async def run():
+        engine, db = await _make_session()
+        try:
+            await _seed_user(db)
+            groups = await api_keys.ensure_default_api_key_groups(db)
+            chat = _key("user-1", "chat", groups[api_keys.GROUP_PURPOSE_CHAT].id, ["gpt-5.5"], active=True)
+            image = _key("user-1", "image", groups[api_keys.GROUP_PURPOSE_IMAGE].id, ["gpt-image-2"])
+            db.add_all([chat, image])
+            await db.flush()
+
+            await api_keys.set_active_api_key(db, "user-1", image.id, commit=False)
+
+            assert chat.is_active is True
+            assert image.is_active is True
+        finally:
+            await db.close()
+            await engine.dispose()
+
+    asyncio.run(run())
+
+
+def test_delete_active_api_key_falls_back_within_same_group_purpose():
+    async def run():
+        engine, db = await _make_session()
+        try:
+            await _seed_user(db)
+            groups = await api_keys.ensure_default_api_key_groups(db)
+            chat = _key("user-1", "chat", groups[api_keys.GROUP_PURPOSE_CHAT].id, ["gpt-5.5"], active=True)
+            image_one = _key("user-1", "image1", groups[api_keys.GROUP_PURPOSE_IMAGE].id, ["gpt-image-2"], active=True)
+            image_two = _key("user-1", "image2", groups[api_keys.GROUP_PURPOSE_IMAGE].id, ["gpt-image-2"])
+            db.add_all([chat, image_one, image_two])
+            await db.flush()
+            image_one_id = image_one.id
+
+            await api_keys.delete_api_key(db, "user-1", image_one_id)
+
+            assert chat.is_active is True
+            assert image_two.is_active is True
+        finally:
+            await db.close()
+            await engine.dispose()
+
+    asyncio.run(run())
+
+
+def test_normalize_active_api_keys_keeps_one_active_per_group_purpose():
+    async def run():
+        engine, db = await _make_session()
+        try:
+            await _seed_user(db)
+            groups = await api_keys.ensure_default_api_key_groups(db)
+            chat_one = _key("user-1", "chat1", groups[api_keys.GROUP_PURPOSE_CHAT].id, ["gpt-5.5"], active=True)
+            chat_two = _key("user-1", "chat2", groups[api_keys.GROUP_PURPOSE_CHAT].id, ["gpt-5.5"], active=True)
+            image_one = _key("user-1", "image1", groups[api_keys.GROUP_PURPOSE_IMAGE].id, ["gpt-image-2"])
+            image_two = _key("user-1", "image2", groups[api_keys.GROUP_PURPOSE_IMAGE].id, ["gpt-image-2"])
+            db.add_all([chat_one, chat_two, image_one, image_two])
+            await db.commit()
+
+            await api_keys.normalize_active_api_keys(db)
+
+            chat_rows = await api_keys.active_scope_rows_for_group(db, "user-1", purpose=api_keys.GROUP_PURPOSE_CHAT)
+            image_rows = await api_keys.active_scope_rows_for_group(db, "user-1", purpose=api_keys.GROUP_PURPOSE_IMAGE)
+            assert sum(1 for row in chat_rows if row.is_active) == 1
+            assert sum(1 for row in image_rows if row.is_active) == 1
         finally:
             await db.close()
             await engine.dispose()
@@ -154,6 +257,43 @@ def test_create_api_key_without_group_defaults_to_gpt_chat(monkeypatch):
 
             assert chat_group is not None
             assert row.group_id == chat_group.id
+        finally:
+            await db.close()
+            await engine.dispose()
+
+    asyncio.run(run())
+
+
+def test_update_model_rejects_cross_group_api_key_id():
+    async def run():
+        engine, db = await _make_session()
+        try:
+            await _seed_user(db)
+            user = await db.get(User, "user-1")
+            groups = await api_keys.ensure_default_api_key_groups(db)
+            chat = _key("user-1", "chat", groups[api_keys.GROUP_PURPOSE_CHAT].id, ["gpt-5.5", "gpt-image-2"], active=True)
+            image = _key("user-1", "image", groups[api_keys.GROUP_PURPOSE_IMAGE].id, ["gpt-image-2"])
+            db.add_all([chat, image])
+            await db.commit()
+
+            with pytest.raises(HTTPException) as exc:
+                await model_routes.update_model(
+                    UpdateModelRequest(model="gpt-image-2", api_key_id=chat.id),
+                    user=user,
+                    db=db,
+                )
+
+            assert exc.value.detail["code"] == "MODEL_NOT_AVAILABLE"
+
+            result = await model_routes.update_model(
+                UpdateModelRequest(model="gpt-image-2", api_key_id=image.id),
+                user=user,
+                db=db,
+            )
+
+            assert result == {"ok": True, "model": "gpt-image-2"}
+            quota = await db.get(UserQuota, "user-1")
+            assert quota.default_model == "gpt-image-2"
         finally:
             await db.close()
             await engine.dispose()

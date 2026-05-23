@@ -254,7 +254,7 @@ def image_progress_from_message(message: Message) -> dict:
     return {
         "b64Json": "",
         "index": 0,
-        "total": 1,
+        "total": IMAGE_STREAM_PARTIAL_IMAGES,
         "outputFormat": "png",
         "detail": detail,
         "elapsedSeconds": elapsed_seconds,
@@ -303,7 +303,12 @@ def image_saving_event_data(
 ) -> dict:
     return {
         **image_progress_event_data(
-            {"b64_json": b64_json, "index": 1, "total": 1, "output_format": output_format},
+            {
+                "b64_json": b64_json,
+                "index": IMAGE_STREAM_PARTIAL_IMAGES,
+                "total": IMAGE_STREAM_PARTIAL_IMAGES,
+                "output_format": output_format,
+            },
             model=model,
             image_size=image_size,
             started_at=started_at,
@@ -440,6 +445,7 @@ async def prepare_chat_messages(user_id: str, payload: SendMessageRequest, conve
             quota=quota,
             commit=False,
             require_choice=True,
+            allow_auto_choose_multiple=True,
         )
         if not api_key_row:
             raise HTTPException(status_code=400, detail={"code": "KEY_REQUIRED", "message": "请先绑定模型 API Key"})
@@ -462,6 +468,7 @@ async def prepare_chat_messages(user_id: str, payload: SendMessageRequest, conve
                 quota=quota,
                 commit=False,
                 require_choice=True,
+                allow_auto_choose_multiple=True,
             )
             if not api_key_row:
                 raise HTTPException(status_code=400, detail={"code": "KEY_REQUIRED", "message": "请先绑定模型 API Key"})
@@ -652,6 +659,7 @@ async def stream_chat(user_id: str, payload: SendMessageRequest, conversation_id
             quota=quota,
             commit=False,
             require_choice=True,
+            allow_auto_choose_multiple=True,
         )
         if not api_key_row:
             yield json_line("error", {"code": "KEY_REQUIRED", "message": "请先绑定模型 API Key", "retryable": False})
@@ -677,6 +685,7 @@ async def stream_chat(user_id: str, payload: SendMessageRequest, conversation_id
                 quota=quota,
                 commit=False,
                 require_choice=True,
+                allow_auto_choose_multiple=True,
             )
             if not api_key_row:
                 yield json_line("error", {"code": "KEY_REQUIRED", "message": "请先绑定模型 API Key", "retryable": False})
@@ -1604,8 +1613,6 @@ async def run_image_generation_job(
                         {
                             "conversation_id": conversation_id,
                             "message_id": assistant_message_id,
-                            "index": 0,
-                            "total": 1,
                             "output_format": image_output_format,
                             "outputFormat": image_output_format,
                             "size": image_size,

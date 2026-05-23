@@ -93,7 +93,7 @@ async function activateKey(key: ApiKeyEntry) {
   resetMessage()
   try {
     await apiFetch<ApiKeyEntry>(`/api-keys/${key.id}/activate`, { method: 'POST' })
-    notice.value = '已切换当前使用密钥'
+    notice.value = '已切换该分组当前使用密钥'
     await load()
   } catch (err) {
     error.value = err instanceof Error ? err.message : '切换失败'
@@ -152,7 +152,7 @@ onMounted(load)
         </div>
         <label class="inline-flex items-center gap-2 text-sm app-muted">
           <input v-model="newKey.makeActive" type="checkbox" />
-          添加后立即设为当前使用密钥
+          添加后立即设为该分组当前使用密钥
         </label>
         <div>
           <button class="app-primary-button rounded-md px-4 py-2" type="submit">添加密钥</button>
@@ -189,7 +189,7 @@ onMounted(load)
                 <div class="key-mask">{{ key.maskedKey }}</div>
               </td>
               <td class="p-3">
-                <span v-if="key.isActive" class="text-green-500 font-semibold">当前使用</span>
+                <span v-if="key.isActive" class="text-green-500 font-semibold">当前分组使用</span>
                 <span v-else class="app-muted">备用</span>
               </td>
               <td class="p-3">

@@ -26,6 +26,7 @@ SYSTEM_GROUP_PURPOSES = {
     DEFAULT_CHAT_GROUP_NAME: GROUP_PURPOSE_CHAT,
     DEFAULT_IMAGE_GROUP_NAME: GROUP_PURPOSE_IMAGE,
 }
+ROUTED_GROUP_PURPOSES = {GROUP_PURPOSE_CHAT, GROUP_PURPOSE_IMAGE}
 LEGACY_GROUP_MIGRATION_FLAG = "api_key_group_defaults_migrated_v1"
 
 
@@ -92,6 +93,10 @@ def purpose_for_key_models(models: list | None) -> str:
 
 def group_name_for_purpose(purpose: str) -> str:
     return DEFAULT_IMAGE_GROUP_NAME if purpose == GROUP_PURPOSE_IMAGE else DEFAULT_CHAT_GROUP_NAME
+
+
+def model_matches_group_purpose(model: str, purpose: str) -> bool:
+    return model_group_purpose(model) == purpose
 
 
 async def _get_group_by_name(db: AsyncSession, name: str) -> ApiKeyGroup | None:
@@ -222,21 +227,31 @@ async def has_any_api_key(db: AsyncSession, user_id: str) -> bool:
     return bool(count)
 
 
-async def get_marked_active_api_key(db: AsyncSession, user_id: str) -> UserApiKey | None:
-    return (
-        await db.execute(
-            select(UserApiKey)
-            .options(selectinload(UserApiKey.group))
-            .where(UserApiKey.user_id == user_id, UserApiKey.status == "active", UserApiKey.is_active.is_(True))
-            .order_by(UserApiKey.created_at.desc())
-        )
-    ).scalars().first()
+async def get_marked_active_api_key(
+    db: AsyncSession,
+    user_id: str,
+    purpose: str | None = None,
+) -> UserApiKey | None:
+    query = (
+        select(UserApiKey)
+        .options(selectinload(UserApiKey.group))
+        .where(UserApiKey.user_id == user_id, UserApiKey.status == "active", UserApiKey.is_active.is_(True))
+    )
+    if purpose in ROUTED_GROUP_PURPOSES:
+        group_ids = await purpose_group_ids(db, purpose)
+        if not group_ids:
+            return None
+        query = query.where(UserApiKey.group_id.in_(group_ids))
+    return (await db.execute(query.order_by(UserApiKey.created_at.desc()))).scalars().first()
 
 
-async def get_active_api_key(db: AsyncSession, user_id: str) -> UserApiKey | None:
-    row = await get_marked_active_api_key(db, user_id)
+async def get_active_api_key(db: AsyncSession, user_id: str, purpose: str | None = None) -> UserApiKey | None:
+    row = await get_marked_active_api_key(db, user_id, purpose)
     if row:
         return row
+    if purpose in ROUTED_GROUP_PURPOSES:
+        await normalize_active_api_key_scope(db, user_id, purpose=purpose)
+        return await get_marked_active_api_key(db, user_id, purpose)
     fallback = (
         await db.execute(
             select(UserApiKey)
@@ -322,15 +337,13 @@ async def resolve_api_key_for_model(
             raise api_error("MODEL_NOT_AVAILABLE", "该密钥不属于当前模型需要的分组")
         if not key_supports_model(row, model, quota):
             raise api_error("MODEL_NOT_AVAILABLE", "该密钥不支持当前模型")
-        if not row.is_active:
-            await set_active_api_key(db, user_id, row.id, commit=False)
+        await set_active_api_key(db, user_id, row.id, commit=False)
         if commit:
             await db.commit()
         return row
 
-    active = await get_marked_active_api_key(db, user_id)
-    active_group = active.__dict__.get("group") if active else None
-    if active and active_group and active_group.purpose == purpose and key_supports_model(active, model, quota):
+    active = await get_marked_active_api_key(db, user_id, purpose)
+    if active and key_supports_model(active, model, quota):
         return active
 
     candidates = await list_candidate_api_keys_for_model(db, user_id, model, quota)
@@ -367,25 +380,7 @@ async def resolve_api_key_for_model(
 
 
 async def chat_api_key(db: AsyncSession, user_id: str) -> UserApiKey | None:
-    active = await get_marked_active_api_key(db, user_id)
-    group = active.__dict__.get("group") if active else None
-    if active and group and group.purpose == GROUP_PURPOSE_CHAT:
-        return active
-    group_ids = await purpose_group_ids(db, GROUP_PURPOSE_CHAT)
-    if not group_ids:
-        return active
-    return (
-        await db.execute(
-            select(UserApiKey)
-            .options(selectinload(UserApiKey.group))
-            .where(
-                UserApiKey.user_id == user_id,
-                UserApiKey.status == "active",
-                UserApiKey.group_id.in_(group_ids),
-            )
-            .order_by(UserApiKey.created_at.asc())
-        )
-    ).scalars().first() or active
+    return await get_active_api_key(db, user_id, GROUP_PURPOSE_CHAT)
 
 
 async def available_models_for_user(db: AsyncSession, user_id: str, quota=None) -> list[str]:
@@ -411,6 +406,8 @@ async def available_models_for_user(db: AsyncSession, user_id: str, quota=None) 
         raw_models = list(row.available_models_json or [])
         if not raw_models:
             raw_models = official_available_models([], whitelist)
+        if group.purpose in ROUTED_GROUP_PURPOSES:
+            raw_models = [model for model in raw_models if model_matches_group_purpose(model, group.purpose)]
         for model in raw_models:
             if model not in seen:
                 seen.add(model)
@@ -425,6 +422,58 @@ async def migrate_group_keys_to_defaults(db: AsyncSession, group_id: str) -> Non
     for row in rows:
         await migrate_key_to_default_group(db, row)
     await db.flush()
+
+
+async def active_scope_rows_for_group(
+    db: AsyncSession,
+    user_id: str,
+    *,
+    group: ApiKeyGroup | None = None,
+    purpose: str | None = None,
+) -> list[UserApiKey]:
+    normalized_purpose = purpose or (group.purpose if group else None)
+    query = (
+        select(UserApiKey)
+        .options(selectinload(UserApiKey.group))
+        .where(UserApiKey.user_id == user_id, UserApiKey.status == "active")
+    )
+    if normalized_purpose in ROUTED_GROUP_PURPOSES:
+        group_ids = await purpose_group_ids(db, normalized_purpose)
+        if not group_ids:
+            return []
+        query = query.where(UserApiKey.group_id.in_(group_ids))
+    elif group:
+        query = query.where(UserApiKey.group_id == group.id)
+    else:
+        query = query.where(UserApiKey.group_id.is_(None))
+    active_order = case((UserApiKey.is_active.is_(True), 0), else_=1)
+    return (await db.execute(query.order_by(active_order.asc(), UserApiKey.created_at.asc()))).scalars().all()
+
+
+async def normalize_active_api_key_scope(
+    db: AsyncSession,
+    user_id: str,
+    *,
+    group: ApiKeyGroup | None = None,
+    purpose: str | None = None,
+) -> UserApiKey | None:
+    rows = await active_scope_rows_for_group(db, user_id, group=group, purpose=purpose)
+    if not rows:
+        return None
+    selected = next((row for row in rows if row.is_active), rows[0])
+    for row in rows:
+        row.is_active = row.id == selected.id
+    await db.flush()
+    return selected
+
+
+async def normalize_active_api_keys(db: AsyncSession) -> None:
+    await ensure_default_api_key_groups(db)
+    user_ids = (await db.execute(select(UserApiKey.user_id).distinct())).scalars().all()
+    for user_id in user_ids:
+        await normalize_active_api_key_scope(db, user_id, purpose=GROUP_PURPOSE_CHAT)
+        await normalize_active_api_key_scope(db, user_id, purpose=GROUP_PURPOSE_IMAGE)
+    await db.commit()
 
 
 async def assert_group_exists(db: AsyncSession, group_id: str | None) -> None:
@@ -450,14 +499,14 @@ async def create_api_key_for_user(
     if not group_id:
         group_id = await default_group_id(db)
     await assert_group_exists(db, group_id)
+    group = await db.get(ApiKeyGroup, group_id)
     provider = OpenAICompatibleProvider()
     models = await provider.probe_models(api_key)
-    has_existing = await has_any_api_key(db, user_id)
     row = UserApiKey(
         user_id=user_id,
         name=(name or "默认密钥").strip()[:100] or "默认密钥",
         group_id=group_id,
-        is_active=make_active or not has_existing,
+        is_active=False,
         key_version="v1",
         ciphertext=encrypt_api_key(api_key),
         fingerprint=api_key_fingerprint(api_key),
@@ -467,12 +516,10 @@ async def create_api_key_for_user(
         supports_stream_usage_json={},
         probed_at=datetime.utcnow(),
     )
-    if row.is_active:
-        await db.execute(
-            UserApiKey.__table__.update().where(UserApiKey.user_id == user_id).values(is_active=False)
-        )
     db.add(row)
     await db.flush()
+    if make_active or not await normalize_active_api_key_scope(db, user_id, group=group):
+        await set_active_api_key(db, user_id, row.id, commit=False)
     return row
 
 
@@ -491,14 +538,24 @@ async def update_api_key_meta(
     ).scalars().one_or_none()
     if not row or row.user_id != user_id:
         raise api_error("FORBIDDEN", "密钥不存在")
+    old_group = row.__dict__.get("group")
+    was_active = row.is_active
     if name is not None:
         row.name = name.strip()[:100] or row.name
     if update_group:
         if not group_id:
             group_id = await default_group_id(db)
         await assert_group_exists(db, group_id)
+        new_group = await db.get(ApiKeyGroup, group_id)
         row.group_id = group_id
+        row.group = new_group
     await db.flush()
+    if update_group:
+        if was_active:
+            await normalize_active_api_key_scope(db, user_id, group=old_group)
+            await set_active_api_key(db, user_id, row.id, commit=False)
+        else:
+            await normalize_active_api_key_scope(db, user_id, group=row.__dict__.get("group"))
     return row
 
 
@@ -512,11 +569,20 @@ async def load_api_key_with_group(db: AsyncSession, key_id: str) -> UserApiKey:
 
 
 async def set_active_api_key(db: AsyncSession, user_id: str, key_id: str, commit: bool = True) -> UserApiKey:
-    row = await db.get(UserApiKey, key_id)
+    row = (
+        await db.execute(
+            select(UserApiKey).options(selectinload(UserApiKey.group)).where(UserApiKey.id == key_id)
+        )
+    ).scalars().one_or_none()
     if not row or row.user_id != user_id or row.status != "active":
         raise api_error("FORBIDDEN", "密钥不存在或不可用")
-    await db.execute(UserApiKey.__table__.update().where(UserApiKey.user_id == user_id).values(is_active=False))
-    row.is_active = True
+    group = row.__dict__.get("group")
+    scope_rows = await active_scope_rows_for_group(db, user_id, group=group)
+    scope_ids = {scope_row.id for scope_row in scope_rows}
+    for scope_row in scope_rows:
+        scope_row.is_active = scope_row.id == row.id
+    if row.id not in scope_ids:
+        row.is_active = True
     await db.flush()
     if commit:
         await db.commit()
@@ -524,22 +590,19 @@ async def set_active_api_key(db: AsyncSession, user_id: str, key_id: str, commit
 
 
 async def delete_api_key(db: AsyncSession, user_id: str, key_id: str) -> None:
-    row = await db.get(UserApiKey, key_id)
+    row = (
+        await db.execute(
+            select(UserApiKey).options(selectinload(UserApiKey.group)).where(UserApiKey.id == key_id)
+        )
+    ).scalars().one_or_none()
     if not row or row.user_id != user_id:
         raise api_error("FORBIDDEN", "密钥不存在")
     was_active = row.is_active
+    group = row.__dict__.get("group")
     await db.delete(row)
     await db.flush()
     if was_active:
-        fallback = (
-            await db.execute(
-                select(UserApiKey)
-                .where(UserApiKey.user_id == user_id, UserApiKey.status == "active")
-                .order_by(UserApiKey.created_at.asc())
-            )
-        ).scalars().first()
-        if fallback:
-            fallback.is_active = True
+        await normalize_active_api_key_scope(db, user_id, group=group)
     await db.flush()
 
 

@@ -275,7 +275,7 @@ onMounted(loadImageSettings)
       <div class="app-card rounded-lg p-5 space-y-3">
         <div>
           <h2 class="font-semibold">API Key 管理</h2>
-          <p class="app-muted text-sm mt-1">密钥已经拆到独立页面，可添加多个密钥、切换当前使用密钥并选择分组。</p>
+          <p class="app-muted text-sm mt-1">密钥已经拆到独立页面，可添加多个密钥、按分组切换当前使用密钥并选择分组。</p>
         </div>
         <button class="app-primary-button rounded-md px-4 py-2" type="button" @click="router.push('/keys')">进入密钥管理</button>
       </div>

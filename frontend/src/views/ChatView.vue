@@ -436,10 +436,15 @@ function applyImageProgress(message: Message, data: any = {}) {
     normalizeProgressElapsed(existing?.elapsedSeconds ?? existing?.elapsed_seconds) ?? 0,
     normalizeProgressElapsed(data.elapsedSeconds ?? data.elapsed_seconds) ?? 0
   )
+  const incomingIndex = Number(data.index || 0)
+  const existingIndex = Number(existing?.index || 0)
+  const incomingTotal = Number(data.total || 0)
+  const existingTotal = Number(existing?.total || 0)
+  const nextTotal = Math.max(incomingTotal, existingTotal, 1)
   message.imageProgress = {
     b64Json: data.b64Json || data.b64_json || existing?.b64Json || existing?.b64_json || '',
-    index: Number(data.index || existing?.index || 0),
-    total: Number(data.total || existing?.total || 1),
+    index: Math.max(incomingIndex, existingIndex),
+    total: nextTotal,
     outputFormat: data.outputFormat || data.output_format || existing?.outputFormat || existing?.output_format || 'png',
     detail: data.detail || existing?.detail || message.progressDetail,
     elapsedSeconds,
@@ -943,11 +948,16 @@ async function loadApiSettings() {
     if (!selectedGroupId.value || !groups.some((group) => group.id === selectedGroupId.value)) {
       selectedGroupId.value = groups[0]?.id || ''
     }
-    const chatGroupId = groups.find((group) => group.purpose === 'chat')?.id || groups[0]?.id || ''
+    const modelPurpose: GroupPurpose = selectedModelIsImageGeneration() ? 'image' : 'chat'
+    const defaultGroupId =
+      groups.find((group) => group.purpose === modelPurpose)?.id ||
+      groups.find((group) => group.purpose === 'chat')?.id ||
+      groups[0]?.id ||
+      ''
     if (!newApiKey.value.groupId || !groups.some((group) => group.id === newApiKey.value.groupId)) {
-      newApiKey.value.groupId = chatGroupId
+      newApiKey.value.groupId = defaultGroupId
     }
-    keyDrafts.value = Object.fromEntries(keys.map((key) => [key.id, { name: key.name, groupId: key.groupId || chatGroupId }]))
+    keyDrafts.value = Object.fromEntries(keys.map((key) => [key.id, { name: key.name, groupId: key.groupId || defaultGroupId }]))
     groupDrafts.value = Object.fromEntries(
       groups.map((group) => [group.id, { name: group.name, description: group.description || '', purpose: group.purpose || 'none' }])
     )
@@ -1089,7 +1099,7 @@ async function activateApiKey(key: ApiKeyEntry) {
   resetSettingsMessages()
   try {
     await apiFetch<ApiKeyEntry>(`/api-keys/${key.id}/activate`, { method: 'POST' })
-    settingsNotice.value = '已切换当前使用密钥'
+    settingsNotice.value = '已切换该分组当前使用密钥'
     await loadApiSettings()
     await loadModels()
   } catch (err) {
@@ -2890,7 +2900,7 @@ onUnmounted(() => {
                   </div>
                   <label class="settings-check">
                     <input v-model="newApiKey.makeActive" type="checkbox" />
-                    添加后立即设为当前使用密钥
+                    添加后立即设为该分组当前使用密钥
                   </label>
                   <button class="settings-primary" type="submit">添加密钥</button>
                 </form>
@@ -2929,7 +2939,7 @@ onUnmounted(() => {
                       <div class="settings-key-meta">
                         <span>{{ key.groupName || 'gpt-chat' }}</span>
                         <span class="key-mask">{{ key.maskedKey }}</span>
-                        <strong v-if="key.isActive">当前使用</strong>
+                        <strong v-if="key.isActive">当前分组使用</strong>
                       </div>
                     </div>
                     <div class="settings-key-actions">
@@ -3033,7 +3043,7 @@ onUnmounted(() => {
                         <div class="settings-admin-key-meta">
                           <span>{{ key.groupName || 'gpt-chat' }}</span>
                           <span class="key-mask">{{ key.maskedKey }}</span>
-                          <strong v-if="key.isActive">用户当前使用</strong>
+                          <strong v-if="key.isActive">用户当前分组使用</strong>
                           <button class="settings-inline-action" @click="copyApiKeySecret(key, key.userId)">复制</button>
                         </div>
                       </div>

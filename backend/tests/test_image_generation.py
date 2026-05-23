@@ -345,6 +345,8 @@ def test_chat_image_saving_event_data_contains_final_preview_fields():
     assert payload["b64Json"] == "final"
     assert payload["output_format"] == "png"
     assert payload["outputFormat"] == "png"
+    assert payload["index"] == IMAGE_STREAM_PARTIAL_IMAGES
+    assert payload["total"] == IMAGE_STREAM_PARTIAL_IMAGES
     assert payload["phase"] == "saving"
     assert payload["detail"] == "最终图已返回，正在保存为下载附件。"
     assert payload["size"] == "1024x1024"

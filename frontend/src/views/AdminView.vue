@@ -461,7 +461,7 @@ onBeforeUnmount(() => {
           <input v-model="adminKeyDraft.apiKey" class="app-input rounded-md px-3 py-2" type="password" placeholder="API Key" />
           <label class="inline-flex items-center gap-2 text-sm app-muted">
             <input v-model="adminKeyDraft.makeActive" type="checkbox" />
-            设为当前
+            设为该分组当前
           </label>
           <button class="app-primary-button rounded-md px-4 py-2" type="submit">添加</button>
         </form>
@@ -484,7 +484,7 @@ onBeforeUnmount(() => {
               <td class="p-3">
                 <div class="key-mask">{{ key.maskedKey }}</div>
               </td>
-              <td class="p-3">{{ key.isActive ? '当前使用' : '备用' }}</td>
+              <td class="p-3">{{ key.isActive ? '当前分组使用' : '备用' }}</td>
               <td class="p-3">
                 <div class="flex flex-wrap gap-2">
                   <button class="app-secondary-button rounded px-2 py-1" @click="saveAdminKey(key)">保存</button>

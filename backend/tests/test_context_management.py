@@ -344,3 +344,4 @@ def test_message_out_includes_image_progress_for_streaming_image():
     assert result.started_at is not None
     assert result.image_progress is not None
     assert result.image_progress["startedAt"] == result.started_at
+    assert result.image_progress["total"] == 3

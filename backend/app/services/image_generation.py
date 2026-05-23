@@ -252,121 +252,67 @@ async def image_generation_stream(
     completed: GeneratedImage | None = None
     partial_seen = 0
 
-    transport = httpx.AsyncHTTPTransport(socket_options=_tcp_keepalive_socket_options())
-    async with httpx.AsyncClient(timeout=None, transport=transport) as client:
-        async with client.stream(
-            "POST",
-            request_url,
-            headers=headers,
-            json=payload,
-        ) as response:
-            perf_logger.info(
-                "upstream_timing image_generation_status model=%s status=%d elapsed_ms=%d",
-                upstream_model,
-                response.status_code,
-                int((time.perf_counter() - request_started) * 1000),
-            )
-            if response.status_code in {401, 403}:
-                raise api_error("API_KEY_INVALID", "上游拒绝了该 API Key")
-            if response.status_code >= 400:
-                body = await response.aread()
-                raise api_error("UPSTREAM_ERROR", body.decode("utf-8", errors="ignore")[:500], status_code=response.status_code)
+    try:
+        transport = httpx.AsyncHTTPTransport(socket_options=_tcp_keepalive_socket_options())
+        async with httpx.AsyncClient(timeout=None, transport=transport) as client:
+            async with client.stream(
+                "POST",
+                request_url,
+                headers=headers,
+                json=payload,
+            ) as response:
+                perf_logger.info(
+                    "upstream_timing image_generation_status model=%s status=%d elapsed_ms=%d",
+                    upstream_model,
+                    response.status_code,
+                    int((time.perf_counter() - request_started) * 1000),
+                )
+                if response.status_code in {401, 403}:
+                    raise api_error("API_KEY_INVALID", "上游拒绝了该 API Key")
+                if response.status_code >= 400:
+                    body = await response.aread()
+                    raise api_error("UPSTREAM_ERROR", body.decode("utf-8", errors="ignore")[:500], status_code=response.status_code)
 
-            current_event_type = ""
-            buffer = ""
-            async for chunk_bytes in response.aiter_bytes():
-                buffer += chunk_bytes.decode("utf-8", errors="replace")
-                while "\n" in buffer:
-                    line, buffer = buffer.split("\n", 1)
-                    line = line.rstrip("\r")
-                    if not line:
-                        continue
-                    if not line.startswith("data:"):
-                        if line.startswith("event:"):
-                            current_event_type = line.removeprefix("event:").strip()
-                            logger.info(
-                                "image_generation_sse_event model=%s event=%s",
-                                upstream_model, current_event_type,
-                            )
-                        continue
-                    raw = line.removeprefix("data:").strip()
-                    if raw == "[DONE]":
-                        logger.info("image_generation_sse_done model=%s", upstream_model)
-                        current_event_type = ""
+                current_event_type = ""
+                buffer = ""
+                async for chunk_bytes in response.aiter_bytes():
+                    events, current_event_type, buffer, partial_seen, completed = parse_image_generation_sse_chunk(
+                        chunk_bytes,
+                        current_event_type=current_event_type,
+                        buffer=buffer,
+                        upstream_model=upstream_model,
+                        partial_images=partial_images,
+                        partial_seen=partial_seen,
+                        output_format=output_format,
+                        image_size=generation_settings["size"],
+                    )
+                    for event in events:
+                        yield event
+                    if completed:
                         break
-                    logger.info(
-                        "image_generation_sse_data model=%s raw_head=%s",
-                        upstream_model, raw[:200],
-                    )
-                    try:
-                        chunk = json.loads(raw)
-                    except json.JSONDecodeError:
-                        logger.warning("image_generation JSON decode error: %s", raw[:200])
-                        continue
-                    event_type = chunk.get("type") or chunk.get("event") or current_event_type
-                    logger.info(
-                        "image_generation_sse_parsed model=%s event_type=%s keys=%s",
-                        upstream_model, event_type, ",".join(sorted(chunk.keys())),
-                    )
-                    current_event_type = ""
-                    if event_type == "error":
-                        error_msg = chunk.get("message") or chunk.get("error", {}).get("message", "Unknown stream error")
-                        raise api_error("UPSTREAM_ERROR", str(error_msg)[:500])
-                    if event_type.endswith("partial_image") or event_type == "image.partial_image":
-                        b64_json = extract_image_b64(chunk)
-                        if not b64_json:
-                            logger.warning(
-                                "image_generation partial_image without b64_json model=%s",
-                                upstream_model,
-                            )
-                            continue
-                        partial_seen += 1
-                        progress_index = partial_seen
-                        raw_index = chunk.get("partial_image_index", chunk.get("index"))
-                        if raw_index is not None:
-                            try:
-                                parsed_index = int(raw_index)
-                                progress_index = parsed_index + 1 if parsed_index < partial_images else parsed_index
-                            except (TypeError, ValueError):
-                                progress_index = partial_seen
-                        logger.info(
-                            "upstream_image_event partial model=%s index=%d total=%d b64_len=%d",
-                            upstream_model,
-                            progress_index,
-                            partial_images,
-                            len(b64_json),
-                        )
-                        yield StreamEvent(
-                            "image_progress",
-                            {
-                                "b64_json": b64_json,
-                                "index": progress_index,
-                                "total": partial_images,
-                                "output_format": output_format,
-                                "size": generation_settings["size"],
-                            },
-                        )
-                    elif event_type.endswith("completed") or event_type == "image.completed":
-                        b64_json = extract_image_b64(chunk)
-                        logger.info(
-                            "upstream_image_event completed model=%s has_b64=%s b64_len=%d",
-                            upstream_model,
-                            bool(b64_json),
-                            len(b64_json or ""),
-                        )
-                        if b64_json:
-                            completed = GeneratedImage(
-                                b64_json=b64_json,
-                                output_format=extract_image_output_format(chunk, output_format),
-                            )
-                            break
-                    else:
-                        logger.info(
-                            "image_generation_unhandled_event model=%s event_type=%s",
-                            upstream_model, event_type,
-                        )
-                if completed:
-                    break
+    except httpx.ConnectError:
+        if partial_seen or completed:
+            raise
+        curl_path = shutil.which("curl")
+        if not curl_path:
+            raise
+        logger.warning(
+            "image_generation_stream httpx connect failed before response; retrying with curl transport model=%s",
+            upstream_model,
+        )
+        async for event in image_generation_stream_with_curl(
+            curl_path,
+            api_key,
+            request_url,
+            payload,
+            upstream_model=upstream_model,
+            partial_images=partial_images,
+            output_format=output_format,
+            image_size=generation_settings["size"],
+            request_started=request_started,
+        ):
+            yield event
+        return
     if not completed:
         logger.error(
             "image_generation_no_completed model=%s partial_seen=%d",
@@ -374,6 +320,230 @@ async def image_generation_stream(
         )
         raise api_error("UPSTREAM_ERROR", "图像模型没有返回最终图片")
     yield StreamEvent("image_completed", {"b64_json": completed.b64_json, "output_format": completed.output_format})
+
+
+def parse_image_generation_sse_chunk(
+    chunk_bytes: bytes,
+    *,
+    current_event_type: str,
+    buffer: str,
+    upstream_model: str,
+    partial_images: int,
+    partial_seen: int,
+    output_format: str,
+    image_size: str,
+) -> tuple[list[StreamEvent], str, str, int, GeneratedImage | None]:
+    events: list[StreamEvent] = []
+    completed: GeneratedImage | None = None
+    buffer += chunk_bytes.decode("utf-8", errors="replace")
+    while "\n" in buffer:
+        line, buffer = buffer.split("\n", 1)
+        line = line.rstrip("\r")
+        if not line:
+            continue
+        if not line.startswith("data:"):
+            if line.startswith("event:"):
+                current_event_type = line.removeprefix("event:").strip()
+                logger.info(
+                    "image_generation_sse_event model=%s event=%s",
+                    upstream_model, current_event_type,
+                )
+            continue
+        raw = line.removeprefix("data:").strip()
+        if raw == "[DONE]":
+            logger.info("image_generation_sse_done model=%s", upstream_model)
+            current_event_type = ""
+            break
+        logger.info(
+            "image_generation_sse_data model=%s raw_head=%s",
+            upstream_model, raw[:200],
+        )
+        try:
+            chunk = json.loads(raw)
+        except json.JSONDecodeError:
+            logger.warning("image_generation JSON decode error: %s", raw[:200])
+            continue
+        event_type = chunk.get("type") or chunk.get("event") or current_event_type
+        logger.info(
+            "image_generation_sse_parsed model=%s event_type=%s keys=%s",
+            upstream_model, event_type, ",".join(sorted(chunk.keys())),
+        )
+        current_event_type = ""
+        if event_type == "error":
+            error_msg = chunk.get("message") or chunk.get("error", {}).get("message", "Unknown stream error")
+            raise api_error("UPSTREAM_ERROR", str(error_msg)[:500])
+        if event_type.endswith("partial_image") or event_type == "image.partial_image":
+            b64_json = extract_image_b64(chunk)
+            if not b64_json:
+                logger.warning(
+                    "image_generation partial_image without b64_json model=%s",
+                    upstream_model,
+                )
+                continue
+            partial_seen += 1
+            progress_index = partial_seen
+            raw_index = chunk.get("partial_image_index", chunk.get("index"))
+            if raw_index is not None:
+                try:
+                    parsed_index = int(raw_index)
+                    progress_index = parsed_index + 1 if parsed_index < partial_images else parsed_index
+                except (TypeError, ValueError):
+                    progress_index = partial_seen
+            logger.info(
+                "upstream_image_event partial model=%s index=%d total=%d b64_len=%d",
+                upstream_model,
+                progress_index,
+                partial_images,
+                len(b64_json),
+            )
+            events.append(
+                StreamEvent(
+                    "image_progress",
+                    {
+                        "b64_json": b64_json,
+                        "index": progress_index,
+                        "total": partial_images,
+                        "output_format": output_format,
+                        "size": image_size,
+                    },
+                )
+            )
+        elif event_type.endswith("completed") or event_type == "image.completed":
+            b64_json = extract_image_b64(chunk)
+            logger.info(
+                "upstream_image_event completed model=%s has_b64=%s b64_len=%d",
+                upstream_model,
+                bool(b64_json),
+                len(b64_json or ""),
+            )
+            if b64_json:
+                completed = GeneratedImage(
+                    b64_json=b64_json,
+                    output_format=extract_image_output_format(chunk, output_format),
+                )
+                break
+        else:
+            logger.info(
+                "image_generation_unhandled_event model=%s event_type=%s",
+                upstream_model, event_type,
+            )
+    return events, current_event_type, buffer, partial_seen, completed
+
+
+async def image_generation_stream_with_curl(
+    curl_path: str,
+    api_key: str,
+    url: str,
+    payload: dict[str, Any],
+    *,
+    upstream_model: str,
+    partial_images: int,
+    output_format: str,
+    image_size: str,
+    request_started: float,
+) -> AsyncIterator[StreamEvent]:
+    config_path = ""
+    request_path = ""
+    header_path = ""
+    process: asyncio.subprocess.Process | None = None
+    try:
+        with tempfile.NamedTemporaryFile("w", encoding="utf-8", delete=False, suffix=".curl") as config_file:
+            config_path = config_file.name
+            config_file.write("compressed\n")
+            config_file.write("silent\n")
+            config_file.write("show-error\n")
+            config_file.write(f"max-time = {IMAGE_GENERATION_HTTP_TIMEOUT_SECONDS}\n")
+            config_file.write("connect-timeout = 60\n")
+            config_file.write("tlsv1.2\n")
+            config_file.write("no-http2\n")
+            config_file.write("keepalive-time = 30\n")
+            config_file.write('request = "POST"\n')
+            config_file.write(f'url = "{url}"\n')
+            config_file.write(f'header = "Authorization: Bearer {api_key}"\n')
+            config_file.write('header = "Content-Type: application/json"\n')
+            config_file.write('header = "Accept: text/event-stream"\n')
+            config_file.write('user-agent = "node"\n')
+        with tempfile.NamedTemporaryFile("w", encoding="utf-8", delete=False, suffix=".json") as request_file:
+            request_path = request_file.name
+            json.dump(payload, request_file, ensure_ascii=False)
+        with tempfile.NamedTemporaryFile("w", encoding="utf-8", delete=False, suffix=".headers") as header_file:
+            header_path = header_file.name
+
+        process = await asyncio.create_subprocess_exec(
+            curl_path,
+            "--config",
+            config_path,
+            "--data-binary",
+            f"@{request_path}",
+            "--dump-header",
+            header_path,
+            "--no-buffer",
+            stdout=asyncio.subprocess.PIPE,
+            stderr=asyncio.subprocess.PIPE,
+        )
+        assert process.stdout is not None
+        assert process.stderr is not None
+        stderr_task = asyncio.create_task(process.stderr.read())
+        current_event_type = ""
+        buffer = ""
+        partial_seen = 0
+        completed: GeneratedImage | None = None
+        while True:
+            chunk_bytes = await process.stdout.read(4096)
+            if not chunk_bytes:
+                break
+            events, current_event_type, buffer, partial_seen, completed = parse_image_generation_sse_chunk(
+                chunk_bytes,
+                current_event_type=current_event_type,
+                buffer=buffer,
+                upstream_model=upstream_model,
+                partial_images=partial_images,
+                partial_seen=partial_seen,
+                output_format=output_format,
+                image_size=image_size,
+            )
+            for event in events:
+                yield event
+            if completed:
+                break
+
+        returncode = await process.wait()
+        stderr_text = (await stderr_task).decode("utf-8", errors="replace").strip()
+        header_text = Path(header_path).read_text(encoding="utf-8", errors="replace")
+        status_code = _parse_http_status(header_text)
+        perf_logger.info(
+            "upstream_timing image_generation_curl_stream_done model=%s status=%s returncode=%s elapsed_ms=%d",
+            upstream_model,
+            status_code,
+            returncode,
+            int((time.perf_counter() - request_started) * 1000),
+        )
+        if completed:
+            yield StreamEvent("image_completed", {"b64_json": completed.b64_json, "output_format": completed.output_format})
+            return
+        if status_code in {401, 403}:
+            raise api_error("API_KEY_INVALID", "上游拒绝了该 API Key")
+        if status_code >= 400:
+            raise api_error("UPSTREAM_ERROR", stderr_text[:500] or "图像模型返回错误", status_code=status_code)
+        if returncode != 0:
+            logger.warning(
+                "image_generation curl stream transport lost status=%s returncode=%s stderr=%s",
+                status_code,
+                returncode,
+                stderr_text[:300],
+            )
+            raise api_error("IMAGE_TRANSPORT_LOST", IMAGE_TRANSPORT_LOST_MESSAGE)
+        raise api_error("UPSTREAM_ERROR", "图像模型没有返回最终图片")
+    finally:
+        if process and process.returncode is None:
+            with contextlib.suppress(ProcessLookupError):
+                process.kill()
+            with contextlib.suppress(Exception):
+                await process.wait()
+        for path in (config_path, request_path, header_path):
+            if path:
+                with contextlib.suppress(FileNotFoundError):
+                    Path(path).unlink()
 
 
 async def image_generation_stream_final(
