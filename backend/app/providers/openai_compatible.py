@@ -38,6 +38,39 @@ class OpenAICompatibleProvider:
         models = self.parse_models(payload)
         return sorted(set(models))
 
+    async def embeddings(
+        self,
+        api_key: str,
+        model: str,
+        input_texts: list[str],
+        timeout_seconds: float = 60.0,
+    ) -> list[list[float]]:
+        if not input_texts:
+            return []
+        headers = {"Authorization": f"Bearer {api_key}", "Content-Type": "application/json"}
+        payload = {"model": model, "input": input_texts}
+        async with httpx.AsyncClient(timeout=timeout_seconds) as client:
+            response = await client.post(f"{self.base_url}/embeddings", headers=headers, json=payload)
+        if response.status_code in {401, 403}:
+            raise api_error("API_KEY_INVALID", "涓婃父鎷掔粷浜嗚 API Key")
+        if response.status_code >= 400:
+            raise api_error("UPSTREAM_ERROR", response.text[:300], status_code=response.status_code)
+        payload_json = response.json()
+        items = payload_json.get("data")
+        if not isinstance(items, list):
+            raise api_error("UPSTREAM_ERROR", "embedding response missing data")
+        if all(isinstance(item, dict) and "index" in item for item in items):
+            items = sorted(items, key=lambda item: int(item.get("index") or 0))
+        vectors: list[list[float]] = []
+        for item in items:
+            embedding = item.get("embedding") if isinstance(item, dict) else None
+            if not isinstance(embedding, list):
+                continue
+            vectors.append([float(value) for value in embedding])
+        if len(vectors) != len(input_texts):
+            raise api_error("UPSTREAM_ERROR", "embedding response size mismatch")
+        return vectors
+
     def parse_models(self, payload: Any) -> list[str]:
         if isinstance(payload, list):
             items = payload
@@ -68,6 +101,18 @@ class OpenAICompatibleProvider:
     ) -> AsyncIterator[StreamEvent]:
         settings = get_settings()
         effective_reasoning = (reasoning_effort or settings.model_reasoning_effort).strip().lower() or settings.model_reasoning_effort
+        has_multimodal_content = any(isinstance(message.get("content"), list) for message in messages)
+        if has_multimodal_content:
+            async for event in self.chat_completions_stream(
+                api_key=api_key,
+                model=model,
+                messages=messages,
+                include_usage=include_usage,
+                max_completion_tokens=max_completion_tokens,
+                reasoning_effort=effective_reasoning,
+            ):
+                yield event
+            return
         if settings.model_api_mode == "responses":
             had_content = False
             try:
@@ -334,16 +379,40 @@ class OpenAICompatibleProvider:
             sorted(seen_event_types),
         )
 
+    def normalize_responses_content(self, content: Any) -> str | list[dict[str, Any]]:
+        if not isinstance(content, list):
+            return str(content or "")
+        parts: list[dict[str, Any]] = []
+        for part in content:
+            if not isinstance(part, dict):
+                continue
+            part_type = part.get("type")
+            if part_type == "text":
+                text = part.get("text")
+                if isinstance(text, str) and text:
+                    parts.append({"type": "input_text", "text": text})
+            elif part_type == "image_url":
+                image_url = part.get("image_url")
+                url = image_url.get("url") if isinstance(image_url, dict) else image_url
+                if isinstance(url, str) and url:
+                    parts.append({"type": "input_image", "image_url": url})
+            elif part_type in {"input_text", "input_image"}:
+                parts.append(part)
+        return parts or ""
+
     def to_responses_input(self, messages: list[dict[str, Any]]) -> tuple[str, list[dict[str, Any]]]:
         instructions: list[str] = []
         input_items: list[dict[str, Any]] = []
         for message in messages:
             role = str(message.get("role") or "user")
-            content = str(message.get("content") or "")
+            content = message.get("content")
             if role == "system":
-                instructions.append(content)
+                instructions.append(str(content or ""))
                 continue
-            input_items.append({"role": "assistant" if role == "assistant" else "user", "content": content})
+            input_items.append({
+                "role": "assistant" if role == "assistant" else "user",
+                "content": self.normalize_responses_content(content),
+            })
         return "\n\n".join(instructions), input_items
 
     def normalize_responses_usage(self, usage: dict[str, Any]) -> dict[str, int]:

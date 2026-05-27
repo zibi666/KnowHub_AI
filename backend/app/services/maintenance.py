@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import os
 import shutil
-from datetime import datetime, timedelta
+from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from typing import Any
 
@@ -12,6 +12,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from app.core.config import get_settings
 from app.models.entities import (
     Attachment,
+    AttachmentChunk,
     Conversation,
     ConversationCompaction,
     CosTrafficDaily,
@@ -27,7 +28,7 @@ from app.services.dead_letters import clear_dead_letters_for_user
 
 
 def _utcnow() -> datetime:
-    return datetime.utcnow()
+    return datetime.now(UTC).replace(tzinfo=None)
 
 
 def _safe_unlink(path_text: str | None) -> int:
@@ -63,6 +64,24 @@ def _dir_size(path: Path) -> int:
             except OSError:
                 pass
     return total
+
+
+def _unused_image_cutoff() -> datetime:
+    return _utcnow() - timedelta(days=7)
+
+
+def _unused_image_attachments_query(cutoff: datetime):
+    linked_message = (
+        select(MessageAttachment.attachment_id)
+        .where(MessageAttachment.attachment_id == Attachment.id)
+        .exists()
+    )
+    return select(Attachment).where(
+        Attachment.deleted_at.is_(None),
+        Attachment.created_at < cutoff,
+        Attachment.mime_sniffed.like("image/%"),
+        ~linked_message,
+    )
 
 
 async def cleanup_pending_cos_job() -> dict[str, int]:
@@ -154,6 +173,9 @@ async def compaction_watchdog_job(db: AsyncSession) -> dict[str, int]:
 
 
 async def preview_cleanup(db: AsyncSession, kind: str) -> dict[str, Any]:
+    if kind == "unused_image_attachments_7d":
+        rows = (await db.execute(_unused_image_attachments_query(_unused_image_cutoff()))).scalars().all()
+        return {"kind": kind, "count": len(rows), "bytes": sum(item.size_bytes for item in rows)}
     if kind == "pending_cos":
         root = Path(get_settings().local_storage_root) / "_pending"
         return {"kind": kind, "count": sum(1 for p in root.rglob("*") if p.is_file()) if root.exists() else 0, "bytes": _dir_size(root)}
@@ -172,6 +194,19 @@ async def preview_cleanup(db: AsyncSession, kind: str) -> dict[str, Any]:
 
 
 async def run_cleanup(db: AsyncSession, kind: str) -> dict[str, Any]:
+    if kind == "unused_image_attachments_7d":
+        rows = (await db.execute(_unused_image_attachments_query(_unused_image_cutoff()))).scalars().all()
+        bytes_deleted = 0
+        attachment_ids = [item.id for item in rows]
+        for attachment in rows:
+            bytes_deleted += _safe_unlink(attachment.cos_key)
+            bytes_deleted += _safe_unlink(str(Path(get_settings().local_cache_root) / f"thumb-{attachment.id}.jpg"))
+        if attachment_ids:
+            await db.execute(delete(MessageAttachment).where(MessageAttachment.attachment_id.in_(attachment_ids)))
+            await db.execute(delete(AttachmentChunk).where(AttachmentChunk.attachment_id.in_(attachment_ids)))
+            await db.execute(delete(Attachment).where(Attachment.id.in_(attachment_ids)))
+        await db.flush()
+        return {"deleted": len(rows), "bytes": bytes_deleted}
     if kind == "pending_cos":
         return await cleanup_pending_cos_job()
     if kind in {"soft_deleted_attachments", "expired_attachments", "orphan_attachments"}:

@@ -12,11 +12,16 @@ from app.models.entities import ApiKeyGroup, User, UserApiKey
 from app.schemas.api_keys import ApiKeyGroupOut, ApiKeyGroupRequest, ApiKeyOut, ApiKeySecretOut, CreateApiKeyRequest, UpdateApiKeyRequest
 from app.security.crypto import decrypt_api_key
 from app.services.api_keys import (
+    SYSTEM_GROUP_PURPOSES,
+    api_key_group_sort_key,
     api_key_to_out,
     create_api_key_for_user,
     delete_api_key,
+    ensure_default_api_key_groups,
     list_api_keys,
     load_api_key_with_group,
+    migrate_group_keys_to_defaults,
+    normalize_group_purpose,
     set_active_api_key,
     update_api_key_meta,
 )
@@ -27,8 +32,9 @@ router = APIRouter(tags=["api-keys"])
 
 @router.get("/api-key-groups", response_model=list[ApiKeyGroupOut])
 async def list_key_groups(user: User = Depends(get_current_user), db: AsyncSession = Depends(get_session)):
-    rows = (await db.execute(select(ApiKeyGroup).order_by(ApiKeyGroup.name.asc()))).scalars().all()
-    return rows
+    await ensure_default_api_key_groups(db)
+    rows = (await db.execute(select(ApiKeyGroup))).scalars().all()
+    return sorted(rows, key=api_key_group_sort_key)
 
 
 @router.get("/api-keys", response_model=list[ApiKeyOut])
@@ -127,7 +133,14 @@ async def create_key_group(
     exists = (await db.execute(select(ApiKeyGroup).where(ApiKeyGroup.name == name))).scalar_one_or_none()
     if exists:
         raise api_error("VALIDATION_ERROR", "分组名称已存在", status_code=400)
-    row = ApiKeyGroup(name=name, description=payload.description)
+    if name in SYSTEM_GROUP_PURPOSES:
+        raise api_error("VALIDATION_ERROR", "系统默认分组已保留", status_code=400)
+    row = ApiKeyGroup(
+        name=name,
+        description=payload.description,
+        purpose=normalize_group_purpose(payload.purpose),
+        is_system=False,
+    )
     db.add(row)
     await write_audit(db, "api_key_group.created", actor_user_id=admin.id, target_type="api_key_group", target_id=row.id)
     await db.commit()
@@ -148,11 +161,18 @@ async def update_key_group(
     name = payload.name.strip()
     if not name:
         raise api_error("VALIDATION_ERROR", "分组名称不能为空", status_code=422)
-    exists = (await db.execute(select(ApiKeyGroup).where(ApiKeyGroup.name == name, ApiKeyGroup.id != group_id))).scalar_one_or_none()
-    if exists:
-        raise api_error("VALIDATION_ERROR", "分组名称已存在", status_code=400)
-    row.name = name
+    purpose = normalize_group_purpose(payload.purpose)
+    if row.is_system or row.name in SYSTEM_GROUP_PURPOSES:
+        if name != row.name:
+            raise api_error("VALIDATION_ERROR", "系统默认分组不能改名", status_code=400)
+        purpose = SYSTEM_GROUP_PURPOSES.get(row.name, row.purpose)
+    else:
+        exists = (await db.execute(select(ApiKeyGroup).where(ApiKeyGroup.name == name, ApiKeyGroup.id != group_id))).scalar_one_or_none()
+        if exists:
+            raise api_error("VALIDATION_ERROR", "分组名称已存在", status_code=400)
+        row.name = name
     row.description = payload.description
+    row.purpose = purpose
     await write_audit(db, "api_key_group.updated", actor_user_id=admin.id, target_type="api_key_group", target_id=row.id)
     await db.commit()
     await db.refresh(row)
@@ -168,7 +188,9 @@ async def delete_key_group(
     row = await db.get(ApiKeyGroup, group_id)
     if not row:
         raise api_error("FORBIDDEN", "分组不存在")
-    await db.execute(UserApiKey.__table__.update().where(UserApiKey.group_id == group_id).values(group_id=None))
+    if row.is_system or row.name in SYSTEM_GROUP_PURPOSES:
+        raise api_error("VALIDATION_ERROR", "系统默认分组不能删除", status_code=400)
+    await migrate_group_keys_to_defaults(db, group_id)
     await write_audit(db, "api_key_group.deleted", actor_user_id=admin.id, target_type="api_key_group", target_id=row.id)
     await db.delete(row)
     await db.commit()
@@ -181,17 +203,14 @@ async def list_group_api_keys(
     admin: User = Depends(get_admin_user),
     db: AsyncSession = Depends(get_session),
 ):
-    if group_id != "ungrouped" and not await db.get(ApiKeyGroup, group_id):
+    if not await db.get(ApiKeyGroup, group_id):
         raise api_error("FORBIDDEN", "分组不存在")
     query = (
         select(UserApiKey)
         .options(selectinload(UserApiKey.group), selectinload(UserApiKey.user))
         .order_by(UserApiKey.created_at.desc())
     )
-    if group_id == "ungrouped":
-        query = query.where(UserApiKey.group_id.is_(None))
-    else:
-        query = query.where(UserApiKey.group_id == group_id)
+    query = query.where(UserApiKey.group_id == group_id)
     rows = (await db.execute(query)).scalars().all()
     return [api_key_to_out(row) for row in rows]
 

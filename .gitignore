@@ -31,6 +31,7 @@ logs/
 Thumbs.db
 .idea/
 .vscode/
+.claude/
 
 # Internal planning drafts
 plan_*.md

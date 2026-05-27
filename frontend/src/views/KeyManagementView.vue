@@ -5,6 +5,7 @@ import { apiFetch } from '../api/client'
 import AppSelect from '../components/AppSelect.vue'
 import { useAuthStore } from '../stores/auth'
 import type { ApiKeyEntry, ApiKeyGroup } from '../types'
+import { copyText } from '../utils/clipboard'
 
 const router = useRouter()
 const auth = useAuthStore()
@@ -16,10 +17,10 @@ const error = ref('')
 const newKey = ref({ name: '默认密钥', apiKey: '', groupId: '', makeActive: true })
 const keyDrafts = ref<Record<string, { name: string; groupId: string }>>({})
 
-const groupOptions = computed(() => [
-  { value: '', label: '不分组' },
-  ...groups.value.map((group) => ({ value: group.id, label: group.name, hint: group.description || undefined }))
-])
+const defaultChatGroup = computed(() => groups.value.find((group) => group.purpose === 'chat') || groups.value[0] || null)
+const groupOptions = computed(() =>
+  groups.value.map((group) => ({ value: group.id, label: group.name, hint: group.description || undefined }))
+)
 
 function resetMessage() {
   notice.value = ''
@@ -28,7 +29,7 @@ function resetMessage() {
 
 function draftFor(key: ApiKeyEntry) {
   if (!keyDrafts.value[key.id]) {
-    keyDrafts.value[key.id] = { name: key.name, groupId: key.groupId || '' }
+    keyDrafts.value[key.id] = { name: key.name, groupId: key.groupId || defaultChatGroup.value?.id || '' }
   }
   return keyDrafts.value[key.id]
 }
@@ -44,7 +45,12 @@ function setKeyDraftGroup(key: ApiKeyEntry, value: string | number) {
 async function load() {
   keys.value = await apiFetch<ApiKeyEntry[]>('/api-keys')
   groups.value = await apiFetch<ApiKeyGroup[]>('/api-key-groups')
-  keyDrafts.value = Object.fromEntries(keys.value.map((key) => [key.id, { name: key.name, groupId: key.groupId || '' }]))
+  if (!newKey.value.groupId || !groups.value.some((group) => group.id === newKey.value.groupId)) {
+    newKey.value.groupId = defaultChatGroup.value?.id || ''
+  }
+  keyDrafts.value = Object.fromEntries(
+    keys.value.map((key) => [key.id, { name: key.name, groupId: key.groupId || defaultChatGroup.value?.id || '' }])
+  )
 }
 
 async function createKey() {
@@ -55,11 +61,11 @@ async function createKey() {
       body: JSON.stringify({
         name: newKey.value.name,
         apiKey: newKey.value.apiKey,
-        groupId: newKey.value.groupId || null,
+        groupId: newKey.value.groupId || defaultChatGroup.value?.id || null,
         makeActive: newKey.value.makeActive
       })
     })
-    newKey.value = { name: '默认密钥', apiKey: '', groupId: '', makeActive: true }
+    newKey.value = { name: '默认密钥', apiKey: '', groupId: defaultChatGroup.value?.id || '', makeActive: true }
     notice.value = '密钥已添加'
     await load()
     await auth.loadMe()
@@ -74,7 +80,7 @@ async function saveKey(key: ApiKeyEntry) {
   try {
     await apiFetch<ApiKeyEntry>(`/api-keys/${key.id}`, {
       method: 'PATCH',
-      body: JSON.stringify({ name: draft.name, groupId: draft.groupId || null })
+      body: JSON.stringify({ name: draft.name, groupId: draft.groupId || defaultChatGroup.value?.id || null })
     })
     notice.value = '密钥信息已保存'
     await load()
@@ -87,7 +93,7 @@ async function activateKey(key: ApiKeyEntry) {
   resetMessage()
   try {
     await apiFetch<ApiKeyEntry>(`/api-keys/${key.id}/activate`, { method: 'POST' })
-    notice.value = '已切换当前使用密钥'
+    notice.value = '已切换该分组当前使用密钥'
     await load()
   } catch (err) {
     error.value = err instanceof Error ? err.message : '切换失败'
@@ -110,7 +116,7 @@ async function copyKey(key: ApiKeyEntry) {
   resetMessage()
   try {
     const result = await apiFetch<{ apiKey: string }>(`/api-keys/${key.id}/secret`)
-    await navigator.clipboard.writeText(result.apiKey)
+    await copyText(result.apiKey)
     notice.value = '密钥已复制'
   } catch (err) {
     error.value = err instanceof Error ? err.message : '复制失败'
@@ -146,7 +152,7 @@ onMounted(load)
         </div>
         <label class="inline-flex items-center gap-2 text-sm app-muted">
           <input v-model="newKey.makeActive" type="checkbox" />
-          添加后立即设为当前使用密钥
+          添加后立即设为该分组当前使用密钥
         </label>
         <div>
           <button class="app-primary-button rounded-md px-4 py-2" type="submit">添加密钥</button>
@@ -183,7 +189,7 @@ onMounted(load)
                 <div class="key-mask">{{ key.maskedKey }}</div>
               </td>
               <td class="p-3">
-                <span v-if="key.isActive" class="text-green-500 font-semibold">当前使用</span>
+                <span v-if="key.isActive" class="text-green-500 font-semibold">当前分组使用</span>
                 <span v-else class="app-muted">备用</span>
               </td>
               <td class="p-3">

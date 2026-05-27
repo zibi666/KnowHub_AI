@@ -28,6 +28,7 @@ async def ensure_initial_admin(db: AsyncSession) -> None:
             max_storage_bytes=settings.default_storage_bytes,
             max_image_mb=settings.max_image_mb,
             max_document_mb=settings.max_document_mb,
+            upload_rate_limit_per_hour=settings.upload_rate_limit_per_hour,
         )
     )
     await db.commit()

@@ -1,5 +1,6 @@
 from app.models.entities import (
     Attachment,
+    AttachmentChunk,
     ApiKeyGroup,
     AuditLog,
     BackgroundJob,
@@ -18,6 +19,7 @@ from app.models.entities import (
 
 __all__ = [
     "Attachment",
+    "AttachmentChunk",
     "ApiKeyGroup",
     "AuditLog",
     "BackgroundJob",

@@ -115,7 +115,9 @@ export function renderMarkdown(source: string): string {
       'munder',
       'mover',
       'mpadded',
-      'menclose'
+      'menclose',
+      'svg',
+      'path'
     ],
     ADD_ATTR: [
       'target',
@@ -129,7 +131,21 @@ export function renderMarkdown(source: string): string {
       'display',
       'alttext',
       'stretchy',
-      'accent'
+      'accent',
+      'width',
+      'height',
+      'viewBox',
+      'preserveAspectRatio',
+      'd',
+      'fill-rule',
+      'fill-opacity',
+      'stroke-width',
+      'stroke-linecap',
+      'stroke-linejoin',
+      'stroke-miterlimit',
+      'stroke-dasharray',
+      'stroke-dashoffset',
+      'stroke-opacity'
     ]
   })
 }

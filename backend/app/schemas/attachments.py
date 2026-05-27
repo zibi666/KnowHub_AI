@@ -32,6 +32,9 @@ class AttachmentOut(ApiModel):
     parse_status: str
     parse_error: str | None = None
     context_text_tokens: int
+    chunk_count: int = 0
+    embedding_status: str | None = None
+    preview_text: str | None = None
     created_at: datetime
 
 
@@ -39,3 +42,12 @@ class PreviewTextOut(ApiModel):
     attachment_id: str
     filename: str
     preview_text: str
+
+
+class AttachmentChunkOut(ApiModel):
+    chunk_index: int
+    content_preview: str
+    token_count: int
+    embedding_status: str
+    embedding_model: str | None = None
+    error: str | None = None

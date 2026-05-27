@@ -37,6 +37,7 @@ class UserOut(ApiModel):
     must_change_password: bool
     has_api_key: bool = False
     default_model: str | None = None
+    avatar_url: str | None = None
 
 
 class LoginResponse(ApiModel):

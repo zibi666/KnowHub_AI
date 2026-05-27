@@ -5,6 +5,7 @@ import ChatView from '../views/ChatView.vue'
 import AdminView from '../views/AdminView.vue'
 import SettingsView from '../views/SettingsView.vue'
 import KeyManagementView from '../views/KeyManagementView.vue'
+import VersionControlView from '../views/VersionControlView.vue'
 
 export const router = createRouter({
   history: createWebHistory(),
@@ -13,7 +14,8 @@ export const router = createRouter({
     { path: '/', component: ChatView },
     { path: '/settings', component: SettingsView },
     { path: '/keys', component: KeyManagementView },
-    { path: '/admin', component: AdminView }
+    { path: '/admin', component: AdminView },
+    { path: '/versions', component: VersionControlView }
   ]
 })
 

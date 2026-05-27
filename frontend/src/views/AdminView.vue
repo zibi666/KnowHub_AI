@@ -1,22 +1,30 @@
 <script setup lang="ts">
-import { computed, onMounted, ref } from 'vue'
+import { computed, onBeforeUnmount, onMounted, ref } from 'vue'
 import { useRouter } from 'vue-router'
+import { X } from 'lucide-vue-next'
 import { apiFetch } from '../api/client'
 import AppSelect from '../components/AppSelect.vue'
-import type { ApiKeyEntry, ApiKeyGroup, User } from '../types'
+import { useAuthStore } from '../stores/auth'
+import type { ApiKeyEntry, ApiKeyGroup, User, UserQuota } from '../types'
+import { copyText } from '../utils/clipboard'
 
 const router = useRouter()
+const auth = useAuthStore()
 const users = ref<User[]>([])
 const analytics = ref<any>(null)
 const deadLetters = ref<any[]>([])
 const username = ref('')
 const loginPassword = ref('')
-const cleanupKind = ref('pending_cos')
+const cleanupKind = ref('unused_image_attachments_7d')
 const cleanupPreview = ref<any>(null)
 const cleanupConfirming = ref(false)
+const deleteConfirmUser = ref<User | null>(null)
+const deleteConfirming = ref(false)
 const reasoningModels = ref('')
 const notice = ref('')
+let noticeTimer: ReturnType<typeof window.setTimeout> | null = null
 const userDrafts = ref<Record<string, { username: string; role: string; status: string; password: string }>>({})
+const quotaDrafts = ref<Record<string, { uploadRateLimitPerHour: number }>>({})
 const groups = ref<ApiKeyGroup[]>([])
 const selectedKeyUser = ref<User | null>(null)
 const selectedUserKeys = ref<ApiKeyEntry[]>([])
@@ -28,11 +36,11 @@ const metricLabels: Record<string, string> = {
   conversations: '会话数',
   messages: '消息数',
   attachments: '附件数',
-  totalTokens: '总 Token',
-  estimatedCosBytes: 'COS 估算流量'
+  totalTokens: '总 Token'
 }
 
 const cleanupKindLabels: Record<string, string> = {
+  unused_image_attachments_7d: '7天未使用图片',
   pending_cos: '未提交上传',
   soft_deleted_attachments: '软删除附件',
   expired_attachments: '过期附件',
@@ -40,6 +48,11 @@ const cleanupKindLabels: Record<string, string> = {
 }
 
 const cleanupKindOptions = [
+  {
+    value: 'unused_image_attachments_7d',
+    label: '7天未使用图片',
+    hint: '删除超过 7 天且没有挂到任何聊天消息里的图片'
+  },
   { value: 'pending_cos', label: '未提交上传' },
   { value: 'soft_deleted_attachments', label: '软删除附件' },
   { value: 'expired_attachments', label: '过期附件' },
@@ -53,21 +66,38 @@ const userRoleOptions = [
 
 const userStatusOptions = [
   { value: 'active', label: '启用' },
-  { value: 'disabled', label: '禁用' },
-  { value: 'purging', label: '删除中' }
+  { value: 'disabled', label: '禁用' }
 ]
 
-const groupOptions = computed(() => [
-  { value: '', label: '不分组' },
-  ...groups.value.map((group) => ({ value: group.id, label: group.name, hint: group.description || undefined }))
-])
+const defaultChatGroup = computed(() => groups.value.find((group) => group.purpose === 'chat') || groups.value[0] || null)
+const groupOptions = computed(() =>
+  groups.value.map((group) => ({ value: group.id, label: group.name, hint: group.description || undefined }))
+)
+
+const visibleAnalytics = computed(() => {
+  const source = analytics.value || {}
+  return Object.fromEntries(Object.entries(source).filter(([key]) => key !== 'estimatedCosBytes'))
+})
+
+function editableUserStatus(status: string) {
+  return status === 'disabled' ? 'disabled' : 'active'
+}
+
+function showNotice(message: string) {
+  notice.value = message
+  if (noticeTimer) window.clearTimeout(noticeTimer)
+  noticeTimer = window.setTimeout(() => {
+    notice.value = ''
+    noticeTimer = null
+  }, 2600)
+}
 
 function draftFor(user: User) {
   if (!userDrafts.value[user.id]) {
     userDrafts.value[user.id] = {
       username: user.username,
       role: user.role,
-      status: user.status,
+      status: editableUserStatus(user.status),
       password: ''
     }
   }
@@ -76,9 +106,16 @@ function draftFor(user: User) {
 
 function keyDraftFor(key: ApiKeyEntry) {
   if (!keyDrafts.value[key.id]) {
-    keyDrafts.value[key.id] = { name: key.name, groupId: key.groupId || '' }
+    keyDrafts.value[key.id] = { name: key.name, groupId: key.groupId || defaultChatGroup.value?.id || '' }
   }
   return keyDrafts.value[key.id]
+}
+
+function quotaDraftFor(user: User) {
+  if (!quotaDrafts.value[user.id]) {
+    quotaDrafts.value[user.id] = { uploadRateLimitPerHour: 0 }
+  }
+  return quotaDrafts.value[user.id]
 }
 
 function setCleanupKind(value: string | number) {
@@ -109,21 +146,35 @@ async function load() {
       {
         username: user.username,
         role: user.role,
-        status: user.status,
+        status: editableUserStatus(user.status),
         password: ''
       }
     ])
   )
+  await loadQuotaDrafts()
   analytics.value = await apiFetch('/admin/analytics')
   deadLetters.value = await apiFetch<any[]>('/admin/dead-letters')
   const reasoning = await apiFetch<{ models: string[] }>('/admin/settings/reasoning-models')
   reasoningModels.value = reasoning.models.join(', ')
   groups.value = await apiFetch<ApiKeyGroup[]>('/api-key-groups')
+  if (!adminKeyDraft.value.groupId || !groups.value.some((group) => group.id === adminKeyDraft.value.groupId)) {
+    adminKeyDraft.value.groupId = defaultChatGroup.value?.id || ''
+  }
   if (selectedKeyUser.value) {
     const refreshed = users.value.find((user) => user.id === selectedKeyUser.value?.id)
     selectedKeyUser.value = refreshed || null
     if (selectedKeyUser.value) await loadSelectedUserKeys(selectedKeyUser.value)
   }
+}
+
+async function loadQuotaDrafts() {
+  const entries = await Promise.all(
+    users.value.map(async (user) => {
+      const quota = await apiFetch<UserQuota>(`/admin/users/${user.id}/quotas`)
+      return [user.id, { uploadRateLimitPerHour: quota.uploadRateLimitPerHour }] as const
+    })
+  )
+  quotaDrafts.value = Object.fromEntries(entries)
 }
 
 async function createUser() {
@@ -133,19 +184,13 @@ async function createUser() {
   })
   username.value = ''
   loginPassword.value = ''
-  await load()
-}
-
-async function updateUser(user: User, status: string) {
-  await apiFetch(`/admin/users/${user.id}`, {
-    method: 'PATCH',
-    body: JSON.stringify({ status })
-  })
+  showNotice('用户已创建')
   await load()
 }
 
 async function saveUser(user: User) {
   const draft = userDrafts.value[user.id]
+  const quotaDraft = quotaDraftFor(user)
   if (!draft) return
   await apiFetch(`/admin/users/${user.id}`, {
     method: 'PATCH',
@@ -156,14 +201,48 @@ async function saveUser(user: User) {
       password: draft.password || undefined
     })
   })
-  notice.value = '用户信息已保存'
+  await apiFetch(`/admin/users/${user.id}/quotas`, {
+    method: 'PATCH',
+    body: JSON.stringify({
+      uploadRateLimitPerHour: Math.max(0, Number(quotaDraft.uploadRateLimitPerHour) || 0)
+    })
+  })
+  showNotice('用户信息已保存')
   await load()
+}
+
+function openDeleteUserConfirm(user: User) {
+  if (user.id === auth.user?.id) return
+  deleteConfirmUser.value = user
+}
+
+function closeDeleteUserConfirm() {
+  if (!deleteConfirming.value) deleteConfirmUser.value = null
+}
+
+async function confirmDeleteUser() {
+  if (!deleteConfirmUser.value || deleteConfirming.value) return
+  deleteConfirming.value = true
+  try {
+    await apiFetch(`/admin/users/${deleteConfirmUser.value.id}`, { method: 'DELETE' })
+    showNotice(`用户 ${deleteConfirmUser.value.username} 已删除`)
+    if (selectedKeyUser.value?.id === deleteConfirmUser.value.id) {
+      selectedKeyUser.value = null
+      selectedUserKeys.value = []
+    }
+    deleteConfirmUser.value = null
+    await load()
+  } finally {
+    deleteConfirming.value = false
+  }
 }
 
 async function loadSelectedUserKeys(user: User) {
   selectedKeyUser.value = user
   selectedUserKeys.value = await apiFetch<ApiKeyEntry[]>(`/admin/users/${user.id}/api-keys`)
-  keyDrafts.value = Object.fromEntries(selectedUserKeys.value.map((key) => [key.id, { name: key.name, groupId: key.groupId || '' }]))
+  keyDrafts.value = Object.fromEntries(
+    selectedUserKeys.value.map((key) => [key.id, { name: key.name, groupId: key.groupId || defaultChatGroup.value?.id || '' }])
+  )
 }
 
 async function createAdminKey() {
@@ -173,12 +252,12 @@ async function createAdminKey() {
     body: JSON.stringify({
       name: adminKeyDraft.value.name,
       apiKey: adminKeyDraft.value.apiKey,
-      groupId: adminKeyDraft.value.groupId || null,
+      groupId: adminKeyDraft.value.groupId || defaultChatGroup.value?.id || null,
       makeActive: adminKeyDraft.value.makeActive
     })
   })
-  adminKeyDraft.value = { name: '默认密钥', apiKey: '', groupId: '', makeActive: true }
-  notice.value = '用户密钥已添加'
+  adminKeyDraft.value = { name: '默认密钥', apiKey: '', groupId: defaultChatGroup.value?.id || '', makeActive: true }
+  showNotice('用户密钥已添加')
   await load()
 }
 
@@ -187,31 +266,31 @@ async function saveAdminKey(key: ApiKeyEntry) {
   const draft = keyDraftFor(key)
   await apiFetch<ApiKeyEntry>(`/admin/users/${selectedKeyUser.value.id}/api-keys/${key.id}`, {
     method: 'PATCH',
-    body: JSON.stringify({ name: draft.name, groupId: draft.groupId || null })
+    body: JSON.stringify({ name: draft.name, groupId: draft.groupId || defaultChatGroup.value?.id || null })
   })
-  notice.value = '用户密钥已保存'
+  showNotice('用户密钥已保存')
   await loadSelectedUserKeys(selectedKeyUser.value)
 }
 
 async function activateAdminKey(key: ApiKeyEntry) {
   if (!selectedKeyUser.value) return
   await apiFetch<ApiKeyEntry>(`/admin/users/${selectedKeyUser.value.id}/api-keys/${key.id}/activate`, { method: 'POST' })
-  notice.value = '已切换该用户当前密钥'
+  showNotice('已切换该用户当前密钥')
   await loadSelectedUserKeys(selectedKeyUser.value)
 }
 
 async function deleteAdminKey(key: ApiKeyEntry) {
   if (!selectedKeyUser.value) return
   await apiFetch(`/admin/users/${selectedKeyUser.value.id}/api-keys/${key.id}`, { method: 'DELETE' })
-  notice.value = '用户密钥已删除'
+  showNotice('用户密钥已删除')
   await load()
 }
 
 async function copyAdminKey(key: ApiKeyEntry) {
   if (!selectedKeyUser.value) return
   const result = await apiFetch<{ apiKey: string }>(`/admin/users/${selectedKeyUser.value.id}/api-keys/${key.id}/secret`)
-  await navigator.clipboard.writeText(result.apiKey)
-  notice.value = '密钥已复制'
+  await copyText(result.apiKey)
+  showNotice('密钥已复制')
 }
 
 async function previewCleanup() {
@@ -232,7 +311,7 @@ async function confirmCleanup() {
         confirmToken: cleanupPreview.value.confirmToken
       })
     })
-    notice.value = `清理完成：${JSON.stringify(result.result)}`
+    showNotice(`清理完成：${JSON.stringify(result.result)}`)
     cleanupPreview.value = null
     await load()
   } finally {
@@ -246,10 +325,13 @@ async function saveReasoningModels() {
     method: 'PATCH',
     body: JSON.stringify({ models })
   })
-  notice.value = 'Reasoning 模型列表已保存'
+  showNotice('Reasoning 模型列表已保存')
 }
 
 onMounted(load)
+onBeforeUnmount(() => {
+  if (noticeTimer) window.clearTimeout(noticeTimer)
+})
 </script>
 
 <template>
@@ -258,10 +340,12 @@ onMounted(load)
       <button class="app-secondary-button text-sm rounded-md px-3 py-1" @click="router.push('/')">返回</button>
       <h1 class="ml-4 font-semibold">管理后台</h1>
     </header>
+    <Transition name="admin-toast">
+      <div v-if="notice" class="admin-toast" role="status" aria-live="polite">{{ notice }}</div>
+    </Transition>
     <section class="max-w-6xl mx-auto p-5 space-y-5">
-      <p v-if="notice" class="app-card rounded-lg p-3 text-sm text-green-700">{{ notice }}</p>
       <div class="grid grid-cols-5 gap-3">
-        <div v-for="(value, key) in analytics" :key="key" class="app-card rounded-lg p-4">
+        <div v-for="(value, key) in visibleAnalytics" :key="key" class="app-card rounded-lg p-4">
           <div class="app-muted text-xs">{{ metricLabels[String(key)] || key }}</div>
           <div class="text-xl font-semibold">{{ value }}</div>
         </div>
@@ -303,7 +387,7 @@ onMounted(load)
       <div class="app-card rounded-lg overflow-visible">
         <table class="w-full text-sm">
           <thead class="app-table-head text-left">
-            <tr><th class="p-3">用户名</th><th class="p-3">角色</th><th class="p-3">状态</th><th class="p-3">需改密</th><th class="p-3">密钥</th><th class="p-3">操作</th></tr>
+            <tr><th class="p-3">用户名</th><th class="p-3">角色</th><th class="p-3">状态</th><th class="p-3">上传限流/小时</th><th class="p-3">需改密</th><th class="p-3">密钥</th><th class="p-3">操作</th></tr>
           </thead>
           <tbody>
             <tr v-for="user in users" :key="user.id" class="app-table-row">
@@ -326,6 +410,16 @@ onMounted(load)
                   @update:model-value="setUserStatus(user, $event)"
                 />
               </td>
+              <td class="p-3">
+                <input
+                  v-model.number="quotaDraftFor(user).uploadRateLimitPerHour"
+                  class="app-input w-28 rounded-md px-2 py-1"
+                  min="0"
+                  type="number"
+                  title="0 表示不限流"
+                />
+                <div class="app-muted mt-1 text-[11px]">0 为不限</div>
+              </td>
               <td class="p-3">{{ user.mustChangePassword ? '是' : '否' }}</td>
               <td class="p-3">
                 <button class="app-secondary-button rounded px-2 py-1" @click="loadSelectedUserKeys(user)">
@@ -336,8 +430,14 @@ onMounted(load)
                 <div class="flex flex-wrap gap-2">
                   <input v-model="draftFor(user).password" class="app-input rounded-md px-2 py-1 text-xs" type="password" placeholder="新登录密码" />
                   <button class="app-primary-button rounded px-2 py-1" @click="saveUser(user)">保存</button>
-                  <button v-if="user.status === 'active'" class="app-secondary-button rounded px-2 py-1" @click="updateUser(user, 'disabled')">禁用</button>
-                  <button v-else class="app-secondary-button rounded px-2 py-1" @click="updateUser(user, 'active')">启用</button>
+                  <button
+                    class="admin-danger-button rounded px-2 py-1"
+                    :disabled="user.id === auth.user?.id"
+                    :title="user.id === auth.user?.id ? '不能删除当前登录账号' : '删除用户'"
+                    @click="openDeleteUserConfirm(user)"
+                  >
+                    删除
+                  </button>
                 </div>
               </td>
             </tr>
@@ -361,7 +461,7 @@ onMounted(load)
           <input v-model="adminKeyDraft.apiKey" class="app-input rounded-md px-3 py-2" type="password" placeholder="API Key" />
           <label class="inline-flex items-center gap-2 text-sm app-muted">
             <input v-model="adminKeyDraft.makeActive" type="checkbox" />
-            设为当前
+            设为该分组当前
           </label>
           <button class="app-primary-button rounded-md px-4 py-2" type="submit">添加</button>
         </form>
@@ -384,7 +484,7 @@ onMounted(load)
               <td class="p-3">
                 <div class="key-mask">{{ key.maskedKey }}</div>
               </td>
-              <td class="p-3">{{ key.isActive ? '当前使用' : '备用' }}</td>
+              <td class="p-3">{{ key.isActive ? '当前分组使用' : '备用' }}</td>
               <td class="p-3">
                 <div class="flex flex-wrap gap-2">
                   <button class="app-secondary-button rounded px-2 py-1" @click="saveAdminKey(key)">保存</button>
@@ -417,5 +517,24 @@ onMounted(load)
         </table>
       </div>
     </section>
+    <Transition name="dialog-pop">
+      <div v-if="deleteConfirmUser" class="confirm-modal-backdrop" role="presentation" @click.self="closeDeleteUserConfirm">
+        <div class="confirm-modal" role="dialog" aria-modal="true" aria-labelledby="delete-user-title">
+          <div class="confirm-modal-header">
+            <h2 id="delete-user-title">删除用户</h2>
+            <button class="confirm-modal-close" type="button" title="关闭" aria-label="关闭" :disabled="deleteConfirming" @click="closeDeleteUserConfirm">
+              <X :size="17" />
+            </button>
+          </div>
+          <p>确定要删除用户「{{ deleteConfirmUser.username }}」吗？该用户的会话、附件、密钥和用量记录会一起删除。</p>
+          <div class="confirm-modal-actions">
+            <button class="confirm-secondary-button" type="button" :disabled="deleteConfirming" @click="closeDeleteUserConfirm">取消</button>
+            <button class="confirm-danger-button" type="button" :disabled="deleteConfirming" @click="confirmDeleteUser">
+              {{ deleteConfirming ? '删除中...' : '确认删除' }}
+            </button>
+          </div>
+        </div>
+      </div>
+    </Transition>
   </main>
 </template>

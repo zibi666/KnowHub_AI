@@ -1,8 +1,10 @@
 from __future__ import annotations
 
 from datetime import datetime
+from pathlib import Path
 
-from fastapi import APIRouter, Depends, Request, Response
+from fastapi import APIRouter, Depends, File, Request, Response, UploadFile
+from fastapi.responses import FileResponse
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -24,6 +26,7 @@ from app.security.passwords import hash_password, verify_password
 from app.security.sessions import SessionData, new_csrf_token, session_store
 from app.services.api_keys import create_api_key_for_user, get_active_api_key, has_any_api_key
 from app.services.audit import write_audit
+from app.services.avatars import avatar_url, read_avatar_upload, remove_avatar_file, save_avatar_image
 from app.services.ratelimit import assert_not_blocked, clear_failure, record_failure
 
 router = APIRouter(prefix="/auth", tags=["auth"])
@@ -82,6 +85,7 @@ async def user_out(db: AsyncSession, user: User) -> UserOut:
         status=user.status,
         must_change_password=user.must_change_password,
         has_api_key=await has_any_api_key(db, user.id),
+        avatar_url=avatar_url(user),
     )
 
 
@@ -147,7 +151,15 @@ async def first_login(
 
     await create_api_key_for_user(db, user.id, payload.api_key, name="默认密钥", make_active=True)
     if not await db.get(UserQuota, user.id):
-        db.add(UserQuota(user_id=user.id, max_storage_bytes=settings.default_storage_bytes))
+        db.add(
+            UserQuota(
+                user_id=user.id,
+                max_storage_bytes=settings.default_storage_bytes,
+                max_image_mb=settings.max_image_mb,
+                max_document_mb=settings.max_document_mb,
+                upload_rate_limit_per_hour=settings.upload_rate_limit_per_hour,
+            )
+        )
     await write_audit(db, "api_key.bound", actor_user_id=user.id, target_type="user", target_id=user.id)
     csrf = await set_session_cookies(response, user, False, settings)
     await db.commit()
@@ -225,4 +237,45 @@ async def update_profile(
         user.username = new_username
         await write_audit(db, "user.username_updated", actor_user_id=user.id, target_type="user", target_id=user.id)
         await db.commit()
+    return await user_out(db, user)
+
+
+@settings_router.get("/avatar")
+async def get_avatar(user: User = Depends(get_current_user)):
+    if not user.avatar_path:
+        raise api_error("FORBIDDEN", "头像不存在", status_code=404)
+    path = Path(user.avatar_path)
+    if not path.exists():
+        raise api_error("FORBIDDEN", "头像不存在", status_code=404)
+    return FileResponse(path, media_type="image/jpeg", headers={"Cache-Control": "private, no-store"})
+
+
+@settings_router.post("/avatar", response_model=UserOut)
+async def upload_avatar(
+    file: UploadFile = File(...),
+    user: User = Depends(get_current_user),
+    db: AsyncSession = Depends(get_session),
+) -> UserOut:
+    data = await read_avatar_upload(file)
+    remove_avatar_file(user)
+    destination = save_avatar_image(user.id, data)
+    user.avatar_path = str(destination)
+    user.avatar_updated_at = datetime.utcnow()
+    await write_audit(db, "user.avatar_updated", actor_user_id=user.id, target_type="user", target_id=user.id)
+    await db.commit()
+    await db.refresh(user)
+    return await user_out(db, user)
+
+
+@settings_router.delete("/avatar", response_model=UserOut)
+async def delete_avatar(
+    user: User = Depends(get_current_user),
+    db: AsyncSession = Depends(get_session),
+) -> UserOut:
+    remove_avatar_file(user)
+    user.avatar_path = None
+    user.avatar_updated_at = None
+    await write_audit(db, "user.avatar_deleted", actor_user_id=user.id, target_type="user", target_id=user.id)
+    await db.commit()
+    await db.refresh(user)
     return await user_out(db, user)

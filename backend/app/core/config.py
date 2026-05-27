@@ -62,6 +62,16 @@ class Settings(BaseSettings):
 
     max_image_mb: int = 5
     max_document_mb: int = 10
+    upload_rate_limit_per_hour: int = 0
+    vision_model_patterns: str = "gpt-4o,gpt-4.1,gpt-5,o3,o4,vision,vl,gemini,claude"
+    vision_image_max_edge: int = 1024
+    vision_image_jpeg_quality: int = 82
+    vision_image_max_count: int = 8
+    embedding_model: str = "text-embedding-3-small"
+    embedding_max_chars_per_chunk: int = 1800
+    embedding_chunk_overlap_chars: int = 200
+    rag_top_k_per_attachment: int = 5
+    rag_max_context_tokens: int = 12000
     default_user_storage_gb: int = 2
     local_cache_max_gb: int = 5
     local_cache_max_file_mb: int = 50
@@ -96,6 +106,10 @@ class Settings(BaseSettings):
     @property
     def reasoning_effort_allowed_set(self) -> set[str]:
         return {item.strip().lower() for item in self.model_reasoning_effort_allowed.split(",") if item.strip()}
+
+    @property
+    def vision_model_pattern_list(self) -> list[str]:
+        return [item.strip().lower() for item in self.vision_model_patterns.split(",") if item.strip()]
 
     @property
     def default_storage_bytes(self) -> int:

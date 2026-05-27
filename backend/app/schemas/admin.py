@@ -27,6 +27,7 @@ class UpdateQuotaRequest(ApiModel):
     max_storage_bytes: int | None = None
     max_image_mb: int | None = None
     max_document_mb: int | None = None
+    upload_rate_limit_per_hour: int | None = None
     daily_download_limit: int | None = None
     allow_upload: bool | None = None
     allow_code_upload: bool | None = None
@@ -39,6 +40,7 @@ class QuotaOut(ApiModel):
     max_storage_bytes: int
     max_image_mb: int
     max_document_mb: int
+    upload_rate_limit_per_hour: int
     daily_download_limit: int
     allow_upload: bool
     allow_code_upload: bool

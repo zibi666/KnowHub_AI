@@ -5,6 +5,7 @@ export interface User {
   status: string
   mustChangePassword: boolean
   hasApiKey: boolean
+  avatarUrl?: string | null
 }
 
 export interface Conversation {
@@ -17,6 +18,7 @@ export interface Conversation {
 
 export interface Message {
   id: string
+  clientKey?: string
   conversationId: string
   parentMessageId?: string | null
   retryOfMessageId?: string | null
@@ -28,6 +30,56 @@ export interface Message {
   completionTokens?: number
   totalTokens: number
   tokensSource?: string
+  firstTokenSeconds?: number | null
+  first_token_seconds?: number | null
+  createdAt: string
+  attachments?: Attachment[]
+  generatedImageSize?: string
+  imageProgress?: ImageProgress
+  image_progress?: ImageProgress
+  elapsedSeconds?: number
+  elapsed_seconds?: number
+  startedAt?: number
+  started_at?: number
+  progressDetail?: string
+  progress_detail?: string
+  progressPhase?: string
+  progress_phase?: string
+}
+
+export interface SendMessageResponse {
+  conversationId: string
+  conversation_id?: string
+  userMessage: Message
+  user_message?: Message
+  assistantMessage: Message
+  assistant_message?: Message
+  status: string
+  background: boolean
+}
+
+export interface ImageProgress {
+  b64Json?: string
+  b64_json?: string
+  index: number
+  total: number
+  outputFormat?: string
+  output_format?: string
+  detail?: string
+  elapsedSeconds?: number
+  elapsed_seconds?: number
+  startedAt?: number
+  started_at?: number
+  phase?: string
+  size?: string
+}
+
+export interface ConversationSearchResult {
+  conversationId: string
+  conversationTitle: string
+  messageId: string
+  role: 'user' | 'assistant' | 'system'
+  snippet: string
   createdAt: string
 }
 
@@ -39,12 +91,37 @@ export interface Attachment {
   parseStatus: string
   parseError?: string
   contextTextTokens: number
+  chunkCount?: number
+  embeddingStatus?: string | null
+  previewText?: string | null
+  previewDataUrl?: string
+  createdAt?: string
+}
+
+export interface ImageGenerationSettings {
+  size: string
+  quality: string
+  background: string
+  outputFormat: string
+  outputCompression: number
+  moderation: string
+}
+
+export interface AttachmentChunkPreview {
+  chunkIndex: number
+  contentPreview: string
+  tokenCount: number
+  embeddingStatus: string
+  embeddingModel?: string | null
+  error?: string | null
 }
 
 export interface ApiKeyGroup {
   id: string
   name: string
   description?: string
+  purpose: 'none' | 'chat' | 'image'
+  isSystem: boolean
 }
 
 export interface ApiKeyEntry {
@@ -61,4 +138,18 @@ export interface ApiKeyEntry {
   isActive: boolean
   availableModels: string[]
   probedAt?: string | null
+}
+
+export interface UserQuota {
+  userId: string
+  maxStorageBytes: number
+  maxImageMb: number
+  maxDocumentMb: number
+  uploadRateLimitPerHour: number
+  dailyDownloadLimit: number
+  allowUpload: boolean
+  allowCodeUpload: boolean
+  modelWhitelistJson?: string[] | null
+  defaultModel?: string | null
+  autoCompactionEnabled: boolean
 }

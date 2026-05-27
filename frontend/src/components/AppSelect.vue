@@ -18,13 +18,15 @@ const props = withDefaults(
     menuClass?: string
     optionClass?: string
     title?: string
+    disabled?: boolean
   }>(),
   {
     placeholder: '请选择',
     buttonClass: '',
     menuClass: '',
     optionClass: '',
-    title: ''
+    title: '',
+    disabled: false
   }
 )
 
@@ -41,6 +43,7 @@ const selectedOption = computed(() => props.options.find((option) => option.valu
 const displayLabel = computed(() => selectedOption.value?.label || props.placeholder)
 
 function toggle() {
+  if (props.disabled) return
   const nextOpen = !open.value
   if (nextOpen) window.dispatchEvent(new CustomEvent('app-select-open', { detail: selectId }))
   open.value = nextOpen
@@ -85,6 +88,7 @@ onBeforeUnmount(() => {
       type="button"
       :title="title || displayLabel"
       :aria-expanded="open"
+      :disabled="disabled"
       @click="toggle"
     >
       <span v-if="selectedOption?.swatch" class="app-select-swatch" :style="{ background: selectedOption.swatch }" />

@@ -10,7 +10,12 @@ from app.core.db import SessionLocal, create_all, engine
 from app.middlewares.csrf import CsrfMiddleware
 from app.middlewares.request_id import RequestIdMiddleware
 from app.services.bootstrap import ensure_initial_admin
-from app.services.api_keys import migrate_legacy_api_keys
+from app.services.api_keys import (
+    ensure_default_api_key_groups,
+    migrate_legacy_api_key_groups,
+    migrate_legacy_api_keys,
+    normalize_active_api_keys,
+)
 
 
 app = FastAPI(title="Private GPT Web", version="0.1.0")
@@ -30,8 +35,11 @@ async def validation_exception_handler(request, exc: RequestValidationError):
 async def on_startup() -> None:
     await create_all()
     async with SessionLocal() as db:
+        await ensure_default_api_key_groups(db)
         await ensure_initial_admin(db)
         await migrate_legacy_api_keys(db)
+        await migrate_legacy_api_key_groups(db)
+        await normalize_active_api_keys(db)
 
 
 @app.get("/healthz")
