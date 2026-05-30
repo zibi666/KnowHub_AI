@@ -18,9 +18,13 @@ class ApiKeyOut(ApiModel):
     name: str
     group_id: str | None = None
     group_name: str | None = None
+    endpoint_id: str | None = None
+    endpoint_name: str | None = None
+    base_url: str | None = None
     fingerprint: str
     last4: str
     masked_key: str
+    api_key: str | None = None
     status: str
     is_active: bool
     available_models: list[str] = []
@@ -35,6 +39,7 @@ class CreateApiKeyRequest(ApiModel):
     name: str = "默认密钥"
     api_key: str
     group_id: str | None = None
+    endpoint_id: str | None = None
     make_active: bool = True
 
 
@@ -47,3 +52,24 @@ class ApiKeyGroupRequest(ApiModel):
     name: str
     description: str | None = None
     purpose: str = "none"
+
+
+class ModelEndpointOut(ApiModel):
+    id: str
+    name: str
+    base_url: str
+    is_active: bool
+    status: str
+    last_probe_error: str | None = None
+    probed_at: str | None = None
+
+
+class ModelEndpointRequest(ApiModel):
+    name: str = "Default BaseURL"
+    base_url: str
+    make_active: bool = True
+
+
+class UpdateModelEndpointRequest(ApiModel):
+    name: str | None = None
+    base_url: str | None = None

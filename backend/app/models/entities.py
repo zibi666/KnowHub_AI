@@ -52,6 +52,7 @@ class User(Base, TimestampMixin):
     avatar_updated_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=False), nullable=True)
 
     api_keys: Mapped[list[UserApiKey]] = relationship(back_populates="user", cascade="all, delete-orphan")
+    model_endpoints: Mapped[list[UserModelEndpoint]] = relationship(back_populates="user", cascade="all, delete-orphan")
     quota: Mapped[UserQuota | None] = relationship(back_populates="user", uselist=False)
 
 
@@ -65,6 +66,23 @@ class ApiKeyGroup(Base, TimestampMixin):
     is_system: Mapped[bool] = mapped_column(Boolean, default=False, nullable=False)
 
 
+class UserModelEndpoint(Base, TimestampMixin):
+    __tablename__ = "user_model_endpoints"
+    __table_args__ = (UniqueConstraint("user_id", "base_url", name="uq_user_model_endpoint_base_url"),)
+
+    id: Mapped[str] = mapped_column(String(36), primary_key=True, default=uuid_str)
+    user_id: Mapped[str] = mapped_column(ForeignKey("users.id", ondelete="CASCADE"), index=True, nullable=False)
+    name: Mapped[str] = mapped_column(String(100), default="Default", nullable=False)
+    base_url: Mapped[str] = mapped_column(String(500), nullable=False)
+    is_active: Mapped[bool] = mapped_column(Boolean, default=False, nullable=False)
+    status: Mapped[str] = mapped_column(String(20), default="active", nullable=False)
+    last_probe_error: Mapped[str | None] = mapped_column(Text, nullable=True)
+    probed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=False), nullable=True)
+
+    user: Mapped[User] = relationship(back_populates="model_endpoints")
+    api_keys: Mapped[list[UserApiKey]] = relationship(back_populates="endpoint")
+
+
 class UserApiKey(Base, TimestampMixin):
     __tablename__ = "user_api_key_entries"
 
@@ -72,6 +90,8 @@ class UserApiKey(Base, TimestampMixin):
     user_id: Mapped[str] = mapped_column(ForeignKey("users.id", ondelete="CASCADE"), index=True, nullable=False)
     name: Mapped[str] = mapped_column(String(100), default="默认密钥", nullable=False)
     group_id: Mapped[str | None] = mapped_column(ForeignKey("api_key_groups.id", ondelete="SET NULL"), index=True, nullable=True)
+    endpoint_id: Mapped[str | None] = mapped_column(ForeignKey("user_model_endpoints.id", ondelete="CASCADE"), index=True, nullable=True)
+    base_url: Mapped[str | None] = mapped_column(String(500), nullable=True)
     is_active: Mapped[bool] = mapped_column(Boolean, default=False, nullable=False)
     key_version: Mapped[str] = mapped_column(String(20), default="v1", nullable=False)
     ciphertext: Mapped[bytes] = mapped_column(LargeBinary, nullable=False)
@@ -85,6 +105,7 @@ class UserApiKey(Base, TimestampMixin):
 
     user: Mapped[User] = relationship(back_populates="api_keys")
     group: Mapped[ApiKeyGroup | None] = relationship()
+    endpoint: Mapped[UserModelEndpoint | None] = relationship(back_populates="api_keys")
 
 
 class UserQuota(Base, TimestampMixin):

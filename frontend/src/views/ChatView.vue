@@ -16,6 +16,7 @@ import type {
   ImageGenerationSettings,
   ImageProgress,
   Message,
+  ModelEndpoint,
   SendMessageResponse,
   User
 } from '../types'
@@ -181,6 +182,7 @@ const settingsError = ref('')
 const settingsLoading = ref(false)
 const apiKeys = ref<ApiKeyEntry[]>([])
 const apiKeyGroups = ref<ApiKeyGroup[]>([])
+const modelEndpoints = ref<ModelEndpoint[]>([])
 const selectedGroupId = ref('')
 const selectedGroupKeys = ref<ApiKeyEntry[]>([])
 const groupKeysLoading = ref(false)
@@ -196,7 +198,15 @@ const renameDialogOpen = ref(false)
 const renameDraft = ref('')
 const renameError = ref('')
 const selectedApiKeyGroup = computed(() => apiKeyGroups.value.find((group) => group.id === selectedGroupId.value) || null)
+const activeModelEndpoint = computed(() => modelEndpoints.value.find((endpoint) => endpoint.isActive) || modelEndpoints.value[0] || null)
 const modelOptions = computed(() => models.value.map((model) => ({ value: model, label: model })))
+const endpointOptions = computed(() =>
+  modelEndpoints.value.map((endpoint) => ({
+    value: endpoint.id,
+    label: endpoint.isActive ? `${endpoint.name} (当前)` : endpoint.name,
+    hint: endpoint.baseUrl
+  }))
+)
 const groupOptions = computed(() =>
   apiKeyGroups.value.map((group) => ({
     value: group.id,
@@ -210,9 +220,12 @@ const groupPurposeOptions = [
   { value: 'image', label: '图像模型' }
 ]
 const defaultChatGroup = computed(() => apiKeyGroups.value.find((group) => group.purpose === 'chat') || apiKeyGroups.value[0] || null)
+const defaultImageGroup = computed(() => apiKeyGroups.value.find((group) => group.purpose === 'image') || defaultChatGroup.value)
 const keyDrafts = ref<Record<string, { name: string; groupId: string }>>({})
+const endpointDrafts = ref<Record<string, { name: string; baseUrl: string }>>({})
 const groupDrafts = ref<Record<string, { name: string; description: string; purpose: GroupPurpose }>>({})
-const newApiKey = ref({ name: '默认密钥', apiKey: '', groupId: '', makeActive: true })
+const newApiKey = ref({ name: '默认密钥', apiKey: '', groupId: '', endpointId: '', makeActive: true })
+const newEndpoint = ref({ name: 'Default BaseURL', baseUrl: '', makeActive: true })
 const newGroup = ref<{ name: string; description: string; purpose: GroupPurpose }>({ name: '', description: '', purpose: 'none' })
 const profileUsername = ref('')
 const profilePassword = ref('')
@@ -817,6 +830,10 @@ function setNewApiKeyGroup(groupId: string | number) {
   newApiKey.value.groupId = String(groupId)
 }
 
+function setNewApiKeyEndpoint(endpointId: string | number) {
+  newApiKey.value.endpointId = String(endpointId)
+}
+
 function setApiKeyDraftGroup(key: ApiKeyEntry, groupId: string | number) {
   keyDraftFor(key).groupId = String(groupId)
 }
@@ -916,6 +933,13 @@ function keyDraftFor(key: ApiKeyEntry) {
   return keyDrafts.value[key.id]
 }
 
+function endpointDraftFor(endpoint: ModelEndpoint) {
+  if (!endpointDrafts.value[endpoint.id]) {
+    endpointDrafts.value[endpoint.id] = { name: endpoint.name, baseUrl: endpoint.baseUrl }
+  }
+  return endpointDrafts.value[endpoint.id]
+}
+
 function groupDraftFor(group: ApiKeyGroup) {
   if (!groupDrafts.value[group.id]) {
     groupDrafts.value[group.id] = { name: group.name, description: group.description || '', purpose: group.purpose || 'none' }
@@ -942,9 +966,14 @@ async function loadGroupKeys(groupId = selectedGroupId.value) {
 async function loadApiSettings() {
   settingsLoading.value = true
   try {
-    const [keys, groups] = await Promise.all([apiFetch<ApiKeyEntry[]>('/api-keys'), apiFetch<ApiKeyGroup[]>('/api-key-groups')])
+    const [keys, groups, endpoints] = await Promise.all([
+      apiFetch<ApiKeyEntry[]>('/api-keys'),
+      apiFetch<ApiKeyGroup[]>('/api-key-groups'),
+      apiFetch<ModelEndpoint[]>('/model-endpoints')
+    ])
     apiKeys.value = keys
     apiKeyGroups.value = groups
+    modelEndpoints.value = endpoints
     if (!selectedGroupId.value || !groups.some((group) => group.id === selectedGroupId.value)) {
       selectedGroupId.value = groups[0]?.id || ''
     }
@@ -957,7 +986,11 @@ async function loadApiSettings() {
     if (!newApiKey.value.groupId || !groups.some((group) => group.id === newApiKey.value.groupId)) {
       newApiKey.value.groupId = defaultGroupId
     }
+    if (!newApiKey.value.endpointId || !endpoints.some((endpoint) => endpoint.id === newApiKey.value.endpointId)) {
+      newApiKey.value.endpointId = endpoints.find((endpoint) => endpoint.isActive)?.id || endpoints[0]?.id || ''
+    }
     keyDrafts.value = Object.fromEntries(keys.map((key) => [key.id, { name: key.name, groupId: key.groupId || defaultGroupId }]))
+    endpointDrafts.value = Object.fromEntries(endpoints.map((endpoint) => [endpoint.id, { name: endpoint.name, baseUrl: endpoint.baseUrl }]))
     groupDrafts.value = Object.fromEntries(
       groups.map((group) => [group.id, { name: group.name, description: group.description || '', purpose: group.purpose || 'none' }])
     )
@@ -1058,6 +1091,67 @@ async function selectSettingsTab(tab: SettingsTab) {
   if (tab === 'image') await loadImageSettings()
 }
 
+async function createModelEndpoint() {
+  resetSettingsMessages()
+  try {
+    await apiFetch<ModelEndpoint>('/model-endpoints', {
+      method: 'POST',
+      body: JSON.stringify({
+        name: newEndpoint.value.name,
+        baseUrl: newEndpoint.value.baseUrl,
+        makeActive: newEndpoint.value.makeActive
+      })
+    })
+    newEndpoint.value = { name: 'Default BaseURL', baseUrl: '', makeActive: true }
+    settingsNotice.value = 'BaseURL 已添加'
+    await loadApiSettings()
+    await loadModels()
+  } catch (err) {
+    settingsError.value = err instanceof Error ? err.message : '添加 BaseURL 失败'
+  }
+}
+
+async function saveModelEndpoint(endpoint: ModelEndpoint) {
+  resetSettingsMessages()
+  const draft = endpointDraftFor(endpoint)
+  try {
+    await apiFetch<ModelEndpoint>(`/model-endpoints/${endpoint.id}`, {
+      method: 'PATCH',
+      body: JSON.stringify({ name: draft.name, baseUrl: draft.baseUrl })
+    })
+    settingsNotice.value = 'BaseURL 已保存'
+    await loadApiSettings()
+    await loadModels()
+  } catch (err) {
+    settingsError.value = err instanceof Error ? err.message : '保存 BaseURL 失败'
+  }
+}
+
+async function activateModelEndpoint(endpoint: ModelEndpoint) {
+  resetSettingsMessages()
+  try {
+    await apiFetch<ModelEndpoint>(`/model-endpoints/${endpoint.id}/activate`, { method: 'POST' })
+    settingsNotice.value = '当前 BaseURL 已切换'
+    await loadApiSettings()
+    await loadModels()
+  } catch (err) {
+    settingsError.value = err instanceof Error ? err.message : '切换 BaseURL 失败'
+  }
+}
+
+async function deleteModelEndpoint(endpoint: ModelEndpoint) {
+  resetSettingsMessages()
+  if (!window.confirm(`删除 BaseURL「${endpoint.name}」？对应的聊天 key 和生图 key 也会删除。`)) return
+  try {
+    await apiFetch(`/model-endpoints/${endpoint.id}`, { method: 'DELETE' })
+    settingsNotice.value = 'BaseURL 已删除'
+    await loadApiSettings()
+    await loadModels()
+  } catch (err) {
+    settingsError.value = err instanceof Error ? err.message : '删除 BaseURL 失败'
+  }
+}
+
 async function createApiKey() {
   resetSettingsMessages()
   try {
@@ -1067,10 +1161,17 @@ async function createApiKey() {
         name: newApiKey.value.name,
         apiKey: newApiKey.value.apiKey,
         groupId: newApiKey.value.groupId || defaultChatGroup.value?.id || null,
+        endpointId: newApiKey.value.endpointId || activeModelEndpoint.value?.id || null,
         makeActive: newApiKey.value.makeActive
       })
     })
-    newApiKey.value = { name: '默认密钥', apiKey: '', groupId: defaultChatGroup.value?.id || '', makeActive: true }
+    newApiKey.value = {
+      name: '默认密钥',
+      apiKey: '',
+      groupId: defaultChatGroup.value?.id || '',
+      endpointId: activeModelEndpoint.value?.id || '',
+      makeActive: true
+    }
     settingsNotice.value = '密钥已添加'
     await loadApiSettings()
     await auth.loadMe()
@@ -2883,10 +2984,59 @@ onUnmounted(() => {
                   <p>用户可以管理自己的密钥，并把密钥切换到管理员创建的分组。一个密钥只能属于一个分组。</p>
                 </div>
 
+                <form class="settings-card" @submit.prevent="createModelEndpoint">
+                  <h3>添加 BaseURL</h3>
+                  <div class="settings-grid">
+                    <input v-model="newEndpoint.name" class="settings-input" placeholder="名称，例如：工作服务" />
+                    <input v-model="newEndpoint.baseUrl" class="settings-input" placeholder="完整 BaseURL，例如：https://example.com/v1" />
+                  </div>
+                  <label class="settings-check">
+                    <input v-model="newEndpoint.makeActive" type="checkbox" />
+                    添加后设为当前 BaseURL
+                  </label>
+                  <button class="settings-primary" type="submit">添加 BaseURL</button>
+                </form>
+
+                <div class="settings-card">
+                  <div class="settings-card-header">
+                    <div>
+                      <h3>BaseURL 配置</h3>
+                      <p>当前使用：{{ activeModelEndpoint?.name || '未配置' }}</p>
+                    </div>
+                    <button class="settings-secondary" :disabled="settingsLoading" @click="loadApiSettings">刷新</button>
+                  </div>
+                  <div v-if="!modelEndpoints.length" class="settings-empty">暂无 BaseURL</div>
+                  <div v-for="endpoint in modelEndpoints" v-else :key="endpoint.id" class="settings-key-row">
+                    <div class="settings-key-main">
+                      <input v-model="endpointDraftFor(endpoint).name" class="settings-input" />
+                      <input v-model="endpointDraftFor(endpoint).baseUrl" class="settings-input" />
+                      <div class="settings-key-meta">
+                        <span>{{ endpoint.baseUrl }}</span>
+                        <strong v-if="endpoint.isActive">当前 BaseURL</strong>
+                        <span v-if="endpoint.lastProbeError" class="text-red-500">{{ endpoint.lastProbeError }}</span>
+                      </div>
+                    </div>
+                    <div class="settings-key-actions">
+                      <button class="settings-secondary" @click="saveModelEndpoint(endpoint)">保存</button>
+                      <button class="settings-primary" :disabled="endpoint.isActive" @click="activateModelEndpoint(endpoint)">切换</button>
+                      <button class="settings-danger" @click="deleteModelEndpoint(endpoint)">删除</button>
+                    </div>
+                  </div>
+                </div>
+
                 <form class="settings-card" @submit.prevent="createApiKey">
                   <h3>添加新密钥</h3>
                   <div class="settings-grid">
                     <input v-model="newApiKey.name" class="settings-input" placeholder="密钥名称，例如：工作 / 备用" />
+                    <AppSelect
+                      v-model="newApiKey.endpointId"
+                      class="settings-select"
+                      button-class="settings-select-button"
+                      menu-class="settings-select-menu"
+                      option-class="settings-select-option"
+                      :options="endpointOptions"
+                      @change="setNewApiKeyEndpoint"
+                    />
                     <AppSelect
                       v-model="newApiKey.groupId"
                       class="settings-select"
@@ -2937,8 +3087,9 @@ onUnmounted(() => {
                         @update:model-value="setApiKeyDraftGroup(key, $event)"
                       />
                       <div class="settings-key-meta">
+                        <span>{{ key.endpointName || key.baseUrl || '当前 BaseURL' }}</span>
                         <span>{{ key.groupName || 'gpt-chat' }}</span>
-                        <span class="key-mask">{{ key.maskedKey }}</span>
+                        <span class="key-mask">{{ key.apiKey || key.maskedKey }}</span>
                         <strong v-if="key.isActive">当前分组使用</strong>
                       </div>
                     </div>

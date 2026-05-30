@@ -14,6 +14,7 @@ from app.models.entities import (
     UsageDaily,
     User,
     UserApiKey,
+    UserModelEndpoint,
     UserQuota,
 )
 
@@ -33,5 +34,6 @@ __all__ = [
     "UsageDaily",
     "User",
     "UserApiKey",
+    "UserModelEndpoint",
     "UserQuota",
 ]

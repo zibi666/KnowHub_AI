@@ -9,25 +9,52 @@ from app.core.db import get_session
 from app.core.deps import get_admin_user, get_current_user
 from app.core.errors import api_error
 from app.models.entities import ApiKeyGroup, User, UserApiKey
-from app.schemas.api_keys import ApiKeyGroupOut, ApiKeyGroupRequest, ApiKeyOut, ApiKeySecretOut, CreateApiKeyRequest, UpdateApiKeyRequest
+from app.schemas.api_keys import (
+    ApiKeyGroupOut,
+    ApiKeyGroupRequest,
+    ApiKeyOut,
+    ApiKeySecretOut,
+    CreateApiKeyRequest,
+    ModelEndpointOut,
+    ModelEndpointRequest,
+    UpdateApiKeyRequest,
+    UpdateModelEndpointRequest,
+)
 from app.security.crypto import decrypt_api_key
 from app.services.api_keys import (
     SYSTEM_GROUP_PURPOSES,
     api_key_group_sort_key,
     api_key_to_out,
     create_api_key_for_user,
+    create_model_endpoint,
     delete_api_key,
+    delete_model_endpoint,
     ensure_default_api_key_groups,
+    list_model_endpoints,
     list_api_keys,
     load_api_key_with_group,
     migrate_group_keys_to_defaults,
     normalize_group_purpose,
     set_active_api_key,
+    set_active_model_endpoint,
     update_api_key_meta,
+    update_model_endpoint,
 )
 from app.services.audit import write_audit
 
 router = APIRouter(tags=["api-keys"])
+
+
+def model_endpoint_to_out(row) -> ModelEndpointOut:
+    return ModelEndpointOut(
+        id=row.id,
+        name=row.name,
+        base_url=row.base_url,
+        is_active=row.is_active,
+        status=row.status,
+        last_probe_error=row.last_probe_error,
+        probed_at=row.probed_at.isoformat() if row.probed_at else None,
+    )
 
 
 @router.get("/api-key-groups", response_model=list[ApiKeyGroupOut])
@@ -35,6 +62,73 @@ async def list_key_groups(user: User = Depends(get_current_user), db: AsyncSessi
     await ensure_default_api_key_groups(db)
     rows = (await db.execute(select(ApiKeyGroup))).scalars().all()
     return sorted(rows, key=api_key_group_sort_key)
+
+
+@router.get("/model-endpoints", response_model=list[ModelEndpointOut])
+async def list_own_model_endpoints(user: User = Depends(get_current_user), db: AsyncSession = Depends(get_session)):
+    rows = await list_model_endpoints(db, user.id)
+    return [model_endpoint_to_out(row) for row in rows]
+
+
+@router.post("/model-endpoints", response_model=ModelEndpointOut)
+async def create_own_model_endpoint(
+    payload: ModelEndpointRequest,
+    user: User = Depends(get_current_user),
+    db: AsyncSession = Depends(get_session),
+):
+    row = await create_model_endpoint(
+        db,
+        user.id,
+        name=payload.name,
+        base_url=payload.base_url,
+        make_active=payload.make_active,
+    )
+    await write_audit(db, "model_endpoint.created", actor_user_id=user.id, target_type="model_endpoint", target_id=row.id)
+    await db.commit()
+    return model_endpoint_to_out(row)
+
+
+@router.patch("/model-endpoints/{endpoint_id}", response_model=ModelEndpointOut)
+async def update_own_model_endpoint(
+    endpoint_id: str,
+    payload: UpdateModelEndpointRequest,
+    user: User = Depends(get_current_user),
+    db: AsyncSession = Depends(get_session),
+):
+    row = await update_model_endpoint(
+        db,
+        user.id,
+        endpoint_id,
+        name=payload.name,
+        base_url=payload.base_url,
+    )
+    await write_audit(db, "model_endpoint.updated", actor_user_id=user.id, target_type="model_endpoint", target_id=row.id)
+    await db.commit()
+    return model_endpoint_to_out(row)
+
+
+@router.post("/model-endpoints/{endpoint_id}/activate", response_model=ModelEndpointOut)
+async def activate_own_model_endpoint(
+    endpoint_id: str,
+    user: User = Depends(get_current_user),
+    db: AsyncSession = Depends(get_session),
+):
+    row = await set_active_model_endpoint(db, user.id, endpoint_id, commit=False)
+    await write_audit(db, "model_endpoint.activated", actor_user_id=user.id, target_type="model_endpoint", target_id=row.id)
+    await db.commit()
+    return model_endpoint_to_out(row)
+
+
+@router.delete("/model-endpoints/{endpoint_id}")
+async def delete_own_model_endpoint(
+    endpoint_id: str,
+    user: User = Depends(get_current_user),
+    db: AsyncSession = Depends(get_session),
+):
+    await delete_model_endpoint(db, user.id, endpoint_id)
+    await write_audit(db, "model_endpoint.deleted", actor_user_id=user.id, target_type="model_endpoint", target_id=endpoint_id)
+    await db.commit()
+    return {"ok": True}
 
 
 @router.get("/api-keys", response_model=list[ApiKeyOut])
@@ -55,6 +149,7 @@ async def create_own_api_key(
         payload.api_key,
         name=payload.name,
         group_id=payload.group_id,
+        endpoint_id=payload.endpoint_id,
         make_active=payload.make_active,
     )
     await write_audit(db, "api_key.created", actor_user_id=user.id, target_type="api_key", target_id=row.id)
@@ -244,6 +339,7 @@ async def create_user_api_key(
         payload.api_key,
         name=payload.name,
         group_id=payload.group_id,
+        endpoint_id=payload.endpoint_id,
         make_active=payload.make_active,
     )
     await write_audit(db, "api_key.admin_created", actor_user_id=admin.id, target_type="api_key", target_id=row.id)

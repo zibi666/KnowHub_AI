@@ -235,15 +235,21 @@ async def rebuild_attachment_chunks(db: AsyncSession, attachment: Attachment, ap
     status = "ready"
     error: str | None = None
     vectors: list[list[float]] = []
+    api_key_base_url: str | None = None
     try:
-        plain_api_key = api_key or await active_plain_api_key(db, attachment.user_id)
+        if api_key:
+            plain_api_key = api_key
+        else:
+            api_key_row = await chat_api_key(db, attachment.user_id)
+            plain_api_key = decrypt_api_key(api_key_row.ciphertext) if api_key_row else None
+            api_key_base_url = api_key_row.base_url if api_key_row else None
     except Exception as exc:
         plain_api_key = None
         status = "failed"
         error = str(exc)[:500]
     if plain_api_key:
         try:
-            provider = OpenAICompatibleProvider()
+            provider = OpenAICompatibleProvider(api_key_base_url)
             vectors = await provider.embeddings(plain_api_key, settings.embedding_model, chunks)
         except Exception as exc:
             status = "failed"
