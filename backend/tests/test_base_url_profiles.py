@@ -43,6 +43,12 @@ def _legacy_key(user_id: str, group_id: str, models: list[str]) -> UserApiKey:
     )
 
 
+def test_normalize_ai_pixel_root_base_url_to_v1():
+    assert api_keys.normalize_base_url("https://ai-pixel.online") == "https://ai-pixel.online/v1"
+    assert api_keys.normalize_base_url("https://ai-pixel.online/") == "https://ai-pixel.online/v1"
+    assert api_keys.normalize_base_url("https://ai-pixel.online/v1/") == "https://ai-pixel.online/v1"
+
+
 def test_default_endpoint_created_and_legacy_key_attached():
     async def run():
         engine, db = await _make_session()

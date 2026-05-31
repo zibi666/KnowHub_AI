@@ -31,6 +31,7 @@ SYSTEM_GROUP_PURPOSES = {
 ROUTED_GROUP_PURPOSES = {GROUP_PURPOSE_CHAT, GROUP_PURPOSE_IMAGE}
 LEGACY_GROUP_MIGRATION_FLAG = "api_key_group_defaults_migrated_v1"
 DEFAULT_ENDPOINT_NAME = "Default BaseURL"
+OPENAI_COMPATIBLE_V1_ROOT_HOSTS = {"ai-pixel.online"}
 
 
 def normalize_base_url(base_url: str | None) -> str:
@@ -40,6 +41,8 @@ def normalize_base_url(base_url: str | None) -> str:
     parsed = urlparse(candidate)
     if not parsed.scheme or not parsed.netloc:
         raise api_error("VALIDATION_ERROR", "Base URL must be a complete URL", status_code=422)
+    if parsed.hostname and parsed.hostname.lower() in OPENAI_COMPATIBLE_V1_ROOT_HOSTS and not parsed.path:
+        return f"{candidate}/v1"
     return candidate
 
 
