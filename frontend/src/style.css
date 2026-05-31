@@ -1434,6 +1434,177 @@ body,
   gap: 1rem;
 }
 
+.settings-card-header p {
+  margin: 0.25rem 0 0;
+  color: var(--muted);
+  font-size: 0.82rem;
+  line-height: 1.45;
+}
+
+.settings-api-heading {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 1rem;
+}
+
+.settings-api-heading-actions,
+.settings-api-card-footer,
+.settings-api-row-actions {
+  display: flex;
+  align-items: center;
+  gap: 0.5rem;
+}
+
+.settings-api-heading-actions {
+  flex: 0 0 auto;
+  flex-wrap: wrap;
+  justify-content: flex-end;
+}
+
+.settings-api-heading-actions .settings-secondary,
+.settings-api-heading-actions .settings-primary,
+.settings-api-action {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: 0.4rem;
+  white-space: nowrap;
+}
+
+.settings-api-overview {
+  display: grid;
+  grid-template-columns: minmax(0, 1.35fr) minmax(150px, 0.5fr) minmax(180px, 0.65fr);
+  gap: 0.75rem;
+}
+
+.settings-api-overview-item {
+  display: grid;
+  min-width: 0;
+  gap: 0.22rem;
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  background: color-mix(in srgb, var(--control-bg) 54%, transparent);
+  padding: 0.8rem 0.9rem;
+}
+
+.settings-api-overview-item.primary {
+  border-color: color-mix(in srgb, var(--bubble-bg) 42%, var(--line));
+  background: color-mix(in srgb, var(--bubble-bg) 10%, var(--control-bg));
+}
+
+.settings-api-overview-item span,
+.settings-api-overview-item small {
+  color: var(--muted);
+  font-size: 0.77rem;
+}
+
+.settings-api-overview-item strong,
+.settings-api-overview-item small {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.settings-api-overview-item strong {
+  color: var(--text);
+  font-size: 0.98rem;
+  font-weight: 800;
+}
+
+.settings-api-layout {
+  display: grid;
+  grid-template-columns: minmax(260px, 0.82fr) minmax(0, 1.28fr);
+  gap: 0.9rem;
+  align-items: start;
+}
+
+.settings-api-compose,
+.settings-api-manage,
+.settings-api-list {
+  display: grid;
+  gap: 0.85rem;
+}
+
+.settings-api-create-card,
+.settings-api-list-card {
+  border-radius: 8px;
+}
+
+.settings-api-create-card {
+  background: color-mix(in srgb, var(--control-bg) 62%, transparent);
+}
+
+.settings-api-list-card {
+  background: color-mix(in srgb, var(--control-bg) 44%, transparent);
+}
+
+.settings-api-form-grid {
+  display: grid;
+  gap: 0.72rem;
+}
+
+.settings-api-card-footer {
+  justify-content: space-between;
+  border-top: 1px solid var(--line);
+  padding-top: 0.75rem;
+}
+
+.settings-api-row {
+  display: grid;
+  gap: 0.62rem;
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  background: color-mix(in srgb, var(--input-bg) 42%, transparent);
+  padding: 0.78rem;
+  transition: border-color 150ms ease, background 150ms ease;
+}
+
+.settings-api-row.active {
+  border-color: color-mix(in srgb, var(--bubble-bg) 62%, var(--line));
+  background: color-mix(in srgb, var(--bubble-bg) 10%, var(--input-bg));
+}
+
+.settings-api-row-fields {
+  display: grid;
+  grid-template-columns: minmax(0, 0.72fr) minmax(0, 1.15fr);
+  gap: 0.65rem;
+}
+
+.settings-api-row-meta {
+  display: flex;
+  min-width: 0;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 0.55rem;
+  color: var(--muted);
+  font-size: 0.78rem;
+}
+
+.settings-api-row-meta span,
+.settings-api-row-meta em {
+  max-width: min(100%, 22rem);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.settings-api-row-meta strong {
+  color: #22c55e;
+  font-weight: 800;
+}
+
+.settings-api-row-meta em {
+  color: #f87171;
+  font-style: normal;
+}
+
+.settings-api-row-actions {
+  flex-wrap: wrap;
+  justify-content: flex-end;
+}
+
 .settings-avatar-editor {
   display: flex;
   align-items: center;
@@ -2834,6 +3005,27 @@ body,
 }
 
 @media (max-width: 860px) {
+  .settings-api-heading,
+  .settings-api-card-footer {
+    align-items: stretch;
+    flex-direction: column;
+  }
+
+  .settings-api-heading-actions {
+    justify-content: stretch;
+  }
+
+  .settings-api-heading-actions button,
+  .settings-api-action {
+    flex: 1 1 9rem;
+  }
+
+  .settings-api-overview,
+  .settings-api-layout,
+  .settings-api-row-fields {
+    grid-template-columns: 1fr;
+  }
+
   .access-switch-modal {
     width: min(100%, calc(100vw - 1rem));
     max-height: calc(100vh - 1rem);

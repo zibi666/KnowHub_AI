@@ -3080,129 +3080,217 @@ onUnmounted(() => {
               </section>
 
               <section v-else-if="settingsTab === 'api'" key="api" class="settings-pane">
-                <div class="settings-pane-heading">
-                  <h2>API 管理</h2>
-                  <p>用户可以管理自己的密钥，并把密钥切换到管理员创建的分组。一个密钥只能属于一个分组。</p>
-                </div>
-
-                <form class="settings-card" @submit.prevent="createModelEndpoint">
-                  <h3>添加 BaseURL</h3>
-                  <div class="settings-grid">
-                    <input v-model="newEndpoint.name" class="settings-input" placeholder="名称，例如：工作服务" />
-                    <input v-model="newEndpoint.baseUrl" class="settings-input" placeholder="完整 BaseURL，例如：https://example.com/v1" />
+                <div class="settings-pane-heading settings-api-heading">
+                  <div>
+                    <h2>API 管理</h2>
+                    <p>管理 BaseURL 和当前 BaseURL 下的 API Key；日常切换可使用独立接入切换窗口。</p>
                   </div>
-                  <label class="settings-check">
-                    <input v-model="newEndpoint.makeActive" type="checkbox" />
-                    添加后设为当前 BaseURL
-                  </label>
-                  <button class="settings-primary" type="submit">添加 BaseURL</button>
-                </form>
-
-                <div class="settings-card">
-                  <div class="settings-card-header">
-                    <div>
-                      <h3>BaseURL 配置</h3>
-                      <p>当前使用：{{ activeModelEndpoint?.name || '未配置' }}</p>
-                    </div>
-                    <button class="settings-secondary" :disabled="settingsLoading" @click="refreshApiSettings">刷新</button>
-                  </div>
-                  <div v-if="!modelEndpoints.length" class="settings-empty">暂无 BaseURL</div>
-                  <div v-for="endpoint in modelEndpoints" v-else :key="endpoint.id" class="settings-key-row">
-                    <div class="settings-key-main">
-                      <input v-model="endpointDraftFor(endpoint).name" class="settings-input" />
-                      <input v-model="endpointDraftFor(endpoint).baseUrl" class="settings-input" />
-                      <div class="settings-key-meta">
-                        <span>{{ endpoint.baseUrl }}</span>
-                        <strong v-if="endpoint.isActive">当前 BaseURL</strong>
-                        <span v-if="endpoint.lastProbeError" class="text-red-500">{{ endpoint.lastProbeError }}</span>
-                      </div>
-                    </div>
-                    <div class="settings-key-actions">
-                      <button class="settings-secondary" @click="saveModelEndpoint(endpoint)">保存</button>
-                      <button class="settings-primary" :disabled="endpoint.isActive" @click="activateModelEndpoint(endpoint)">切换</button>
-                      <button class="settings-danger" @click="deleteModelEndpoint(endpoint)">删除</button>
-                    </div>
+                  <div class="settings-api-heading-actions">
+                    <button class="settings-secondary" type="button" :disabled="settingsLoading" @click="refreshApiSettings">
+                      <RefreshCw :size="14" />
+                      刷新
+                    </button>
+                    <button class="settings-primary" type="button" @click="openAccessSwitch">
+                      <KeyRound :size="15" />
+                      接入切换
+                    </button>
                   </div>
                 </div>
 
-                <form class="settings-card" @submit.prevent="createApiKey">
-                  <h3>添加新密钥</h3>
-                  <div class="settings-grid">
-                    <input v-model="newApiKey.name" class="settings-input" placeholder="密钥名称，例如：工作 / 备用" />
-                    <AppSelect
-                      v-model="newApiKey.endpointId"
-                      class="settings-select"
-                      button-class="settings-select-button"
-                      menu-class="settings-select-menu"
-                      option-class="settings-select-option"
-                      :options="endpointOptions"
-                      @change="setNewApiKeyEndpoint"
-                    />
-                    <AppSelect
-                      v-model="newApiKey.groupId"
-                      class="settings-select"
-                      button-class="settings-select-button"
-                      menu-class="settings-select-menu"
-                      option-class="settings-select-option"
-                      :options="groupOptions"
-                      @change="setNewApiKeyGroup"
-                    />
-                    <input v-model="newApiKey.apiKey" class="settings-input" type="password" placeholder="API Key 明文只提交一次" />
-                  </div>
-                  <label class="settings-check">
-                    <input v-model="newApiKey.makeActive" type="checkbox" />
-                    添加后立即设为该分组当前使用密钥
-                  </label>
-                  <button class="settings-primary" type="submit">添加密钥</button>
-                </form>
-
-                <div class="settings-card">
-                  <div class="settings-card-header">
-                    <h3>我的密钥</h3>
-                    <button class="settings-secondary" :disabled="settingsLoading" @click="refreshApiSettings">刷新</button>
-                  </div>
-                  <div v-if="settingsLoading" class="settings-skeleton-list" aria-label="正在加载密钥">
-                    <div v-for="item in 3" :key="item" class="settings-key-skeleton">
-                      <div class="settings-key-main">
-                        <span class="skeleton-line wide" />
-                        <span class="skeleton-line medium" />
-                        <span class="skeleton-line short" />
-                      </div>
-                      <div class="settings-key-actions">
-                        <span class="skeleton-pill" />
-                        <span class="skeleton-pill" />
-                      </div>
-                    </div>
-                  </div>
-                  <div v-else-if="!apiKeys.length" class="settings-empty">暂无密钥</div>
-                  <div v-for="key in apiKeys" v-else :key="key.id" class="settings-key-row">
-                    <div class="settings-key-main">
-                      <input v-model="keyDraftFor(key).name" class="settings-input" />
-                      <AppSelect
-                        :model-value="keyDraftFor(key).groupId"
-                        class="settings-select"
-                        button-class="settings-select-button"
-                        menu-class="settings-select-menu"
-                        option-class="settings-select-option"
-                        :options="groupOptions"
-                        @update:model-value="setApiKeyDraftGroup(key, $event)"
-                      />
-                      <div class="settings-key-meta">
-                        <span>{{ key.endpointName || key.baseUrl || '当前 BaseURL' }}</span>
-                        <span>{{ key.groupName || 'gpt-chat' }}</span>
-                        <span class="key-mask">{{ key.apiKey || key.maskedKey }}</span>
-                        <strong v-if="key.isActive">当前分组使用</strong>
-                      </div>
-                    </div>
-                    <div class="settings-key-actions">
-                      <button class="settings-secondary" @click="copyApiKeySecret(key)">复制</button>
-                      <button class="settings-secondary" @click="saveApiKey(key)">保存</button>
-                      <button class="settings-primary" :disabled="key.isActive" @click="activateApiKey(key)">切换</button>
-                      <button class="settings-danger" @click="deleteApiKey(key)">删除</button>
-                    </div>
-                  </div>
+                <div class="settings-api-overview">
+                  <article class="settings-api-overview-item primary">
+                    <span>当前 BaseURL</span>
+                    <strong>{{ activeModelEndpoint?.name || '未配置' }}</strong>
+                    <small>{{ activeModelEndpoint?.baseUrl || '暂无可用 BaseURL' }}</small>
+                  </article>
+                  <article class="settings-api-overview-item">
+                    <span>BaseURL 数量</span>
+                    <strong>{{ modelEndpoints.length }}</strong>
+                    <small>{{ modelEndpoints.filter((endpoint) => endpoint.isActive).length ? '已有当前接入' : '尚未激活接入' }}</small>
+                  </article>
+                  <article class="settings-api-overview-item">
+                    <span>当前范围内 API Key</span>
+                    <strong>{{ apiKeys.length }}</strong>
+                    <small>{{ activeScopedApiKeys.length }} 个当前分组密钥</small>
+                  </article>
                 </div>
 
+                <div class="settings-api-layout">
+                  <div class="settings-api-compose">
+                    <form class="settings-card settings-api-create-card" @submit.prevent="createModelEndpoint">
+                      <div class="settings-card-header">
+                        <div>
+                          <h3>新增 BaseURL</h3>
+                          <p>添加一个 OpenAI 兼容模型服务地址。</p>
+                        </div>
+                      </div>
+                      <div class="settings-api-form-grid">
+                        <label class="settings-field">
+                          <span>名称</span>
+                          <input v-model="newEndpoint.name" class="settings-input" placeholder="例如：工作服务" />
+                        </label>
+                        <label class="settings-field">
+                          <span>BaseURL</span>
+                          <input v-model="newEndpoint.baseUrl" class="settings-input" placeholder="https://example.com/v1" />
+                        </label>
+                      </div>
+                      <div class="settings-api-card-footer">
+                        <label class="settings-check">
+                          <input v-model="newEndpoint.makeActive" type="checkbox" />
+                          添加后设为当前
+                        </label>
+                        <button class="settings-primary settings-api-action" type="submit">
+                          <Plus :size="15" />
+                          添加 BaseURL
+                        </button>
+                      </div>
+                    </form>
+
+                    <form class="settings-card settings-api-create-card" @submit.prevent="createApiKey">
+                      <div class="settings-card-header">
+                        <div>
+                          <h3>新增 API Key</h3>
+                          <p>默认绑定到当前 BaseURL，也可选择其他 BaseURL。</p>
+                        </div>
+                      </div>
+                      <div class="settings-api-form-grid">
+                        <label class="settings-field">
+                          <span>密钥名称</span>
+                          <input v-model="newApiKey.name" class="settings-input" placeholder="例如：工作 / 备用" />
+                        </label>
+                        <label class="settings-field">
+                          <span>所属 BaseURL</span>
+                          <AppSelect
+                            v-model="newApiKey.endpointId"
+                            class="settings-select"
+                            button-class="settings-select-button"
+                            menu-class="settings-select-menu"
+                            option-class="settings-select-option"
+                            :options="endpointOptions"
+                            @change="setNewApiKeyEndpoint"
+                          />
+                        </label>
+                        <label class="settings-field">
+                          <span>用途分组</span>
+                          <AppSelect
+                            v-model="newApiKey.groupId"
+                            class="settings-select"
+                            button-class="settings-select-button"
+                            menu-class="settings-select-menu"
+                            option-class="settings-select-option"
+                            :options="groupOptions"
+                            @change="setNewApiKeyGroup"
+                          />
+                        </label>
+                        <label class="settings-field">
+                          <span>API Key</span>
+                          <input v-model="newApiKey.apiKey" class="settings-input" type="password" placeholder="明文只提交一次" />
+                        </label>
+                      </div>
+                      <div class="settings-api-card-footer">
+                        <label class="settings-check">
+                          <input v-model="newApiKey.makeActive" type="checkbox" />
+                          添加后设为该分组当前密钥
+                        </label>
+                        <button class="settings-primary settings-api-action" type="submit">
+                          <Plus :size="15" />
+                          添加 API Key
+                        </button>
+                      </div>
+                    </form>
+                  </div>
+
+                  <div class="settings-api-manage">
+                    <section class="settings-card settings-api-list-card">
+                      <div class="settings-card-header">
+                        <div>
+                          <h3>BaseURL</h3>
+                          <p>保存服务地址，或把它设为当前接入。</p>
+                        </div>
+                      </div>
+                      <div v-if="!modelEndpoints.length" class="settings-empty">暂无 BaseURL</div>
+                      <div v-else class="settings-api-list">
+                        <article
+                          v-for="endpoint in modelEndpoints"
+                          :key="endpoint.id"
+                          class="settings-api-row"
+                          :class="{ active: endpoint.isActive }"
+                        >
+                          <div class="settings-api-row-fields">
+                            <input v-model="endpointDraftFor(endpoint).name" class="settings-input" aria-label="BaseURL 名称" />
+                            <input v-model="endpointDraftFor(endpoint).baseUrl" class="settings-input" aria-label="BaseURL 地址" />
+                          </div>
+                          <div class="settings-api-row-meta">
+                            <span>{{ endpoint.baseUrl }}</span>
+                            <strong v-if="endpoint.isActive">当前 BaseURL</strong>
+                            <em v-if="endpoint.lastProbeError">{{ endpoint.lastProbeError }}</em>
+                          </div>
+                          <div class="settings-api-row-actions">
+                            <button class="settings-secondary" type="button" @click="saveModelEndpoint(endpoint)">保存</button>
+                            <button class="settings-primary" type="button" :disabled="endpoint.isActive" @click="activateModelEndpoint(endpoint)">设为当前</button>
+                            <button class="settings-danger" type="button" @click="deleteModelEndpoint(endpoint)">删除</button>
+                          </div>
+                        </article>
+                      </div>
+                    </section>
+
+                    <section class="settings-card settings-api-list-card">
+                      <div class="settings-card-header">
+                        <div>
+                          <h3>当前 BaseURL 的 API Key</h3>
+                          <p>{{ activeModelEndpoint?.name || '未配置 BaseURL' }}</p>
+                        </div>
+                      </div>
+                      <div v-if="settingsLoading" class="settings-skeleton-list" aria-label="正在加载密钥">
+                        <div v-for="item in 3" :key="item" class="settings-key-skeleton">
+                          <div class="settings-key-main">
+                            <span class="skeleton-line wide" />
+                            <span class="skeleton-line medium" />
+                            <span class="skeleton-line short" />
+                          </div>
+                          <div class="settings-key-actions">
+                            <span class="skeleton-pill" />
+                            <span class="skeleton-pill" />
+                          </div>
+                        </div>
+                      </div>
+                      <div v-else-if="!apiKeys.length" class="settings-empty">当前 BaseURL 下暂无 API Key</div>
+                      <div v-else class="settings-api-list">
+                        <article
+                          v-for="key in apiKeys"
+                          :key="key.id"
+                          class="settings-api-row"
+                          :class="{ active: key.isActive }"
+                        >
+                          <div class="settings-api-row-fields">
+                            <input v-model="keyDraftFor(key).name" class="settings-input" aria-label="API Key 名称" />
+                            <AppSelect
+                              :model-value="keyDraftFor(key).groupId"
+                              class="settings-select"
+                              button-class="settings-select-button"
+                              menu-class="settings-select-menu"
+                              option-class="settings-select-option"
+                              :options="groupOptions"
+                              @update:model-value="setApiKeyDraftGroup(key, $event)"
+                            />
+                          </div>
+                          <div class="settings-api-row-meta">
+                            <span>{{ key.endpointName || key.baseUrl || '当前 BaseURL' }}</span>
+                            <span>{{ key.groupName || 'gpt-chat' }}</span>
+                            <span class="key-mask">{{ key.apiKey || key.maskedKey }}</span>
+                            <strong v-if="key.isActive">当前分组使用</strong>
+                          </div>
+                          <div class="settings-api-row-actions">
+                            <button class="settings-secondary" type="button" @click="copyApiKeySecret(key)">复制</button>
+                            <button class="settings-secondary" type="button" @click="saveApiKey(key)">保存</button>
+                            <button class="settings-primary" type="button" :disabled="key.isActive" @click="activateApiKey(key)">设为当前</button>
+                            <button class="settings-danger" type="button" @click="deleteApiKey(key)">删除</button>
+                          </div>
+                        </article>
+                      </div>
+                    </section>
+                  </div>
+                </div>
               </section>
 
               <section v-else-if="settingsTab === 'groups' && auth.user?.role === 'admin'" key="groups" class="settings-pane">
