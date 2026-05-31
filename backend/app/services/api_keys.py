@@ -510,11 +510,15 @@ async def get_active_api_key(db: AsyncSession, user_id: str, purpose: str | None
 
 
 async def list_api_keys(db: AsyncSession, user_id: str) -> list[UserApiKey]:
+    endpoint = await load_model_endpoint(db, user_id)
     return (
         await db.execute(
             select(UserApiKey)
             .options(selectinload(UserApiKey.group), selectinload(UserApiKey.endpoint))
-            .where(UserApiKey.user_id == user_id)
+            .where(
+                UserApiKey.user_id == user_id,
+                UserApiKey.endpoint_id == endpoint.id,
+            )
             .order_by(UserApiKey.is_active.desc(), UserApiKey.created_at.desc())
         )
     ).scalars().all()
@@ -898,6 +902,14 @@ async def set_active_api_key(db: AsyncSession, user_id: str, key_id: str, commit
     ).scalars().one_or_none()
     if not row or row.user_id != user_id or row.status != "active":
         raise api_error("FORBIDDEN", "密钥不存在或不可用")
+    endpoint = await load_model_endpoint(db, user_id)
+    if row.endpoint_id != endpoint.id:
+        raise api_error(
+            "BASE_URL_KEY_SCOPE_ERROR",
+            "The selected API key does not belong to the current Base URL",
+            status_code=409,
+            extra={"endpointId": endpoint.id, "baseUrl": endpoint.base_url},
+        )
     group = row.__dict__.get("group")
     scope_rows = await active_scope_rows_for_group(db, user_id, group=group)
     scope_ids = {scope_row.id for scope_row in scope_rows}

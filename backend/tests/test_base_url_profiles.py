@@ -229,6 +229,119 @@ def test_available_models_only_reads_active_endpoint():
     asyncio.run(run())
 
 
+def test_list_api_keys_only_returns_active_endpoint_keys():
+    async def run():
+        engine, db = await _make_session()
+        try:
+            await _seed_user(db)
+            groups = await api_keys.ensure_default_api_key_groups(db)
+            active = UserModelEndpoint(user_id="user-1", name="Active", base_url="https://active.test/v1", is_active=True)
+            inactive = UserModelEndpoint(user_id="user-1", name="Inactive", base_url="https://inactive.test/v1", is_active=False)
+            db.add_all([active, inactive])
+            await db.flush()
+            db.add_all(
+                [
+                    UserApiKey(
+                        user_id="user-1",
+                        name="active-chat",
+                        group_id=groups[api_keys.GROUP_PURPOSE_CHAT].id,
+                        endpoint_id=active.id,
+                        base_url=active.base_url,
+                        is_active=True,
+                        key_version="v1",
+                        ciphertext=encrypt_api_key("sk-active-chat"),
+                        fingerprint="fp-active-chat",
+                        last4="chat",
+                        status="active",
+                        available_models_json=["gpt-5.5"],
+                        supports_stream_usage_json={},
+                    ),
+                    UserApiKey(
+                        user_id="user-1",
+                        name="inactive-chat",
+                        group_id=groups[api_keys.GROUP_PURPOSE_CHAT].id,
+                        endpoint_id=inactive.id,
+                        base_url=inactive.base_url,
+                        is_active=True,
+                        key_version="v1",
+                        ciphertext=encrypt_api_key("sk-inactive-chat"),
+                        fingerprint="fp-inactive-chat",
+                        last4="chat",
+                        status="active",
+                        available_models_json=["gpt-6-preview"],
+                        supports_stream_usage_json={},
+                    ),
+                ]
+            )
+            await db.flush()
+
+            rows = await api_keys.list_api_keys(db, "user-1")
+
+            assert [row.name for row in rows] == ["active-chat"]
+            assert rows[0].endpoint_id == active.id
+        finally:
+            await db.close()
+            await engine.dispose()
+
+    asyncio.run(run())
+
+
+def test_set_active_api_key_rejects_inactive_endpoint_key():
+    async def run():
+        engine, db = await _make_session()
+        try:
+            await _seed_user(db)
+            groups = await api_keys.ensure_default_api_key_groups(db)
+            active = UserModelEndpoint(user_id="user-1", name="Active", base_url="https://active.test/v1", is_active=True)
+            inactive = UserModelEndpoint(user_id="user-1", name="Inactive", base_url="https://inactive.test/v1", is_active=False)
+            db.add_all([active, inactive])
+            await db.flush()
+            active_key = UserApiKey(
+                user_id="user-1",
+                name="active-chat",
+                group_id=groups[api_keys.GROUP_PURPOSE_CHAT].id,
+                endpoint_id=active.id,
+                base_url=active.base_url,
+                is_active=True,
+                key_version="v1",
+                ciphertext=encrypt_api_key("sk-active-chat"),
+                fingerprint="fp-active-chat",
+                last4="chat",
+                status="active",
+                available_models_json=["gpt-5.5"],
+                supports_stream_usage_json={},
+            )
+            inactive_key = UserApiKey(
+                user_id="user-1",
+                name="inactive-chat",
+                group_id=groups[api_keys.GROUP_PURPOSE_CHAT].id,
+                endpoint_id=inactive.id,
+                base_url=inactive.base_url,
+                is_active=True,
+                key_version="v1",
+                ciphertext=encrypt_api_key("sk-inactive-chat"),
+                fingerprint="fp-inactive-chat",
+                last4="chat",
+                status="active",
+                available_models_json=["gpt-6-preview"],
+                supports_stream_usage_json={},
+            )
+            db.add_all([active_key, inactive_key])
+            await db.flush()
+
+            with pytest.raises(HTTPException) as exc:
+                await api_keys.set_active_api_key(db, "user-1", inactive_key.id, commit=False)
+
+            assert exc.value.status_code == 409
+            assert exc.value.detail["code"] == "BASE_URL_KEY_SCOPE_ERROR"
+            assert active_key.is_active is True
+        finally:
+            await db.close()
+            await engine.dispose()
+
+    asyncio.run(run())
+
+
 class _ProbeResponse:
     def __init__(self, status_code: int, payload=None, text: str = ""):
         self.status_code = status_code

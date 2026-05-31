@@ -986,9 +986,7 @@ async function loadApiSettings() {
     if (!newApiKey.value.groupId || !groups.some((group) => group.id === newApiKey.value.groupId)) {
       newApiKey.value.groupId = defaultGroupId
     }
-    if (!newApiKey.value.endpointId || !endpoints.some((endpoint) => endpoint.id === newApiKey.value.endpointId)) {
-      newApiKey.value.endpointId = endpoints.find((endpoint) => endpoint.isActive)?.id || endpoints[0]?.id || ''
-    }
+    newApiKey.value.endpointId = endpoints.find((endpoint) => endpoint.isActive)?.id || endpoints[0]?.id || ''
     keyDrafts.value = Object.fromEntries(keys.map((key) => [key.id, { name: key.name, groupId: key.groupId || defaultGroupId }]))
     endpointDrafts.value = Object.fromEntries(endpoints.map((endpoint) => [endpoint.id, { name: endpoint.name, baseUrl: endpoint.baseUrl }]))
     groupDrafts.value = Object.fromEntries(
@@ -1161,7 +1159,7 @@ async function createApiKey() {
         name: newApiKey.value.name,
         apiKey: newApiKey.value.apiKey,
         groupId: newApiKey.value.groupId || defaultChatGroup.value?.id || null,
-        endpointId: newApiKey.value.endpointId || activeModelEndpoint.value?.id || null,
+        endpointId: activeModelEndpoint.value?.id || newApiKey.value.endpointId || null,
         makeActive: newApiKey.value.makeActive
       })
     })
