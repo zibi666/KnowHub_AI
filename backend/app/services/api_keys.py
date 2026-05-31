@@ -3,13 +3,15 @@ from __future__ import annotations
 import json
 from datetime import datetime
 from typing import Any
+from urllib.parse import urlparse
 
 from sqlalchemy import case, func, or_, select, text
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import selectinload
 
+from app.core.config import get_settings
 from app.core.errors import api_error
-from app.models.entities import ApiKeyGroup, UserApiKey
+from app.models.entities import ApiKeyGroup, User, UserApiKey, UserModelEndpoint
 from app.providers.openai_compatible import OpenAICompatibleProvider
 from app.schemas.api_keys import ApiKeyOut
 from app.security.crypto import api_key_fingerprint, decrypt_api_key, encrypt_api_key, last4, mask_api_key
@@ -28,6 +30,20 @@ SYSTEM_GROUP_PURPOSES = {
 }
 ROUTED_GROUP_PURPOSES = {GROUP_PURPOSE_CHAT, GROUP_PURPOSE_IMAGE}
 LEGACY_GROUP_MIGRATION_FLAG = "api_key_group_defaults_migrated_v1"
+DEFAULT_ENDPOINT_NAME = "Default BaseURL"
+OPENAI_COMPATIBLE_V1_ROOT_HOSTS = {"ai-pixel.online"}
+
+
+def normalize_base_url(base_url: str | None) -> str:
+    candidate = (base_url or get_settings().model_base_url or "").strip().rstrip("/")
+    if not candidate:
+        raise api_error("VALIDATION_ERROR", "Base URL is required", status_code=422)
+    parsed = urlparse(candidate)
+    if not parsed.scheme or not parsed.netloc:
+        raise api_error("VALIDATION_ERROR", "Base URL must be a complete URL", status_code=422)
+    if parsed.hostname and parsed.hostname.lower() in OPENAI_COMPATIBLE_V1_ROOT_HOSTS and not parsed.path:
+        return f"{candidate}/v1"
+    return candidate
 
 
 def _json_value(value: Any) -> Any:
@@ -124,6 +140,226 @@ async def ensure_default_api_key_groups(db: AsyncSession) -> dict[str, ApiKeyGro
     return groups
 
 
+async def active_model_endpoint(db: AsyncSession, user_id: str) -> UserModelEndpoint | None:
+    return (
+        await db.execute(
+            select(UserModelEndpoint)
+            .where(
+                UserModelEndpoint.user_id == user_id,
+                UserModelEndpoint.status == "active",
+                UserModelEndpoint.is_active.is_(True),
+            )
+            .order_by(UserModelEndpoint.updated_at.desc())
+        )
+    ).scalars().first()
+
+
+async def ensure_default_model_endpoint(db: AsyncSession, user_id: str) -> UserModelEndpoint:
+    base_url = normalize_base_url(None)
+    row = (
+        await db.execute(
+            select(UserModelEndpoint).where(
+                UserModelEndpoint.user_id == user_id,
+                UserModelEndpoint.base_url == base_url,
+            )
+        )
+    ).scalars().one_or_none()
+    if not row:
+        row = UserModelEndpoint(
+            user_id=user_id,
+            name=DEFAULT_ENDPOINT_NAME,
+            base_url=base_url,
+            is_active=False,
+            status="active",
+        )
+        db.add(row)
+        await db.flush()
+    if not await active_model_endpoint(db, user_id):
+        row.is_active = True
+        await db.flush()
+    legacy_keys = (
+        await db.execute(
+            select(UserApiKey).where(
+                UserApiKey.user_id == user_id,
+                UserApiKey.endpoint_id.is_(None),
+            )
+        )
+    ).scalars().all()
+    for key in legacy_keys:
+        key.endpoint_id = row.id
+        key.base_url = row.base_url
+    if legacy_keys:
+        await db.flush()
+    return row
+
+
+async def list_model_endpoints(db: AsyncSession, user_id: str) -> list[UserModelEndpoint]:
+    await ensure_default_model_endpoint(db, user_id)
+    return (
+        await db.execute(
+            select(UserModelEndpoint)
+            .where(UserModelEndpoint.user_id == user_id, UserModelEndpoint.status == "active")
+            .order_by(UserModelEndpoint.is_active.desc(), UserModelEndpoint.created_at.asc())
+        )
+    ).scalars().all()
+
+
+async def create_model_endpoint(
+    db: AsyncSession,
+    user_id: str,
+    *,
+    name: str,
+    base_url: str,
+    make_active: bool = True,
+) -> UserModelEndpoint:
+    normalized = normalize_base_url(base_url)
+    row = (
+        await db.execute(
+            select(UserModelEndpoint).where(
+                UserModelEndpoint.user_id == user_id,
+                UserModelEndpoint.base_url == normalized,
+                UserModelEndpoint.status == "active",
+            )
+        )
+    ).scalars().one_or_none()
+    if not row:
+        row = UserModelEndpoint(
+            user_id=user_id,
+            name=(name or DEFAULT_ENDPOINT_NAME).strip()[:100] or DEFAULT_ENDPOINT_NAME,
+            base_url=normalized,
+            is_active=False,
+            status="active",
+        )
+        db.add(row)
+        await db.flush()
+    else:
+        row.name = (name or row.name).strip()[:100] or row.name
+    if make_active or not await active_model_endpoint(db, user_id):
+        await set_active_model_endpoint(db, user_id, row.id, commit=False)
+    await db.flush()
+    return row
+
+
+async def update_model_endpoint(
+    db: AsyncSession,
+    user_id: str,
+    endpoint_id: str,
+    *,
+    name: str | None = None,
+    base_url: str | None = None,
+) -> UserModelEndpoint:
+    row = await load_model_endpoint(db, user_id, endpoint_id)
+    if name is not None:
+        row.name = name.strip()[:100] or row.name
+    if base_url is not None:
+        normalized = normalize_base_url(base_url)
+        duplicate = (
+            await db.execute(
+                select(UserModelEndpoint).where(
+                    UserModelEndpoint.user_id == user_id,
+                    UserModelEndpoint.base_url == normalized,
+                    UserModelEndpoint.id != row.id,
+                    UserModelEndpoint.status == "active",
+                )
+            )
+        ).scalars().one_or_none()
+        if duplicate:
+            raise api_error("VALIDATION_ERROR", "Base URL profile already exists", status_code=409)
+        row.base_url = normalized
+        rows = (
+            await db.execute(select(UserApiKey).where(UserApiKey.endpoint_id == row.id))
+        ).scalars().all()
+        for key in rows:
+            key.base_url = normalized
+    await db.flush()
+    return row
+
+
+async def delete_model_endpoint(db: AsyncSession, user_id: str, endpoint_id: str) -> None:
+    row = await load_model_endpoint(db, user_id, endpoint_id)
+    was_active = row.is_active
+    keys = (
+        await db.execute(
+            select(UserApiKey).where(
+                UserApiKey.user_id == user_id,
+                UserApiKey.endpoint_id == row.id,
+            )
+        )
+    ).scalars().all()
+    for key in keys:
+        await db.delete(key)
+    await db.delete(row)
+    await db.flush()
+    if was_active:
+        fallback = (
+            await db.execute(
+                select(UserModelEndpoint)
+                .where(UserModelEndpoint.user_id == user_id, UserModelEndpoint.status == "active")
+                .order_by(UserModelEndpoint.created_at.asc())
+            )
+        ).scalars().first()
+        if fallback:
+            await set_active_model_endpoint(db, user_id, fallback.id, commit=False)
+        else:
+            await ensure_default_model_endpoint(db, user_id)
+    await db.flush()
+
+
+async def load_model_endpoint(db: AsyncSession, user_id: str, endpoint_id: str | None = None) -> UserModelEndpoint:
+    if endpoint_id:
+        row = await db.get(UserModelEndpoint, endpoint_id)
+        if not row or row.user_id != user_id or row.status != "active":
+            raise api_error("FORBIDDEN", "Base URL profile does not exist")
+        return row
+    active = await active_model_endpoint(db, user_id)
+    if active:
+        return active
+    return await ensure_default_model_endpoint(db, user_id)
+
+
+async def set_active_model_endpoint(
+    db: AsyncSession,
+    user_id: str,
+    endpoint_id: str,
+    *,
+    commit: bool = True,
+) -> UserModelEndpoint:
+    row = await db.get(UserModelEndpoint, endpoint_id)
+    if not row or row.user_id != user_id or row.status != "active":
+        raise api_error("FORBIDDEN", "Base URL profile does not exist")
+    rows = (
+        await db.execute(
+            select(UserModelEndpoint).where(UserModelEndpoint.user_id == user_id, UserModelEndpoint.status == "active")
+        )
+    ).scalars().all()
+    for endpoint in rows:
+        endpoint.is_active = endpoint.id == row.id
+    await db.flush()
+    await normalize_active_api_key_scope(db, user_id, purpose=GROUP_PURPOSE_CHAT)
+    await normalize_active_api_key_scope(db, user_id, purpose=GROUP_PURPOSE_IMAGE)
+    if commit:
+        await db.commit()
+    return row
+
+
+async def migrate_user_model_endpoints(db: AsyncSession) -> None:
+    user_ids = (await db.execute(select(User.id))).scalars().all()
+    for user_id in user_ids:
+        endpoint = await ensure_default_model_endpoint(db, user_id)
+        rows = (
+            await db.execute(
+                select(UserApiKey).where(
+                    UserApiKey.user_id == user_id,
+                    UserApiKey.endpoint_id.is_(None),
+                )
+            )
+        ).scalars().all()
+        for row in rows:
+            row.endpoint_id = endpoint.id
+            row.base_url = endpoint.base_url
+    await db.commit()
+
+
 async def get_default_group_for_purpose(db: AsyncSession, purpose: str) -> ApiKeyGroup:
     normalized = GROUP_PURPOSE_IMAGE if purpose == GROUP_PURPOSE_IMAGE else GROUP_PURPOSE_CHAT
     groups = await ensure_default_api_key_groups(db)
@@ -187,10 +423,13 @@ def key_supports_model(row: UserApiKey, model: str, quota=None) -> bool:
 
 def api_key_to_out(row: UserApiKey) -> ApiKeyOut:
     group = row.__dict__.get("group")
+    endpoint = row.__dict__.get("endpoint")
     user = row.__dict__.get("user")
     try:
-        masked_key = mask_api_key(decrypt_api_key(row.ciphertext))
+        plain_key = decrypt_api_key(row.ciphertext)
+        masked_key = mask_api_key(plain_key)
     except Exception:
+        plain_key = None
         masked_key = f"{row.fingerprint[:8]}...{row.last4}"
     return ApiKeyOut(
         id=row.id,
@@ -199,9 +438,13 @@ def api_key_to_out(row: UserApiKey) -> ApiKeyOut:
         name=row.name,
         group_id=row.group_id,
         group_name=group.name if group else None,
+        endpoint_id=row.endpoint_id,
+        endpoint_name=endpoint.name if endpoint else None,
+        base_url=row.base_url or (endpoint.base_url if endpoint else None),
         fingerprint=row.fingerprint,
         last4=row.last4,
         masked_key=masked_key,
+        api_key=plain_key,
         status=row.status,
         is_active=row.is_active,
         available_models=list(row.available_models_json or []),
@@ -238,10 +481,11 @@ async def get_marked_active_api_key(
         .where(UserApiKey.user_id == user_id, UserApiKey.status == "active", UserApiKey.is_active.is_(True))
     )
     if purpose in ROUTED_GROUP_PURPOSES:
+        endpoint = await load_model_endpoint(db, user_id)
         group_ids = await purpose_group_ids(db, purpose)
         if not group_ids:
             return None
-        query = query.where(UserApiKey.group_id.in_(group_ids))
+        query = query.where(UserApiKey.group_id.in_(group_ids), UserApiKey.endpoint_id == endpoint.id)
     return (await db.execute(query.order_by(UserApiKey.created_at.desc()))).scalars().first()
 
 
@@ -266,11 +510,15 @@ async def get_active_api_key(db: AsyncSession, user_id: str, purpose: str | None
 
 
 async def list_api_keys(db: AsyncSession, user_id: str) -> list[UserApiKey]:
+    endpoint = await load_model_endpoint(db, user_id)
     return (
         await db.execute(
             select(UserApiKey)
-            .options(selectinload(UserApiKey.group))
-            .where(UserApiKey.user_id == user_id)
+            .options(selectinload(UserApiKey.group), selectinload(UserApiKey.endpoint))
+            .where(
+                UserApiKey.user_id == user_id,
+                UserApiKey.endpoint_id == endpoint.id,
+            )
             .order_by(UserApiKey.is_active.desc(), UserApiKey.created_at.desc())
         )
     ).scalars().all()
@@ -281,11 +529,20 @@ async def purpose_group_ids(db: AsyncSession, purpose: str) -> list[str]:
     return list(rows)
 
 
+async def key_slot_group_ids(db: AsyncSession, group: ApiKeyGroup | None) -> list[str]:
+    if not group:
+        return []
+    if group.purpose in ROUTED_GROUP_PURPOSES:
+        return await purpose_group_ids(db, group.purpose)
+    return [group.id]
+
+
 async def list_candidate_api_keys_for_model(db: AsyncSession, user_id: str, model: str, quota=None) -> list[UserApiKey]:
     purpose = model_group_purpose(model)
     if not purpose:
         active = await get_marked_active_api_key(db, user_id)
         return [active] if active and key_supports_model(active, model, quota) else []
+    endpoint = await load_model_endpoint(db, user_id)
     group_ids = await purpose_group_ids(db, purpose)
     if not group_ids:
         return []
@@ -298,6 +555,7 @@ async def list_candidate_api_keys_for_model(db: AsyncSession, user_id: str, mode
                 UserApiKey.user_id == user_id,
                 UserApiKey.status == "active",
                 UserApiKey.group_id.in_(group_ids),
+                UserApiKey.endpoint_id == endpoint.id,
             )
             .order_by(active_order.asc(), UserApiKey.created_at.asc())
         )
@@ -324,6 +582,7 @@ async def resolve_api_key_for_model(
         return None
 
     if api_key_id:
+        endpoint = await load_model_endpoint(db, user_id)
         row = (
             await db.execute(
                 select(UserApiKey)
@@ -333,6 +592,8 @@ async def resolve_api_key_for_model(
         ).scalars().one_or_none()
         if not row or row.user_id != user_id or row.status != "active":
             raise api_error("FORBIDDEN", "密钥不存在或不可用")
+        if row.endpoint_id != endpoint.id:
+            raise api_error("MODEL_NOT_AVAILABLE", "The selected key does not belong to the active Base URL")
         if not row.group or row.group.purpose != purpose:
             raise api_error("MODEL_NOT_AVAILABLE", "该密钥不属于当前模型需要的分组")
         if not key_supports_model(row, model, quota):
@@ -348,6 +609,20 @@ async def resolve_api_key_for_model(
 
     candidates = await list_candidate_api_keys_for_model(db, user_id, model, quota)
     if not candidates:
+        endpoint = await load_model_endpoint(db, user_id)
+        missing_code = "IMAGE_KEY_REQUIRED" if purpose == GROUP_PURPOSE_IMAGE else "CHAT_KEY_REQUIRED"
+        raise api_error(
+            missing_code,
+            f"Please configure a {purpose} API key for the current Base URL",
+            extra={
+                "purpose": purpose,
+                "groupName": group_name_for_purpose(purpose),
+                "model": model,
+                "baseUrl": endpoint.base_url,
+                "endpointId": endpoint.id,
+                "candidateKeys": [],
+            },
+        )
         raise api_error(
             "KEY_GROUP_REQUIRED",
             f"当前模型需要 {group_name_for_purpose(purpose)} 分组下的可用密钥",
@@ -386,11 +661,16 @@ async def chat_api_key(db: AsyncSession, user_id: str) -> UserApiKey | None:
 async def available_models_for_user(db: AsyncSession, user_id: str, quota=None) -> list[str]:
     from app.services.image_generation import official_available_models
 
+    endpoint = await load_model_endpoint(db, user_id)
     rows = (
         await db.execute(
             select(UserApiKey)
             .options(selectinload(UserApiKey.group))
-            .where(UserApiKey.user_id == user_id, UserApiKey.status == "active")
+            .where(
+                UserApiKey.user_id == user_id,
+                UserApiKey.status == "active",
+                UserApiKey.endpoint_id == endpoint.id,
+            )
             .order_by(UserApiKey.is_active.desc(), UserApiKey.created_at.asc())
         )
     ).scalars().all()
@@ -438,10 +718,11 @@ async def active_scope_rows_for_group(
         .where(UserApiKey.user_id == user_id, UserApiKey.status == "active")
     )
     if normalized_purpose in ROUTED_GROUP_PURPOSES:
+        endpoint = await load_model_endpoint(db, user_id)
         group_ids = await purpose_group_ids(db, normalized_purpose)
         if not group_ids:
             return []
-        query = query.where(UserApiKey.group_id.in_(group_ids))
+        query = query.where(UserApiKey.group_id.in_(group_ids), UserApiKey.endpoint_id == endpoint.id)
     elif group:
         query = query.where(UserApiKey.group_id == group.id)
     else:
@@ -495,17 +776,41 @@ async def create_api_key_for_user(
     name: str = "默认密钥",
     group_id: str | None = None,
     make_active: bool = True,
+    endpoint_id: str | None = None,
 ) -> UserApiKey:
     if not group_id:
         group_id = await default_group_id(db)
     await assert_group_exists(db, group_id)
     group = await db.get(ApiKeyGroup, group_id)
-    provider = OpenAICompatibleProvider()
-    models = await provider.probe_models(api_key)
+    endpoint = await load_model_endpoint(db, user_id, endpoint_id)
+    provider = OpenAICompatibleProvider(endpoint.base_url)
+    try:
+        models = await provider.probe_models(api_key)
+        endpoint.last_probe_error = None
+        endpoint.probed_at = datetime.utcnow()
+    except Exception as exc:
+        endpoint.last_probe_error = str(exc)
+        endpoint.probed_at = datetime.utcnow()
+        raise
+    slot_group_ids = await key_slot_group_ids(db, group)
+    existing_query = select(UserApiKey).where(
+        UserApiKey.user_id == user_id,
+        UserApiKey.endpoint_id == endpoint.id,
+    )
+    if slot_group_ids:
+        existing_query = existing_query.where(UserApiKey.group_id.in_(slot_group_ids))
+    else:
+        existing_query = existing_query.where(UserApiKey.group_id.is_(None))
+    existing = (await db.execute(existing_query)).scalars().all()
+    for old in existing:
+        await db.delete(old)
+    await db.flush()
     row = UserApiKey(
         user_id=user_id,
         name=(name or "默认密钥").strip()[:100] or "默认密钥",
         group_id=group_id,
+        endpoint_id=endpoint.id,
+        base_url=endpoint.base_url,
         is_active=False,
         key_version="v1",
         ciphertext=encrypt_api_key(api_key),
@@ -547,6 +852,25 @@ async def update_api_key_meta(
             group_id = await default_group_id(db)
         await assert_group_exists(db, group_id)
         new_group = await db.get(ApiKeyGroup, group_id)
+        slot_group_ids = await key_slot_group_ids(db, new_group)
+        if row.endpoint_id and slot_group_ids:
+            duplicate = (
+                await db.execute(
+                    select(UserApiKey).where(
+                        UserApiKey.user_id == user_id,
+                        UserApiKey.endpoint_id == row.endpoint_id,
+                        UserApiKey.id != row.id,
+                        UserApiKey.group_id.in_(slot_group_ids),
+                    )
+                )
+            ).scalars().first()
+            if duplicate:
+                raise api_error(
+                    "VALIDATION_ERROR",
+                    "A key already exists for this Base URL and purpose",
+                    status_code=409,
+                    extra={"endpointId": row.endpoint_id, "purpose": new_group.purpose if new_group else None},
+                )
         row.group_id = group_id
         row.group = new_group
     await db.flush()
@@ -562,7 +886,9 @@ async def update_api_key_meta(
 async def load_api_key_with_group(db: AsyncSession, key_id: str) -> UserApiKey:
     row = (
         await db.execute(
-            select(UserApiKey).options(selectinload(UserApiKey.group), selectinload(UserApiKey.user)).where(UserApiKey.id == key_id)
+            select(UserApiKey)
+            .options(selectinload(UserApiKey.group), selectinload(UserApiKey.endpoint), selectinload(UserApiKey.user))
+            .where(UserApiKey.id == key_id)
         )
     ).scalars().one()
     return row
@@ -576,6 +902,14 @@ async def set_active_api_key(db: AsyncSession, user_id: str, key_id: str, commit
     ).scalars().one_or_none()
     if not row or row.user_id != user_id or row.status != "active":
         raise api_error("FORBIDDEN", "密钥不存在或不可用")
+    endpoint = await load_model_endpoint(db, user_id)
+    if row.endpoint_id != endpoint.id:
+        raise api_error(
+            "BASE_URL_KEY_SCOPE_ERROR",
+            "The selected API key does not belong to the current Base URL",
+            status_code=409,
+            extra={"endpointId": endpoint.id, "baseUrl": endpoint.base_url},
+        )
     group = row.__dict__.get("group")
     scope_rows = await active_scope_rows_for_group(db, user_id, group=group)
     scope_ids = {scope_row.id for scope_row in scope_rows}

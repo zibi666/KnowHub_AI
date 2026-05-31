@@ -131,12 +131,26 @@ export interface ApiKeyEntry {
   name: string
   groupId?: string | null
   groupName?: string | null
+  endpointId?: string | null
+  endpointName?: string | null
+  baseUrl?: string | null
   fingerprint: string
   last4: string
   maskedKey: string
+  apiKey?: string | null
   status: string
   isActive: boolean
   availableModels: string[]
+  probedAt?: string | null
+}
+
+export interface ModelEndpoint {
+  id: string
+  name: string
+  baseUrl: string
+  isActive: boolean
+  status: string
+  lastProbeError?: string | null
   probedAt?: string | null
 }
 

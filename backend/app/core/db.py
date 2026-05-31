@@ -65,6 +65,12 @@ async def ensure_lightweight_migrations(conn) -> None:
         result = await conn.execute(text("SHOW COLUMNS FROM api_key_groups LIKE 'is_system'"))
         if result.first() is None:
             await conn.execute(text("ALTER TABLE api_key_groups ADD COLUMN is_system BOOLEAN NOT NULL DEFAULT FALSE"))
+        result = await conn.execute(text("SHOW COLUMNS FROM user_api_key_entries LIKE 'endpoint_id'"))
+        if result.first() is None:
+            await conn.execute(text("ALTER TABLE user_api_key_entries ADD COLUMN endpoint_id VARCHAR(36) NULL"))
+        result = await conn.execute(text("SHOW COLUMNS FROM user_api_key_entries LIKE 'base_url'"))
+        if result.first() is None:
+            await conn.execute(text("ALTER TABLE user_api_key_entries ADD COLUMN base_url VARCHAR(500) NULL"))
         return
 
     if settings.database_url.startswith("sqlite"):
@@ -90,3 +96,9 @@ async def ensure_lightweight_migrations(conn) -> None:
             await conn.execute(text("ALTER TABLE api_key_groups ADD COLUMN purpose VARCHAR(20) NOT NULL DEFAULT 'none'"))
         if "is_system" not in existing_groups:
             await conn.execute(text("ALTER TABLE api_key_groups ADD COLUMN is_system BOOLEAN NOT NULL DEFAULT 0"))
+        result = await conn.execute(text("PRAGMA table_info(user_api_key_entries)"))
+        existing_keys = {row[1] for row in result.fetchall()}
+        if "endpoint_id" not in existing_keys:
+            await conn.execute(text("ALTER TABLE user_api_key_entries ADD COLUMN endpoint_id VARCHAR(36)"))
+        if "base_url" not in existing_keys:
+            await conn.execute(text("ALTER TABLE user_api_key_entries ADD COLUMN base_url VARCHAR(500)"))

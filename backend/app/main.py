@@ -14,6 +14,7 @@ from app.services.api_keys import (
     ensure_default_api_key_groups,
     migrate_legacy_api_key_groups,
     migrate_legacy_api_keys,
+    migrate_user_model_endpoints,
     normalize_active_api_keys,
 )
 
@@ -39,6 +40,7 @@ async def on_startup() -> None:
         await ensure_initial_admin(db)
         await migrate_legacy_api_keys(db)
         await migrate_legacy_api_key_groups(db)
+        await migrate_user_model_endpoints(db)
         await normalize_active_api_keys(db)
 
 
