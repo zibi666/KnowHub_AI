@@ -491,12 +491,23 @@ body,
   display: flex;
   align-items: center;
   gap: 0.48rem;
+  justify-content: flex-start;
   border-radius: 9px;
   color: var(--text);
   font-size: 0.9rem;
   padding: 0.55rem 0.65rem;
   text-align: left;
   transition: background var(--motion-fast) ease, color var(--motion-fast) ease, transform var(--motion-fast) ease;
+}
+
+.sidebar-settings-popover button svg {
+  flex: none;
+  width: 15px;
+  color: currentColor;
+}
+
+.sidebar-settings-popover button span {
+  min-width: 0;
 }
 
 .sidebar-settings-popover button:hover {

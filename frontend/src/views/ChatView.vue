@@ -1,6 +1,6 @@
 <script setup lang="ts">
 import { computed, nextTick, onMounted, onUnmounted, ref, watch, type CSSProperties } from 'vue'
-import { ArrowDown, Download, FileText, Image as ImageIcon, KeyRound, Maximize2, MessageCircle, Minimize2, PanelLeftClose, PanelLeftOpen, Paperclip, Pencil, Plus, RefreshCw, Search, Send, Settings, X } from 'lucide-vue-next'
+import { ArrowDown, Download, FileText, GitBranch, Image as ImageIcon, KeyRound, LogOut, Maximize2, MessageCircle, Minimize2, PanelLeftClose, PanelLeftOpen, Paperclip, Pencil, Plus, RefreshCw, Search, Send, Settings, ShieldCheck, X } from 'lucide-vue-next'
 import { useRouter } from 'vue-router'
 import { ApiError, apiFetch, localizeApiMessage, readCookie } from '../api/client'
 import AppSelect from '../components/AppSelect.vue'
@@ -2686,14 +2686,26 @@ onUnmounted(() => {
             </button>
             <Transition name="menu-rise">
               <div v-if="settingsMenuOpen" class="sidebar-settings-popover" @pointerdown.stop @mousedown.stop @click.stop>
-                <button type="button" @click="openSettings('appearance')">设置</button>
+                <button type="button" @click="openSettings('appearance')">
+                  <Settings :size="15" />
+                  <span>设置</span>
+                </button>
                 <button type="button" @click="openAccessSwitch">
                   <KeyRound :size="15" />
                   <span>接入切换</span>
                 </button>
-                <button type="button" @click="openVersionControl">版本控制</button>
-                <button v-if="auth.user?.role === 'admin'" type="button" @click="openAdminMonitor">管理员监控</button>
-                <button class="sidebar-settings-danger" type="button" @click="requestLogout">退出登录</button>
+                <button type="button" @click="openVersionControl">
+                  <GitBranch :size="15" />
+                  <span>版本控制</span>
+                </button>
+                <button v-if="auth.user?.role === 'admin'" type="button" @click="openAdminMonitor">
+                  <ShieldCheck :size="15" />
+                  <span>管理员监控</span>
+                </button>
+                <button class="sidebar-settings-danger" type="button" @click="requestLogout">
+                  <LogOut :size="15" />
+                  <span>退出登录</span>
+                </button>
               </div>
             </Transition>
           </div>
