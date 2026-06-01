@@ -137,7 +137,6 @@ export interface ApiKeyEntry {
   fingerprint: string
   last4: string
   maskedKey: string
-  apiKey?: string | null
   status: string
   isActive: boolean
   availableModels: string[]
