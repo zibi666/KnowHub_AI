@@ -41,6 +41,8 @@ def normalize_base_url(base_url: str | None) -> str:
     parsed = urlparse(candidate)
     if not parsed.scheme or not parsed.netloc:
         raise api_error("VALIDATION_ERROR", "Base URL must be a complete URL", status_code=422)
+    if parsed.query or parsed.fragment:
+        raise api_error("VALIDATION_ERROR", "Base URL must not include query string or fragment", status_code=422)
     if parsed.hostname and parsed.hostname.lower() in OPENAI_COMPATIBLE_V1_ROOT_HOSTS and not parsed.path:
         return f"{candidate}/v1"
     return candidate
