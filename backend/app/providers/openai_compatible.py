@@ -29,13 +29,49 @@ class OpenAICompatibleProvider:
 
     async def probe_models(self, api_key: str) -> list[str]:
         headers = {"Authorization": f"Bearer {api_key}"}
-        async with httpx.AsyncClient(timeout=30) as client:
-            response = await client.get(f"{self.base_url}/models", headers=headers)
+        try:
+            async with httpx.AsyncClient(timeout=30) as client:
+                response = await client.get(f"{self.base_url}/models", headers=headers)
+        except httpx.TimeoutException as exc:
+            raise api_error(
+                "UPSTREAM_ERROR",
+                "Model list request timed out",
+                status_code=504,
+                extra={"baseUrl": self.base_url},
+            ) from exc
+        except httpx.RequestError as exc:
+            raise api_error(
+                "UPSTREAM_ERROR",
+                f"Model list request failed: {exc}",
+                extra={"baseUrl": self.base_url},
+            ) from exc
         if response.status_code in {401, 403}:
             raise api_error("API_KEY_INVALID", "上游拒绝了该 API Key")
-        response.raise_for_status()
-        payload = response.json()
+        if response.status_code >= 400:
+            body = (response.text or "").strip()
+            message = f"Model list request failed with HTTP {response.status_code}"
+            if body:
+                message = f"{message}: {body[:300]}"
+            raise api_error(
+                "UPSTREAM_ERROR",
+                message,
+                extra={"baseUrl": self.base_url, "upstreamStatus": response.status_code},
+            )
+        try:
+            payload = response.json()
+        except ValueError as exc:
+            raise api_error(
+                "UPSTREAM_ERROR",
+                "Model list response was not valid JSON",
+                extra={"baseUrl": self.base_url},
+            ) from exc
         models = self.parse_models(payload)
+        if not models:
+            raise api_error(
+                "UPSTREAM_ERROR",
+                "Model list response format is invalid or empty",
+                extra={"baseUrl": self.base_url},
+            )
         return sorted(set(models))
 
     async def embeddings(

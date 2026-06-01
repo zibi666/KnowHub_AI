@@ -1,6 +1,6 @@
 <script setup lang="ts">
 import { computed, nextTick, onMounted, onUnmounted, ref, watch, type CSSProperties } from 'vue'
-import { ArrowDown, Download, FileText, Image as ImageIcon, Maximize2, MessageCircle, Minimize2, PanelLeftClose, PanelLeftOpen, Paperclip, Pencil, Plus, RefreshCw, Search, Send, Settings, X } from 'lucide-vue-next'
+import { ArrowDown, Download, FileText, GitBranch, Image as ImageIcon, KeyRound, LogOut, Maximize2, MessageCircle, Minimize2, PanelLeftClose, PanelLeftOpen, Paperclip, Pencil, Plus, RefreshCw, Search, Send, Settings, ShieldCheck, X } from 'lucide-vue-next'
 import { useRouter } from 'vue-router'
 import { ApiError, apiFetch, localizeApiMessage, readCookie } from '../api/client'
 import AppSelect from '../components/AppSelect.vue'
@@ -16,6 +16,7 @@ import type {
   ImageGenerationSettings,
   ImageProgress,
   Message,
+  ModelEndpoint,
   SendMessageResponse,
   User
 } from '../types'
@@ -167,6 +168,12 @@ const welcomeMessage = ref('')
 const welcomeFontSize = ref(52)
 const settingsMenuOpen = ref(false)
 const settingsOpen = ref(false)
+const accessSwitchOpen = ref(false)
+const accessSwitchLoading = ref(false)
+const accessSwitchEndpointId = ref<string | null>(null)
+const accessSwitchKeyId = ref<string | null>(null)
+const accessSwitchNotice = ref('')
+const accessSwitchError = ref('')
 const sidebarCollapsed = ref(false)
 const searchOpen = ref(false)
 const searchQuery = ref('')
@@ -181,6 +188,7 @@ const settingsError = ref('')
 const settingsLoading = ref(false)
 const apiKeys = ref<ApiKeyEntry[]>([])
 const apiKeyGroups = ref<ApiKeyGroup[]>([])
+const modelEndpoints = ref<ModelEndpoint[]>([])
 const selectedGroupId = ref('')
 const selectedGroupKeys = ref<ApiKeyEntry[]>([])
 const groupKeysLoading = ref(false)
@@ -196,7 +204,21 @@ const renameDialogOpen = ref(false)
 const renameDraft = ref('')
 const renameError = ref('')
 const selectedApiKeyGroup = computed(() => apiKeyGroups.value.find((group) => group.id === selectedGroupId.value) || null)
+const activeModelEndpoint = computed(() => modelEndpoints.value.find((endpoint) => endpoint.isActive) || modelEndpoints.value[0] || null)
+const activeScopedApiKeys = computed(() => apiKeys.value.filter((key) => key.isActive))
+const apiKeyScopeSummary = computed(() => {
+  if (!activeModelEndpoint.value) return '未选择 BaseURL'
+  if (!apiKeys.value.length) return '当前 BaseURL 下暂无 API Key'
+  return `${apiKeys.value.length} 个 API Key / ${activeScopedApiKeys.value.length} 个当前分组密钥`
+})
 const modelOptions = computed(() => models.value.map((model) => ({ value: model, label: model })))
+const endpointOptions = computed(() =>
+  modelEndpoints.value.map((endpoint) => ({
+    value: endpoint.id,
+    label: endpoint.isActive ? `${endpoint.name} (当前)` : endpoint.name,
+    hint: endpoint.baseUrl
+  }))
+)
 const groupOptions = computed(() =>
   apiKeyGroups.value.map((group) => ({
     value: group.id,
@@ -210,9 +232,12 @@ const groupPurposeOptions = [
   { value: 'image', label: '图像模型' }
 ]
 const defaultChatGroup = computed(() => apiKeyGroups.value.find((group) => group.purpose === 'chat') || apiKeyGroups.value[0] || null)
+const defaultImageGroup = computed(() => apiKeyGroups.value.find((group) => group.purpose === 'image') || defaultChatGroup.value)
 const keyDrafts = ref<Record<string, { name: string; groupId: string }>>({})
+const endpointDrafts = ref<Record<string, { name: string; baseUrl: string }>>({})
 const groupDrafts = ref<Record<string, { name: string; description: string; purpose: GroupPurpose }>>({})
-const newApiKey = ref({ name: '默认密钥', apiKey: '', groupId: '', makeActive: true })
+const newApiKey = ref({ name: '默认密钥', apiKey: '', groupId: '', endpointId: '', makeActive: true })
+const newEndpoint = ref({ name: 'Default BaseURL', baseUrl: '', makeActive: true })
 const newGroup = ref<{ name: string; description: string; purpose: GroupPurpose }>({ name: '', description: '', purpose: 'none' })
 const profileUsername = ref('')
 const profilePassword = ref('')
@@ -817,6 +842,10 @@ function setNewApiKeyGroup(groupId: string | number) {
   newApiKey.value.groupId = String(groupId)
 }
 
+function setNewApiKeyEndpoint(endpointId: string | number) {
+  newApiKey.value.endpointId = String(endpointId)
+}
+
 function setApiKeyDraftGroup(key: ApiKeyEntry, groupId: string | number) {
   keyDraftFor(key).groupId = String(groupId)
 }
@@ -916,6 +945,13 @@ function keyDraftFor(key: ApiKeyEntry) {
   return keyDrafts.value[key.id]
 }
 
+function endpointDraftFor(endpoint: ModelEndpoint) {
+  if (!endpointDrafts.value[endpoint.id]) {
+    endpointDrafts.value[endpoint.id] = { name: endpoint.name, baseUrl: endpoint.baseUrl }
+  }
+  return endpointDrafts.value[endpoint.id]
+}
+
 function groupDraftFor(group: ApiKeyGroup) {
   if (!groupDrafts.value[group.id]) {
     groupDrafts.value[group.id] = { name: group.name, description: group.description || '', purpose: group.purpose || 'none' }
@@ -939,12 +975,18 @@ async function loadGroupKeys(groupId = selectedGroupId.value) {
   }
 }
 
-async function loadApiSettings() {
+async function loadApiSettings(options: { includeGroupKeys?: boolean } = {}) {
+  const includeGroupKeys = options.includeGroupKeys ?? true
   settingsLoading.value = true
   try {
-    const [keys, groups] = await Promise.all([apiFetch<ApiKeyEntry[]>('/api-keys'), apiFetch<ApiKeyGroup[]>('/api-key-groups')])
+    const [keys, groups, endpoints] = await Promise.all([
+      apiFetch<ApiKeyEntry[]>('/api-keys'),
+      apiFetch<ApiKeyGroup[]>('/api-key-groups'),
+      apiFetch<ModelEndpoint[]>('/model-endpoints')
+    ])
     apiKeys.value = keys
     apiKeyGroups.value = groups
+    modelEndpoints.value = endpoints
     if (!selectedGroupId.value || !groups.some((group) => group.id === selectedGroupId.value)) {
       selectedGroupId.value = groups[0]?.id || ''
     }
@@ -957,16 +999,22 @@ async function loadApiSettings() {
     if (!newApiKey.value.groupId || !groups.some((group) => group.id === newApiKey.value.groupId)) {
       newApiKey.value.groupId = defaultGroupId
     }
+    newApiKey.value.endpointId = endpoints.find((endpoint) => endpoint.isActive)?.id || endpoints[0]?.id || ''
     keyDrafts.value = Object.fromEntries(keys.map((key) => [key.id, { name: key.name, groupId: key.groupId || defaultGroupId }]))
+    endpointDrafts.value = Object.fromEntries(endpoints.map((endpoint) => [endpoint.id, { name: endpoint.name, baseUrl: endpoint.baseUrl }]))
     groupDrafts.value = Object.fromEntries(
       groups.map((group) => [group.id, { name: group.name, description: group.description || '', purpose: group.purpose || 'none' }])
     )
-    if (auth.user?.role === 'admin' && selectedGroupId.value) await loadGroupKeys(selectedGroupId.value)
+    if (includeGroupKeys && auth.user?.role === 'admin' && selectedGroupId.value) await loadGroupKeys(selectedGroupId.value)
   } catch (err) {
     settingsError.value = err instanceof Error ? err.message : '加载 API 管理失败'
   } finally {
     settingsLoading.value = false
   }
+}
+
+async function refreshApiSettings() {
+  await loadApiSettings()
 }
 
 async function loadImageSettings() {
@@ -1005,6 +1053,84 @@ async function openSettings(tab: SettingsTab = 'appearance') {
   resetSettingsMessages()
   if (targetTab === 'api' || targetTab === 'groups') await loadApiSettings()
   if (targetTab === 'image') await loadImageSettings()
+}
+
+function resetAccessSwitchMessages() {
+  accessSwitchNotice.value = ''
+  accessSwitchError.value = ''
+}
+
+async function openAccessSwitch() {
+  settingsMenuOpen.value = false
+  accessSwitchOpen.value = true
+  await refreshAccessSwitch()
+}
+
+async function refreshAccessSwitch() {
+  resetSettingsMessages()
+  resetAccessSwitchMessages()
+  await loadApiSettings({ includeGroupKeys: false })
+  if (settingsError.value) accessSwitchError.value = settingsError.value
+}
+
+function closeAccessSwitch() {
+  if (accessSwitchLoading.value) return
+  accessSwitchOpen.value = false
+  accessSwitchEndpointId.value = null
+  accessSwitchKeyId.value = null
+  resetAccessSwitchMessages()
+}
+
+async function openApiSettingsFromSwitcher() {
+  if (accessSwitchLoading.value) return
+  accessSwitchOpen.value = false
+  await openSettings('api')
+}
+
+async function switchAccessEndpoint(endpoint: ModelEndpoint) {
+  if (endpoint.isActive || accessSwitchLoading.value) return
+  resetAccessSwitchMessages()
+  accessSwitchLoading.value = true
+  accessSwitchEndpointId.value = endpoint.id
+  try {
+    await apiFetch<ModelEndpoint>(`/model-endpoints/${endpoint.id}/activate`, { method: 'POST' })
+    resetSettingsMessages()
+    await loadApiSettings({ includeGroupKeys: false })
+    if (settingsError.value) {
+      accessSwitchError.value = settingsError.value
+    } else {
+      accessSwitchNotice.value = `已切换到 ${endpoint.name}，API Key 列表已按该 BaseURL 刷新`
+    }
+    await loadModels()
+  } catch (err) {
+    accessSwitchError.value = err instanceof Error ? err.message : '切换 BaseURL 失败'
+  } finally {
+    accessSwitchEndpointId.value = null
+    accessSwitchLoading.value = false
+  }
+}
+
+async function switchAccessApiKey(key: ApiKeyEntry) {
+  if (key.isActive || accessSwitchLoading.value) return
+  resetAccessSwitchMessages()
+  accessSwitchLoading.value = true
+  accessSwitchKeyId.value = key.id
+  try {
+    await apiFetch<ApiKeyEntry>(`/api-keys/${key.id}/activate`, { method: 'POST' })
+    resetSettingsMessages()
+    await loadApiSettings({ includeGroupKeys: false })
+    if (settingsError.value) {
+      accessSwitchError.value = settingsError.value
+    } else {
+      accessSwitchNotice.value = `已在当前 BaseURL 下切换到 ${key.name}`
+    }
+    await loadModels()
+  } catch (err) {
+    accessSwitchError.value = err instanceof Error ? err.message : '切换 API Key 失败'
+  } finally {
+    accessSwitchKeyId.value = null
+    accessSwitchLoading.value = false
+  }
 }
 
 function toggleSettingsMenu() {
@@ -1058,6 +1184,67 @@ async function selectSettingsTab(tab: SettingsTab) {
   if (tab === 'image') await loadImageSettings()
 }
 
+async function createModelEndpoint() {
+  resetSettingsMessages()
+  try {
+    await apiFetch<ModelEndpoint>('/model-endpoints', {
+      method: 'POST',
+      body: JSON.stringify({
+        name: newEndpoint.value.name,
+        baseUrl: newEndpoint.value.baseUrl,
+        makeActive: newEndpoint.value.makeActive
+      })
+    })
+    newEndpoint.value = { name: 'Default BaseURL', baseUrl: '', makeActive: true }
+    settingsNotice.value = 'BaseURL 已添加'
+    await loadApiSettings()
+    await loadModels()
+  } catch (err) {
+    settingsError.value = err instanceof Error ? err.message : '添加 BaseURL 失败'
+  }
+}
+
+async function saveModelEndpoint(endpoint: ModelEndpoint) {
+  resetSettingsMessages()
+  const draft = endpointDraftFor(endpoint)
+  try {
+    await apiFetch<ModelEndpoint>(`/model-endpoints/${endpoint.id}`, {
+      method: 'PATCH',
+      body: JSON.stringify({ name: draft.name, baseUrl: draft.baseUrl })
+    })
+    settingsNotice.value = 'BaseURL 已保存'
+    await loadApiSettings()
+    await loadModels()
+  } catch (err) {
+    settingsError.value = err instanceof Error ? err.message : '保存 BaseURL 失败'
+  }
+}
+
+async function activateModelEndpoint(endpoint: ModelEndpoint) {
+  resetSettingsMessages()
+  try {
+    await apiFetch<ModelEndpoint>(`/model-endpoints/${endpoint.id}/activate`, { method: 'POST' })
+    settingsNotice.value = '当前 BaseURL 已切换'
+    await loadApiSettings()
+    await loadModels()
+  } catch (err) {
+    settingsError.value = err instanceof Error ? err.message : '切换 BaseURL 失败'
+  }
+}
+
+async function deleteModelEndpoint(endpoint: ModelEndpoint) {
+  resetSettingsMessages()
+  if (!window.confirm(`删除 BaseURL「${endpoint.name}」？对应的聊天 key 和生图 key 也会删除。`)) return
+  try {
+    await apiFetch(`/model-endpoints/${endpoint.id}`, { method: 'DELETE' })
+    settingsNotice.value = 'BaseURL 已删除'
+    await loadApiSettings()
+    await loadModels()
+  } catch (err) {
+    settingsError.value = err instanceof Error ? err.message : '删除 BaseURL 失败'
+  }
+}
+
 async function createApiKey() {
   resetSettingsMessages()
   try {
@@ -1067,10 +1254,17 @@ async function createApiKey() {
         name: newApiKey.value.name,
         apiKey: newApiKey.value.apiKey,
         groupId: newApiKey.value.groupId || defaultChatGroup.value?.id || null,
+        endpointId: activeModelEndpoint.value?.id || newApiKey.value.endpointId || null,
         makeActive: newApiKey.value.makeActive
       })
     })
-    newApiKey.value = { name: '默认密钥', apiKey: '', groupId: defaultChatGroup.value?.id || '', makeActive: true }
+    newApiKey.value = {
+      name: '默认密钥',
+      apiKey: '',
+      groupId: defaultChatGroup.value?.id || '',
+      endpointId: activeModelEndpoint.value?.id || '',
+      makeActive: true
+    }
     settingsNotice.value = '密钥已添加'
     await loadApiSettings()
     await auth.loadMe()
@@ -2492,10 +2686,26 @@ onUnmounted(() => {
             </button>
             <Transition name="menu-rise">
               <div v-if="settingsMenuOpen" class="sidebar-settings-popover" @pointerdown.stop @mousedown.stop @click.stop>
-                <button type="button" @click="openSettings('appearance')">设置</button>
-                <button type="button" @click="openVersionControl">版本控制</button>
-                <button v-if="auth.user?.role === 'admin'" type="button" @click="openAdminMonitor">管理员监控</button>
-                <button class="sidebar-settings-danger" type="button" @click="requestLogout">退出登录</button>
+                <button type="button" @click="openSettings('appearance')">
+                  <Settings :size="15" />
+                  <span>设置</span>
+                </button>
+                <button type="button" @click="openAccessSwitch">
+                  <KeyRound :size="15" />
+                  <span>接入切换</span>
+                </button>
+                <button type="button" @click="openVersionControl">
+                  <GitBranch :size="15" />
+                  <span>版本控制</span>
+                </button>
+                <button v-if="auth.user?.role === 'admin'" type="button" @click="openAdminMonitor">
+                  <ShieldCheck :size="15" />
+                  <span>管理员监控</span>
+                </button>
+                <button class="sidebar-settings-danger" type="button" @click="requestLogout">
+                  <LogOut :size="15" />
+                  <span>退出登录</span>
+                </button>
               </div>
             </Transition>
           </div>
@@ -2531,6 +2741,10 @@ onUnmounted(() => {
             :options="reasoningOptions"
             @change="setReasoningEffortFromSelect"
           />
+
+          <button class="top-icon-button" type="button" title="BaseURL / API Key 切换" aria-label="BaseURL / API Key 切换" @click="openAccessSwitch">
+            <KeyRound :size="15" />
+          </button>
 
           <button class="top-icon-button" type="button" title="新对话" aria-label="新对话" @click="newChat">
             <Plus :size="15" />
@@ -2878,79 +3092,217 @@ onUnmounted(() => {
               </section>
 
               <section v-else-if="settingsTab === 'api'" key="api" class="settings-pane">
-                <div class="settings-pane-heading">
-                  <h2>API 管理</h2>
-                  <p>用户可以管理自己的密钥，并把密钥切换到管理员创建的分组。一个密钥只能属于一个分组。</p>
-                </div>
-
-                <form class="settings-card" @submit.prevent="createApiKey">
-                  <h3>添加新密钥</h3>
-                  <div class="settings-grid">
-                    <input v-model="newApiKey.name" class="settings-input" placeholder="密钥名称，例如：工作 / 备用" />
-                    <AppSelect
-                      v-model="newApiKey.groupId"
-                      class="settings-select"
-                      button-class="settings-select-button"
-                      menu-class="settings-select-menu"
-                      option-class="settings-select-option"
-                      :options="groupOptions"
-                      @change="setNewApiKeyGroup"
-                    />
-                    <input v-model="newApiKey.apiKey" class="settings-input" type="password" placeholder="API Key 明文只提交一次" />
+                <div class="settings-pane-heading settings-api-heading">
+                  <div>
+                    <h2>API 管理</h2>
+                    <p>管理 BaseURL 和当前 BaseURL 下的 API Key；日常切换可使用独立接入切换窗口。</p>
                   </div>
-                  <label class="settings-check">
-                    <input v-model="newApiKey.makeActive" type="checkbox" />
-                    添加后立即设为该分组当前使用密钥
-                  </label>
-                  <button class="settings-primary" type="submit">添加密钥</button>
-                </form>
-
-                <div class="settings-card">
-                  <div class="settings-card-header">
-                    <h3>我的密钥</h3>
-                    <button class="settings-secondary" :disabled="settingsLoading" @click="loadApiSettings">刷新</button>
-                  </div>
-                  <div v-if="settingsLoading" class="settings-skeleton-list" aria-label="正在加载密钥">
-                    <div v-for="item in 3" :key="item" class="settings-key-skeleton">
-                      <div class="settings-key-main">
-                        <span class="skeleton-line wide" />
-                        <span class="skeleton-line medium" />
-                        <span class="skeleton-line short" />
-                      </div>
-                      <div class="settings-key-actions">
-                        <span class="skeleton-pill" />
-                        <span class="skeleton-pill" />
-                      </div>
-                    </div>
-                  </div>
-                  <div v-else-if="!apiKeys.length" class="settings-empty">暂无密钥</div>
-                  <div v-for="key in apiKeys" v-else :key="key.id" class="settings-key-row">
-                    <div class="settings-key-main">
-                      <input v-model="keyDraftFor(key).name" class="settings-input" />
-                      <AppSelect
-                        :model-value="keyDraftFor(key).groupId"
-                        class="settings-select"
-                        button-class="settings-select-button"
-                        menu-class="settings-select-menu"
-                        option-class="settings-select-option"
-                        :options="groupOptions"
-                        @update:model-value="setApiKeyDraftGroup(key, $event)"
-                      />
-                      <div class="settings-key-meta">
-                        <span>{{ key.groupName || 'gpt-chat' }}</span>
-                        <span class="key-mask">{{ key.maskedKey }}</span>
-                        <strong v-if="key.isActive">当前分组使用</strong>
-                      </div>
-                    </div>
-                    <div class="settings-key-actions">
-                      <button class="settings-secondary" @click="copyApiKeySecret(key)">复制</button>
-                      <button class="settings-secondary" @click="saveApiKey(key)">保存</button>
-                      <button class="settings-primary" :disabled="key.isActive" @click="activateApiKey(key)">切换</button>
-                      <button class="settings-danger" @click="deleteApiKey(key)">删除</button>
-                    </div>
+                  <div class="settings-api-heading-actions">
+                    <button class="settings-secondary" type="button" :disabled="settingsLoading" @click="refreshApiSettings">
+                      <RefreshCw :size="14" />
+                      刷新
+                    </button>
+                    <button class="settings-primary" type="button" @click="openAccessSwitch">
+                      <KeyRound :size="15" />
+                      接入切换
+                    </button>
                   </div>
                 </div>
 
+                <div class="settings-api-overview">
+                  <article class="settings-api-overview-item primary">
+                    <span>当前 BaseURL</span>
+                    <strong>{{ activeModelEndpoint?.name || '未配置' }}</strong>
+                    <small>{{ activeModelEndpoint?.baseUrl || '暂无可用 BaseURL' }}</small>
+                  </article>
+                  <article class="settings-api-overview-item">
+                    <span>BaseURL 数量</span>
+                    <strong>{{ modelEndpoints.length }}</strong>
+                    <small>{{ modelEndpoints.filter((endpoint) => endpoint.isActive).length ? '已有当前接入' : '尚未激活接入' }}</small>
+                  </article>
+                  <article class="settings-api-overview-item">
+                    <span>当前范围内 API Key</span>
+                    <strong>{{ apiKeys.length }}</strong>
+                    <small>{{ activeScopedApiKeys.length }} 个当前分组密钥</small>
+                  </article>
+                </div>
+
+                <div class="settings-api-layout">
+                  <div class="settings-api-compose">
+                    <form class="settings-card settings-api-create-card" @submit.prevent="createModelEndpoint">
+                      <div class="settings-card-header">
+                        <div>
+                          <h3>新增 BaseURL</h3>
+                          <p>添加一个 OpenAI 兼容模型服务地址。</p>
+                        </div>
+                      </div>
+                      <div class="settings-api-form-grid">
+                        <label class="settings-field">
+                          <span>名称</span>
+                          <input v-model="newEndpoint.name" class="settings-input" placeholder="例如：工作服务" />
+                        </label>
+                        <label class="settings-field">
+                          <span>BaseURL</span>
+                          <input v-model="newEndpoint.baseUrl" class="settings-input" placeholder="https://example.com/v1" />
+                        </label>
+                      </div>
+                      <div class="settings-api-card-footer">
+                        <label class="settings-check">
+                          <input v-model="newEndpoint.makeActive" type="checkbox" />
+                          添加后设为当前
+                        </label>
+                        <button class="settings-primary settings-api-action" type="submit">
+                          <Plus :size="15" />
+                          添加 BaseURL
+                        </button>
+                      </div>
+                    </form>
+
+                    <form class="settings-card settings-api-create-card" @submit.prevent="createApiKey">
+                      <div class="settings-card-header">
+                        <div>
+                          <h3>新增 API Key</h3>
+                          <p>默认绑定到当前 BaseURL，也可选择其他 BaseURL。</p>
+                        </div>
+                      </div>
+                      <div class="settings-api-form-grid">
+                        <label class="settings-field">
+                          <span>密钥名称</span>
+                          <input v-model="newApiKey.name" class="settings-input" placeholder="例如：工作 / 备用" />
+                        </label>
+                        <label class="settings-field">
+                          <span>所属 BaseURL</span>
+                          <AppSelect
+                            v-model="newApiKey.endpointId"
+                            class="settings-select"
+                            button-class="settings-select-button"
+                            menu-class="settings-select-menu"
+                            option-class="settings-select-option"
+                            :options="endpointOptions"
+                            @change="setNewApiKeyEndpoint"
+                          />
+                        </label>
+                        <label class="settings-field">
+                          <span>用途分组</span>
+                          <AppSelect
+                            v-model="newApiKey.groupId"
+                            class="settings-select"
+                            button-class="settings-select-button"
+                            menu-class="settings-select-menu"
+                            option-class="settings-select-option"
+                            :options="groupOptions"
+                            @change="setNewApiKeyGroup"
+                          />
+                        </label>
+                        <label class="settings-field">
+                          <span>API Key</span>
+                          <input v-model="newApiKey.apiKey" class="settings-input" type="password" placeholder="明文只提交一次" />
+                        </label>
+                      </div>
+                      <div class="settings-api-card-footer">
+                        <label class="settings-check">
+                          <input v-model="newApiKey.makeActive" type="checkbox" />
+                          添加后设为该分组当前密钥
+                        </label>
+                        <button class="settings-primary settings-api-action" type="submit">
+                          <Plus :size="15" />
+                          添加 API Key
+                        </button>
+                      </div>
+                    </form>
+                  </div>
+
+                  <div class="settings-api-manage">
+                    <section class="settings-card settings-api-list-card">
+                      <div class="settings-card-header">
+                        <div>
+                          <h3>BaseURL</h3>
+                          <p>保存服务地址，或把它设为当前接入。</p>
+                        </div>
+                      </div>
+                      <div v-if="!modelEndpoints.length" class="settings-empty">暂无 BaseURL</div>
+                      <div v-else class="settings-api-list">
+                        <article
+                          v-for="endpoint in modelEndpoints"
+                          :key="endpoint.id"
+                          class="settings-api-row"
+                          :class="{ active: endpoint.isActive }"
+                        >
+                          <div class="settings-api-row-fields">
+                            <input v-model="endpointDraftFor(endpoint).name" class="settings-input" aria-label="BaseURL 名称" />
+                            <input v-model="endpointDraftFor(endpoint).baseUrl" class="settings-input" aria-label="BaseURL 地址" />
+                          </div>
+                          <div class="settings-api-row-meta">
+                            <span>{{ endpoint.baseUrl }}</span>
+                            <strong v-if="endpoint.isActive">当前 BaseURL</strong>
+                            <em v-if="endpoint.lastProbeError">{{ endpoint.lastProbeError }}</em>
+                          </div>
+                          <div class="settings-api-row-actions">
+                            <button class="settings-secondary" type="button" @click="saveModelEndpoint(endpoint)">保存</button>
+                            <button class="settings-primary" type="button" :disabled="endpoint.isActive" @click="activateModelEndpoint(endpoint)">设为当前</button>
+                            <button class="settings-danger" type="button" @click="deleteModelEndpoint(endpoint)">删除</button>
+                          </div>
+                        </article>
+                      </div>
+                    </section>
+
+                    <section class="settings-card settings-api-list-card">
+                      <div class="settings-card-header">
+                        <div>
+                          <h3>当前 BaseURL 的 API Key</h3>
+                          <p>{{ activeModelEndpoint?.name || '未配置 BaseURL' }}</p>
+                        </div>
+                      </div>
+                      <div v-if="settingsLoading" class="settings-skeleton-list" aria-label="正在加载密钥">
+                        <div v-for="item in 3" :key="item" class="settings-key-skeleton">
+                          <div class="settings-key-main">
+                            <span class="skeleton-line wide" />
+                            <span class="skeleton-line medium" />
+                            <span class="skeleton-line short" />
+                          </div>
+                          <div class="settings-key-actions">
+                            <span class="skeleton-pill" />
+                            <span class="skeleton-pill" />
+                          </div>
+                        </div>
+                      </div>
+                      <div v-else-if="!apiKeys.length" class="settings-empty">当前 BaseURL 下暂无 API Key</div>
+                      <div v-else class="settings-api-list">
+                        <article
+                          v-for="key in apiKeys"
+                          :key="key.id"
+                          class="settings-api-row"
+                          :class="{ active: key.isActive }"
+                        >
+                          <div class="settings-api-row-fields">
+                            <input v-model="keyDraftFor(key).name" class="settings-input" aria-label="API Key 名称" />
+                            <AppSelect
+                              :model-value="keyDraftFor(key).groupId"
+                              class="settings-select"
+                              button-class="settings-select-button"
+                              menu-class="settings-select-menu"
+                              option-class="settings-select-option"
+                              :options="groupOptions"
+                              @update:model-value="setApiKeyDraftGroup(key, $event)"
+                            />
+                          </div>
+                          <div class="settings-api-row-meta">
+                            <span>{{ key.endpointName || key.baseUrl || '当前 BaseURL' }}</span>
+                            <span>{{ key.groupName || 'gpt-chat' }}</span>
+                            <span class="key-mask">{{ key.apiKey || key.maskedKey }}</span>
+                            <strong v-if="key.isActive">当前分组使用</strong>
+                          </div>
+                          <div class="settings-api-row-actions">
+                            <button class="settings-secondary" type="button" @click="copyApiKeySecret(key)">复制</button>
+                            <button class="settings-secondary" type="button" @click="saveApiKey(key)">保存</button>
+                            <button class="settings-primary" type="button" :disabled="key.isActive" @click="activateApiKey(key)">设为当前</button>
+                            <button class="settings-danger" type="button" @click="deleteApiKey(key)">删除</button>
+                          </div>
+                        </article>
+                      </div>
+                    </section>
+                  </div>
+                </div>
               </section>
 
               <section v-else-if="settingsTab === 'groups' && auth.user?.role === 'admin'" key="groups" class="settings-pane">
@@ -3099,6 +3451,127 @@ onUnmounted(() => {
               </section>
             </Transition>
           </div>
+        </section>
+      </div>
+    </Transition>
+
+    <Transition name="dialog-pop">
+      <div v-if="accessSwitchOpen" class="confirm-modal-backdrop access-switch-backdrop" @click.self="closeAccessSwitch">
+        <section class="access-switch-modal" role="dialog" aria-modal="true" aria-label="BaseURL / API Key 切换">
+          <header class="access-switch-header">
+            <div class="access-switch-title">
+              <KeyRound :size="20" />
+              <div>
+                <h2>接入切换</h2>
+                <p>先切 BaseURL，右侧只显示该 BaseURL 下可切换的 API Key。</p>
+              </div>
+            </div>
+            <button type="button" class="confirm-modal-close" title="关闭" aria-label="关闭" @click="closeAccessSwitch">
+              <X :size="18" />
+            </button>
+          </header>
+
+          <Transition name="soft-slide">
+            <div v-if="accessSwitchNotice" class="access-switch-alert success">{{ accessSwitchNotice }}</div>
+          </Transition>
+          <Transition name="soft-slide">
+            <div v-if="accessSwitchError" class="access-switch-alert error">{{ accessSwitchError }}</div>
+          </Transition>
+
+          <div class="access-switch-status">
+            <div>
+              <span>当前 BaseURL</span>
+              <strong>{{ activeModelEndpoint?.name || '未配置' }}</strong>
+              <small>{{ activeModelEndpoint?.baseUrl || '暂无 BaseURL' }}</small>
+            </div>
+            <div>
+              <span>API Key 范围</span>
+              <strong>{{ apiKeyScopeSummary }}</strong>
+              <small>切换 Key 时不会跨 BaseURL 展示或激活</small>
+            </div>
+          </div>
+
+          <div class="access-switch-grid">
+            <section class="access-switch-section">
+              <div class="access-switch-section-head">
+                <h3>BaseURL</h3>
+                <button type="button" class="access-switch-refresh" :disabled="settingsLoading || accessSwitchLoading" @click="refreshAccessSwitch">
+                  <RefreshCw :size="14" />
+                </button>
+              </div>
+
+              <div v-if="settingsLoading && !modelEndpoints.length" class="access-switch-list">
+                <div v-for="item in 3" :key="item" class="access-switch-skeleton">
+                  <span class="skeleton-line wide" />
+                  <span class="skeleton-line medium" />
+                </div>
+              </div>
+              <div v-else-if="!modelEndpoints.length" class="access-switch-empty">暂无 BaseURL，请先到 API 管理中添加。</div>
+              <div v-else class="access-switch-list">
+                <button
+                  v-for="endpoint in modelEndpoints"
+                  :key="endpoint.id"
+                  type="button"
+                  class="access-switch-row"
+                  :class="{ active: endpoint.isActive }"
+                  :disabled="settingsLoading || accessSwitchLoading || endpoint.isActive"
+                  @click="switchAccessEndpoint(endpoint)"
+                >
+                  <span class="access-switch-row-main">
+                    <strong>{{ endpoint.name }}</strong>
+                    <small>{{ endpoint.baseUrl }}</small>
+                    <em v-if="endpoint.lastProbeError">{{ endpoint.lastProbeError }}</em>
+                  </span>
+                  <span class="access-switch-badge">
+                    {{ endpoint.isActive ? '当前' : accessSwitchEndpointId === endpoint.id ? '切换中' : '切换' }}
+                  </span>
+                </button>
+              </div>
+            </section>
+
+            <section class="access-switch-section">
+              <div class="access-switch-section-head">
+                <h3>当前 BaseURL 的 API Key</h3>
+                <span>{{ activeModelEndpoint?.name || '未配置' }}</span>
+              </div>
+
+              <div v-if="settingsLoading && !apiKeys.length" class="access-switch-list">
+                <div v-for="item in 3" :key="item" class="access-switch-skeleton">
+                  <span class="skeleton-line wide" />
+                  <span class="skeleton-line short" />
+                </div>
+              </div>
+              <div v-else-if="!activeModelEndpoint" class="access-switch-empty">请先选择或添加 BaseURL。</div>
+              <div v-else-if="!apiKeys.length" class="access-switch-empty">当前 BaseURL 下暂无 API Key。</div>
+              <div v-else class="access-switch-list">
+                <button
+                  v-for="key in apiKeys"
+                  :key="key.id"
+                  type="button"
+                  class="access-switch-row"
+                  :class="{ active: key.isActive }"
+                  :disabled="settingsLoading || accessSwitchLoading || key.isActive"
+                  @click="switchAccessApiKey(key)"
+                >
+                  <span class="access-switch-row-main">
+                    <strong>{{ key.name }}</strong>
+                    <small>{{ key.groupName || 'gpt-chat' }} · {{ key.maskedKey || key.apiKey || (key.last4 ? '****' + key.last4 : '未展示') }}</small>
+                    <em>{{ key.endpointName || key.baseUrl || activeModelEndpoint?.name || '当前 BaseURL' }}</em>
+                  </span>
+                  <span class="access-switch-badge">
+                    {{ key.isActive ? '当前' : accessSwitchKeyId === key.id ? '切换中' : '切换' }}
+                  </span>
+                </button>
+              </div>
+            </section>
+          </div>
+
+          <footer class="access-switch-footer">
+            <button type="button" class="confirm-secondary-button" :disabled="settingsLoading || accessSwitchLoading" @click="openApiSettingsFromSwitcher">
+              管理配置
+            </button>
+            <button type="button" class="confirm-primary-button" :disabled="accessSwitchLoading" @click="closeAccessSwitch">完成</button>
+          </footer>
         </section>
       </div>
     </Transition>

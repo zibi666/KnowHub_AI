@@ -936,7 +936,7 @@ async def stream_chat(user_id: str, payload: SendMessageRequest, conversation_id
             reasoning_effort,
         )
 
-        provider = OpenAICompatibleProvider()
+        provider = OpenAICompatibleProvider(api_key_row.base_url)
         stream = provider.chat_stream(
             api_key=api_key,
             model=model,
@@ -1276,6 +1276,7 @@ async def stream_image_generation_chat(
             user_id=user_id,
             image_settings=image_settings,
             partial_images=IMAGE_STREAM_PARTIAL_IMAGES,
+            base_url=api_key_row.base_url,
         ).__aiter__()
         pending_next = asyncio.ensure_future(_safe_anext(stream))
         try:
@@ -1556,6 +1557,7 @@ async def run_image_generation_job(
                 user_id=user_id,
                 image_settings=image_settings,
                 partial_images=IMAGE_STREAM_PARTIAL_IMAGES,
+                base_url=api_key_row.base_url,
             )
             async for event in stream:
                 if event.event == "image_progress":
@@ -1906,7 +1908,7 @@ async def run_chat_generation_job(
         requested_effort = (payload.reasoning_effort or "").strip().lower() or None
         request_reasoning_effort = requested_effort if requested_effort and requested_effort in allowed_reasoning else settings.model_reasoning_effort
 
-        provider = OpenAICompatibleProvider()
+        provider = OpenAICompatibleProvider(api_key_row.base_url)
         stream = provider.chat_stream(
             api_key=api_key,
             model=model,
