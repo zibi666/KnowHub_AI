@@ -444,7 +444,7 @@ def api_key_to_out(row: UserApiKey) -> ApiKeyOut:
         fingerprint=row.fingerprint,
         last4=row.last4,
         masked_key=masked_key,
-        api_key=plain_key,
+        api_key=None,
         status=row.status,
         is_active=row.is_active,
         available_models=list(row.available_models_json or []),
