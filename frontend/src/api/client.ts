@@ -18,6 +18,8 @@ export class ApiError extends Error {
 
 const ERROR_MESSAGES: Record<string, string> = {
   KEY_REQUIRED: '请先绑定模型 API Key',
+  CHAT_KEY_REQUIRED: '当前 BaseURL 缺少聊天 API Key，请先配置聊天 key',
+  IMAGE_KEY_REQUIRED: '当前 BaseURL 缺少生图 API Key，请先配置生图 key',
   PASSWORD_CHANGE_REQUIRED: '请先修改临时密码',
   INVALID_CREDENTIALS: '账号或密码错误，或登录已失效',
   API_KEY_INVALID: '模型 API Key 无效，请在设置中更新',
@@ -40,7 +42,9 @@ const ERROR_MESSAGES: Record<string, string> = {
 }
 
 export function localizeApiMessage(code: string, fallback = '请求失败') {
-  return ERROR_MESSAGES[code] || fallback || '请求失败'
+  const message = ERROR_MESSAGES[code]
+  if (message && fallback && fallback !== code && fallback !== message) return `${message}：${fallback}`
+  return message || fallback || '请求失败'
 }
 
 export async function apiFetch<T>(path: string, init: RequestInit = {}): Promise<T> {

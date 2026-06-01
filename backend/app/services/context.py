@@ -333,7 +333,7 @@ async def build_rag_attachment_context_blocks(
         return []
 
     try:
-        provider = OpenAICompatibleProvider()
+        provider = OpenAICompatibleProvider(api_key.base_url)
         query_vector = (await provider.embeddings(decrypt_api_key(api_key.ciphertext), settings.embedding_model, [current_content]))[0]
     except Exception:
         return []

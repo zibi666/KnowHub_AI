@@ -219,6 +219,7 @@ async def image_generation_stream(
     user_id: str,
     image_settings: dict[str, Any] | None = None,
     partial_images: int = IMAGE_STREAM_PARTIAL_IMAGES,
+    base_url: str | None = None,
 ) -> AsyncIterator[StreamEvent]:
     settings = get_settings()
     upstream_model, payload = image_generation_payload(model, prompt, user_id, image_settings)
@@ -234,7 +235,7 @@ async def image_generation_stream(
     payload["partial_images"] = partial_images
 
     request_started = time.perf_counter()
-    request_url = f"{settings.model_base_url.rstrip('/')}/images/generations"
+    request_url = f"{(base_url or settings.model_base_url).rstrip('/')}/images/generations"
     perf_logger.info(
         "upstream_timing image_generation_request_start model=%s url=%s prompt_chars=%d partial_images=%d payload_keys=%s",
         upstream_model,
@@ -552,6 +553,7 @@ async def image_generation_stream_final(
     prompt: str,
     user_id: str,
     image_settings: dict[str, Any] | None = None,
+    base_url: str | None = None,
 ) -> GeneratedImage:
     try:
         stream = image_generation_stream(
@@ -561,6 +563,7 @@ async def image_generation_stream_final(
             user_id=user_id,
             image_settings=image_settings,
             partial_images=IMAGE_STREAM_PARTIAL_IMAGES,
+            base_url=base_url,
         )
         async for event in stream:
             if event.event != "image_completed":
@@ -581,6 +584,7 @@ async def image_generation_nonstream(
     prompt: str,
     user_id: str,
     image_settings: dict[str, Any] | None = None,
+    base_url: str | None = None,
 ) -> GeneratedImage:
     settings = get_settings()
     generation_settings = normalize_image_settings(image_settings)
@@ -595,7 +599,7 @@ async def image_generation_nonstream(
     )
     response = await post_image_generation_json(
         api_key,
-        f"{settings.model_base_url.rstrip('/')}/images/generations",
+        f"{(base_url or settings.model_base_url).rstrip('/')}/images/generations",
         payload,
     )
     perf_logger.info(

@@ -107,7 +107,7 @@ async def _llm_summarize(
         {"role": "user", "content": user_prompt},
     ]
     api_key = decrypt_api_key(api_key_row.ciphertext)
-    provider = OpenAICompatibleProvider()
+    provider = OpenAICompatibleProvider(api_key_row.base_url)
     text = await provider.chat_completion_nonstream(
         api_key=api_key,
         model=summary_model,
