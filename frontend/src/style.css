@@ -2795,6 +2795,59 @@ body,
   line-height: 1.55;
 }
 
+.attachment-rename-modal {
+  width: min(520px, calc(100vw - 2rem));
+  gap: 1rem;
+  background:
+    linear-gradient(180deg, color-mix(in srgb, var(--panel-bg) 96%, #fff 2%), color-mix(in srgb, var(--panel-bg) 96%, #000 6%)),
+    var(--panel-bg);
+}
+
+.attachment-rename-field {
+  display: grid;
+  gap: 0.48rem;
+  min-width: 0;
+}
+
+.attachment-rename-field span {
+  color: var(--muted);
+  font-size: 0.8rem;
+}
+
+.attachment-rename-input {
+  width: 100%;
+  min-width: 0;
+  min-height: 2.75rem;
+  border: 1px solid color-mix(in srgb, var(--input-border) 86%, transparent);
+  border-radius: 10px;
+  background:
+    linear-gradient(180deg, color-mix(in srgb, var(--input-bg) 88%, #fff 2%), color-mix(in srgb, var(--input-bg) 94%, #000 4%)),
+    var(--input-bg);
+  color: var(--text);
+  caret-color: var(--bubble-bg);
+  outline: none;
+  padding: 0.68rem 0.82rem;
+  font-size: 0.94rem;
+  line-height: 1.35;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  transition: border-color var(--motion-fast) ease, box-shadow var(--motion-fast) ease, background var(--motion-fast) ease;
+}
+
+.attachment-rename-input::placeholder {
+  color: color-mix(in srgb, var(--muted) 62%, transparent);
+}
+
+.attachment-rename-input:focus {
+  border-color: color-mix(in srgb, var(--bubble-bg) 72%, var(--input-border));
+  box-shadow: 0 0 0 3px color-mix(in srgb, var(--bubble-bg) 18%, transparent);
+}
+
+.attachment-rename-input::selection {
+  background: color-mix(in srgb, var(--bubble-bg) 42%, transparent);
+  color: var(--text);
+}
+
 .rename-modal-close,
 .confirm-modal-close {
   display: inline-flex;

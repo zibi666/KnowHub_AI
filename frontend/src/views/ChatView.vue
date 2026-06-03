@@ -139,7 +139,9 @@ const fileTreeGroupOpen = ref<Record<FileTreeGroup, boolean>>({ images: true, do
 const attachmentRenameOpen = ref(false)
 const attachmentRenameSaving = ref(false)
 const attachmentRenameDraft = ref('')
+const attachmentRenameError = ref('')
 const attachmentRenameTarget = ref<ConversationAttachment | null>(null)
+const attachmentRenameInput = ref<HTMLInputElement | null>(null)
 const attachmentDeleteOpen = ref(false)
 const attachmentDeleting = ref(false)
 const attachmentDeleteTarget = ref<ConversationAttachment | null>(null)
@@ -829,7 +831,12 @@ function handleFileTreeSelectionChange(item: ConversationAttachment, event: Even
 function openAttachmentRename(item: ConversationAttachment) {
   attachmentRenameTarget.value = item
   attachmentRenameDraft.value = fileTreeDisplayName(item)
+  attachmentRenameError.value = ''
   attachmentRenameOpen.value = true
+  void nextTick(() => {
+    attachmentRenameInput.value?.focus()
+    attachmentRenameInput.value?.select()
+  })
 }
 
 function closeAttachmentRename() {
@@ -837,6 +844,7 @@ function closeAttachmentRename() {
   attachmentRenameOpen.value = false
   attachmentRenameTarget.value = null
   attachmentRenameDraft.value = ''
+  attachmentRenameError.value = ''
 }
 
 async function renameFileTreeAttachment(item: ConversationAttachment, displayName: string, options: { silent?: boolean } = {}) {
@@ -863,12 +871,20 @@ async function renameFileTreeAttachment(item: ConversationAttachment, displayNam
 async function saveAttachmentRename() {
   const target = attachmentRenameTarget.value
   if (!target || attachmentRenameSaving.value) return
+  const name = attachmentRenameDraft.value.trim()
+  if (!name) {
+    attachmentRenameError.value = '文件名不能为空'
+    return
+  }
   attachmentRenameSaving.value = true
   try {
-    await renameFileTreeAttachment(target, attachmentRenameDraft.value)
-    closeAttachmentRename()
+    await renameFileTreeAttachment(target, name)
+    attachmentRenameOpen.value = false
+    attachmentRenameTarget.value = null
+    attachmentRenameDraft.value = ''
+    attachmentRenameError.value = ''
   } catch (err) {
-    error.value = err instanceof Error ? err.message : '重命名失败'
+    attachmentRenameError.value = err instanceof Error ? err.message : '重命名失败'
   } finally {
     attachmentRenameSaving.value = false
   }
@@ -4149,20 +4165,28 @@ onUnmounted(() => {
 
     <Transition name="dialog-pop">
       <div v-if="attachmentRenameOpen" class="confirm-modal-backdrop" @click.self="closeAttachmentRename">
-        <form class="confirm-modal" role="dialog" aria-modal="true" aria-label="重命名文件" @submit.prevent="saveAttachmentRename">
+        <form class="confirm-modal attachment-rename-modal" role="dialog" aria-modal="true" aria-label="重命名文件" @submit.prevent="saveAttachmentRename">
           <div class="confirm-modal-header">
             <h2>重命名文件</h2>
             <button type="button" class="confirm-modal-close" title="关闭" aria-label="关闭" @click="closeAttachmentRename">
               <X :size="18" />
             </button>
           </div>
-          <input
-            v-model="attachmentRenameDraft"
-            class="rename-input"
-            maxlength="255"
-            placeholder="文件显示名"
-            autofocus
-          />
+          <label class="attachment-rename-field">
+            <span>显示名称</span>
+            <input
+              ref="attachmentRenameInput"
+              v-model="attachmentRenameDraft"
+              class="attachment-rename-input"
+              maxlength="255"
+              placeholder="文件显示名"
+              autocomplete="off"
+              spellcheck="false"
+              :title="attachmentRenameDraft"
+              @input="attachmentRenameError = ''"
+            />
+          </label>
+          <p v-if="attachmentRenameError" class="attachment-rename-error">{{ attachmentRenameError }}</p>
           <div class="confirm-modal-actions">
             <button type="button" class="confirm-secondary-button" :disabled="attachmentRenameSaving" @click="closeAttachmentRename">取消</button>
             <button type="submit" class="confirm-primary-button" :disabled="attachmentRenameSaving || !attachmentRenameDraft.trim()">
