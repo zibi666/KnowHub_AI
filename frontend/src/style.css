@@ -3802,7 +3802,28 @@ body,
   overscroll-behavior: contain;
   padding: 0 0.58rem 0.72rem;
   scrollbar-width: thin;
-  scrollbar-color: color-mix(in srgb, var(--muted) 34%, transparent) transparent;
+  scrollbar-color: color-mix(in srgb, var(--muted) 18%, transparent) transparent;
+}
+
+.file-tree-groups:hover {
+  scrollbar-color: color-mix(in srgb, var(--muted) 42%, transparent) transparent;
+}
+
+.file-tree-groups::-webkit-scrollbar {
+  width: 4px;
+}
+
+.file-tree-groups::-webkit-scrollbar-track {
+  background: transparent;
+}
+
+.file-tree-groups::-webkit-scrollbar-thumb {
+  border-radius: 999px;
+  background: color-mix(in srgb, var(--muted) 18%, transparent);
+}
+
+.file-tree-groups:hover::-webkit-scrollbar-thumb {
+  background: color-mix(in srgb, var(--muted) 42%, transparent);
 }
 
 .file-tree-group {
