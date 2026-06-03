@@ -1,6 +1,6 @@
 <script setup lang="ts">
 import { computed, nextTick, onMounted, onUnmounted, ref, watch, type CSSProperties } from 'vue'
-import { ArrowDown, Download, FileText, GitBranch, Image as ImageIcon, KeyRound, LogOut, Maximize2, MessageCircle, Minimize2, PanelLeftClose, PanelLeftOpen, Paperclip, Pencil, Plus, RefreshCw, Search, Send, Settings, ShieldCheck, X } from 'lucide-vue-next'
+import { ArrowDown, Download, FileText, GitBranch, Image as ImageIcon, KeyRound, LogOut, Maximize2, MessageCircle, Minimize2, PanelLeftClose, PanelLeftOpen, Paperclip, Pencil, Pin, PinOff, Plus, RefreshCw, Search, Send, Settings, ShieldCheck, Trash2, X } from 'lucide-vue-next'
 import { useRouter } from 'vue-router'
 import { ApiError, apiFetch, localizeApiMessage, readCookie } from '../api/client'
 import AppSelect from '../components/AppSelect.vue'
@@ -12,6 +12,7 @@ import type {
   Attachment,
   AttachmentChunkPreview,
   Conversation,
+  ConversationAttachment,
   ConversationSearchResult,
   ImageGenerationSettings,
   ImageProgress,
@@ -61,14 +62,14 @@ const SIDEBAR_STORAGE_KEY = 'private-gpt-sidebar-collapsed'
 const WELCOME_STORAGE_KEY = 'private-gpt-welcome-message'
 const WELCOME_SIZE_STORAGE_KEY = 'private-gpt-welcome-font-size'
 const CURRENT_CONVERSATION_STORAGE_KEY = 'private-gpt-current-conversation'
-const DOCUMENT_REFERENCE_STORAGE_KEY = 'private-gpt-document-references'
+const FILE_TREE_PIN_STORAGE_KEY = 'private-gpt-file-tree-pinned'
 const IMAGE_FINALIZATION_MIN_MS = 800
 const ATTACHMENT_IMAGE_MAX_EDGE = 1920
 const ATTACHMENT_IMAGE_QUALITY = 0.82
 const ATTACHMENT_IMAGE_MIN_COMPRESS_BYTES = 450 * 1024
 
 type ReasoningEffort = 'low' | 'medium' | 'high' | 'xhigh'
-type DocumentReferenceSelection = Record<string, Record<string, boolean>>
+type FileTreeGroup = 'images' | 'documents'
 const reasoningOptions: Array<{ value: ReasoningEffort; label: string; hint: string }> = [
   { value: 'low', label: '低', hint: '最快，适合闲聊 / 简短答疑' },
   { value: 'medium', label: '中', hint: '默认。日常使用平衡速度与质量' },
@@ -130,7 +131,18 @@ const selectedModel = ref('')
 const reasoningEffort = ref<ReasoningEffort>('medium')
 const streaming = ref(false)
 const pendingAttachments = ref<Attachment[]>([])
-const documentReferenceSelection = ref<DocumentReferenceSelection>({})
+const conversationAttachments = ref<ConversationAttachment[]>([])
+const draftConversationAttachments = ref<ConversationAttachment[]>([])
+const fileTreeLoading = ref(false)
+const fileTreePinned = ref(true)
+const fileTreeGroupOpen = ref<Record<FileTreeGroup, boolean>>({ images: true, documents: true })
+const attachmentRenameOpen = ref(false)
+const attachmentRenameSaving = ref(false)
+const attachmentRenameDraft = ref('')
+const attachmentRenameTarget = ref<ConversationAttachment | null>(null)
+const attachmentDeleteOpen = ref(false)
+const attachmentDeleting = ref(false)
+const attachmentDeleteTarget = ref<ConversationAttachment | null>(null)
 const uploadingAttachmentNames = ref<string[]>([])
 const composerDragActive = ref(false)
 const composerCompact = ref(true)
@@ -269,25 +281,11 @@ const imageFinalizationTimers = new Map<string, number>()
 
 const currentConversation = computed(() => conversations.value.find((item) => item.id === currentId.value))
 const currentConversationStreaming = computed(() => messages.value.some((message) => message.status === 'streaming'))
-const availableReferenceDocuments = computed(() => {
-  const byId = new Map<string, Attachment>()
-  for (const message of messages.value) {
-    for (const attachment of message.attachments || []) {
-      if (isReferenceDocument(attachment) && !byId.has(attachment.id)) {
-        byId.set(attachment.id, attachment)
-      }
-    }
-  }
-  for (const attachment of pendingAttachments.value) {
-    if (isReferenceDocument(attachment) && !byId.has(attachment.id)) {
-      byId.set(attachment.id, attachment)
-    }
-  }
-  return Array.from(byId.values())
-})
-const selectedReferenceDocuments = computed(() =>
-  availableReferenceDocuments.value.filter((attachment) => documentReferenceEnabled(attachment.id))
-)
+const activeFileTreeAttachments = computed(() => (currentId.value ? conversationAttachments.value : draftConversationAttachments.value))
+const selectedFileTreeAttachments = computed(() => activeFileTreeAttachments.value.filter((item) => item.selected))
+const selectedFileTreeAttachmentIds = computed(() => selectedFileTreeAttachments.value.map((item) => item.attachment.id))
+const fileTreeImages = computed(() => activeFileTreeAttachments.value.filter((item) => isImageAttachment(item.attachment)))
+const fileTreeDocuments = computed(() => activeFileTreeAttachments.value.filter((item) => !isImageAttachment(item.attachment)))
 const recentSearchConversations = computed(() => conversations.value.slice(0, 10))
 const conversationUsage = computed(() => {
   const assistantMessages = messages.value.filter((message) => message.role === 'assistant')
@@ -307,8 +305,6 @@ const canUseCompactComposer = computed(
   () =>
     isEmptyChat.value &&
     !composerExpanded.value &&
-    pendingAttachments.value.length === 0 &&
-    availableReferenceDocuments.value.length === 0 &&
     uploadingAttachmentNames.value.length === 0
 )
 const composerClasses = computed(() => ({
@@ -324,58 +320,6 @@ function isImageAttachment(item: Attachment) {
 
 function isReferenceDocument(item: Attachment) {
   return !isImageAttachment(item) && item.parseStatus === 'success'
-}
-
-function currentReferenceSelection() {
-  const conversationId = currentId.value || 'new'
-  return documentReferenceSelection.value[conversationId] || {}
-}
-
-function documentReferenceEnabled(id: string) {
-  return currentReferenceSelection()[id] !== false
-}
-
-function saveDocumentReferenceSelection() {
-  window.localStorage.setItem(DOCUMENT_REFERENCE_STORAGE_KEY, JSON.stringify(documentReferenceSelection.value))
-}
-
-function loadDocumentReferenceSelection() {
-  try {
-    const raw = window.localStorage.getItem(DOCUMENT_REFERENCE_STORAGE_KEY)
-    const parsed = raw ? JSON.parse(raw) : {}
-    if (parsed && typeof parsed === 'object') {
-      documentReferenceSelection.value = parsed as DocumentReferenceSelection
-    }
-  } catch {
-    documentReferenceSelection.value = {}
-  }
-}
-
-function setDocumentReferenceEnabled(id: string, enabled: boolean) {
-  const conversationId = currentId.value || 'new'
-  documentReferenceSelection.value = {
-    ...documentReferenceSelection.value,
-    [conversationId]: {
-      ...(documentReferenceSelection.value[conversationId] || {}),
-      [id]: enabled
-    }
-  }
-  saveDocumentReferenceSelection()
-}
-
-function handleDocumentReferenceToggle(id: string, event: Event) {
-  const input = event.target as HTMLInputElement | null
-  setDocumentReferenceEnabled(id, input?.checked === true)
-}
-
-function syncNewConversationDocumentSelection(conversationId: string) {
-  const draft = documentReferenceSelection.value.new
-  if (!draft || documentReferenceSelection.value[conversationId]) return
-  documentReferenceSelection.value = {
-    ...documentReferenceSelection.value,
-    [conversationId]: { ...draft }
-  }
-  saveDocumentReferenceSelection()
 }
 
 function selectedModelSupportsVision() {
@@ -578,6 +522,55 @@ function attachmentImageSrc(attachment: Attachment) {
   return attachment.previewDataUrl || attachmentPreviewUrl(attachment.id)
 }
 
+function normalizeAttachment(item: Attachment): Attachment {
+  return {
+    ...item,
+    mimeSniffed: item.mimeSniffed || (item as any).mime_sniffed || '',
+    sizeBytes: Number(item.sizeBytes ?? (item as any).size_bytes ?? 0),
+    parseStatus: item.parseStatus || (item as any).parse_status || 'success',
+    parseError: item.parseError ?? (item as any).parse_error ?? undefined,
+    contextTextTokens: Number(item.contextTextTokens ?? (item as any).context_text_tokens ?? 0),
+    chunkCount: Number(item.chunkCount ?? (item as any).chunk_count ?? 0),
+    embeddingStatus: item.embeddingStatus ?? (item as any).embedding_status ?? null,
+    previewText: item.previewText ?? (item as any).preview_text ?? null,
+    createdAt: item.createdAt || (item as any).created_at
+  }
+}
+
+function normalizeConversationAttachment(item: ConversationAttachment): ConversationAttachment {
+  const attachment = normalizeAttachment(item.attachment)
+  return {
+    ...item,
+    conversationId: item.conversationId || item.conversation_id || currentId.value || 'new',
+    attachment,
+    selected: item.selected !== false,
+    displayName: item.displayName ?? item.display_name ?? null,
+    createdAt: item.createdAt || item.created_at || attachment.createdAt || new Date().toISOString(),
+    updatedAt: item.updatedAt || item.updated_at || item.createdAt || item.created_at || new Date().toISOString()
+  }
+}
+
+function fileTreeDisplayName(item: ConversationAttachment) {
+  return item.displayName?.trim() || item.attachment.filename
+}
+
+function fileTreeAttachmentForPreview(item: ConversationAttachment): Attachment {
+  return { ...item.attachment, filename: fileTreeDisplayName(item) }
+}
+
+function draftConversationAttachmentFromAttachment(attachment: Attachment): ConversationAttachment {
+  const now = new Date().toISOString()
+  return {
+    id: `draft-${attachment.id}`,
+    conversationId: 'new',
+    attachment: normalizeAttachment(attachment),
+    selected: true,
+    displayName: null,
+    createdAt: now,
+    updatedAt: now
+  }
+}
+
 function attachmentKindLabel(item: Attachment | { filename: string; mimeSniffed?: string }) {
   const filename = item.filename || ''
   const mime = item.mimeSniffed || ''
@@ -672,10 +665,6 @@ function renamePastedImage(file: File) {
   })
 }
 
-function removePendingAttachment(id: string) {
-  pendingAttachments.value = pendingAttachments.value.filter((item) => item.id !== id)
-}
-
 function closeAttachmentPreview() {
   attachmentPreviewOpen.value = false
   attachmentPreview.value = null
@@ -717,6 +706,202 @@ async function reindexPreviewAttachment() {
     attachmentPreviewError.value = err instanceof Error ? err.message : '重新索引失败'
   } finally {
     reindexingAttachment.value = false
+  }
+}
+
+function loadFileTreePinned() {
+  fileTreePinned.value = window.localStorage.getItem(FILE_TREE_PIN_STORAGE_KEY) !== 'false'
+}
+
+function saveFileTreePinned() {
+  window.localStorage.setItem(FILE_TREE_PIN_STORAGE_KEY, String(fileTreePinned.value))
+}
+
+function toggleFileTreePinned() {
+  fileTreePinned.value = !fileTreePinned.value
+  saveFileTreePinned()
+}
+
+function toggleFileTreeGroup(group: FileTreeGroup) {
+  fileTreeGroupOpen.value = {
+    ...fileTreeGroupOpen.value,
+    [group]: !fileTreeGroupOpen.value[group]
+  }
+}
+
+async function loadConversationAttachments(conversationId = currentId.value) {
+  if (!conversationId) {
+    conversationAttachments.value = []
+    return
+  }
+  fileTreeLoading.value = true
+  try {
+    const rows = await apiFetch<ConversationAttachment[]>(`/conversations/${conversationId}/attachments`)
+    if (currentId.value !== conversationId) return
+    conversationAttachments.value = rows.map(normalizeConversationAttachment)
+  } catch (err) {
+    if (currentId.value === conversationId && err instanceof ApiError) error.value = err.message
+  } finally {
+    if (currentId.value === conversationId) fileTreeLoading.value = false
+  }
+}
+
+async function attachFilesToConversation(conversationId: string, attachments: Attachment[], selected = true) {
+  const attachmentIds = Array.from(new Set(attachments.map((item) => item.id).filter(Boolean)))
+  if (!attachmentIds.length) return
+  const rows = await apiFetch<ConversationAttachment[]>(`/conversations/${conversationId}/attachments`, {
+    method: 'POST',
+    body: JSON.stringify({ attachmentIds, selected })
+  })
+  if (currentId.value === conversationId) {
+    conversationAttachments.value = rows.map(normalizeConversationAttachment)
+  }
+}
+
+async function addUploadedAttachmentToFileTree(attachment: Attachment) {
+  const normalized = normalizeAttachment(attachment)
+  pendingAttachments.value = [
+    ...pendingAttachments.value.filter((item) => item.id !== normalized.id),
+    normalized
+  ]
+  if (currentId.value) {
+    await attachFilesToConversation(currentId.value, [normalized], true)
+    return
+  }
+  const draft = draftConversationAttachmentFromAttachment(normalized)
+  draftConversationAttachments.value = [
+    ...draftConversationAttachments.value.filter((item) => item.attachment.id !== normalized.id),
+    draft
+  ]
+}
+
+async function bindDraftFileTreeToConversation(conversationId: string) {
+  const drafts = draftConversationAttachments.value
+  if (!drafts.length) return
+  await attachFilesToConversation(conversationId, drafts.map((item) => item.attachment), true)
+  const selectedIds = new Set(drafts.filter((item) => item.selected).map((item) => item.attachment.id))
+  const renameTargets = drafts.filter((item) => item.displayName)
+  await Promise.all([
+    ...conversationAttachments.value.map((item) => {
+      const selected = selectedIds.has(item.attachment.id)
+      if (item.selected === selected) return Promise.resolve()
+      return setFileTreeAttachmentSelected(item, selected, { silent: true })
+    }),
+    ...renameTargets.map((draft) => {
+      const attached = conversationAttachments.value.find((item) => item.attachment.id === draft.attachment.id)
+      if (!attached || !draft.displayName) return Promise.resolve()
+      return renameFileTreeAttachment(attached, draft.displayName, { silent: true })
+    })
+  ])
+  draftConversationAttachments.value = []
+}
+
+async function setFileTreeAttachmentSelected(item: ConversationAttachment, selected: boolean, options: { silent?: boolean } = {}) {
+  const updateLocal = (rows: ConversationAttachment[]) =>
+    rows.map((row) => (row.attachment.id === item.attachment.id ? { ...row, selected } : row))
+  if (!currentId.value || item.conversationId === 'new') {
+    draftConversationAttachments.value = updateLocal(draftConversationAttachments.value)
+    return
+  }
+  conversationAttachments.value = updateLocal(conversationAttachments.value)
+  try {
+    const updated = await apiFetch<ConversationAttachment>(`/conversations/${currentId.value}/attachments/${item.attachment.id}`, {
+      method: 'PATCH',
+      body: JSON.stringify({ selected })
+    })
+    conversationAttachments.value = conversationAttachments.value.map((row) =>
+      row.attachment.id === item.attachment.id ? normalizeConversationAttachment(updated) : row
+    )
+  } catch (err) {
+    conversationAttachments.value = updateLocal(conversationAttachments.value).map((row) =>
+      row.attachment.id === item.attachment.id ? { ...row, selected: item.selected } : row
+    )
+    if (!options.silent) error.value = err instanceof Error ? err.message : '更新文件勾选状态失败'
+  }
+}
+
+function handleFileTreeSelectionChange(item: ConversationAttachment, event: Event) {
+  const input = event.target as HTMLInputElement | null
+  void setFileTreeAttachmentSelected(item, input?.checked === true)
+}
+
+function openAttachmentRename(item: ConversationAttachment) {
+  attachmentRenameTarget.value = item
+  attachmentRenameDraft.value = fileTreeDisplayName(item)
+  attachmentRenameOpen.value = true
+}
+
+function closeAttachmentRename() {
+  if (attachmentRenameSaving.value) return
+  attachmentRenameOpen.value = false
+  attachmentRenameTarget.value = null
+  attachmentRenameDraft.value = ''
+}
+
+async function renameFileTreeAttachment(item: ConversationAttachment, displayName: string, options: { silent?: boolean } = {}) {
+  const name = displayName.trim()
+  if (!name) {
+    if (!options.silent) error.value = '文件名不能为空'
+    return
+  }
+  const updateLocal = (rows: ConversationAttachment[]) =>
+    rows.map((row) => (row.attachment.id === item.attachment.id ? { ...row, displayName: name } : row))
+  if (!currentId.value || item.conversationId === 'new') {
+    draftConversationAttachments.value = updateLocal(draftConversationAttachments.value)
+    return
+  }
+  const updated = await apiFetch<ConversationAttachment>(`/conversations/${currentId.value}/attachments/${item.attachment.id}`, {
+    method: 'PATCH',
+    body: JSON.stringify({ displayName: name })
+  })
+  conversationAttachments.value = conversationAttachments.value.map((row) =>
+    row.attachment.id === item.attachment.id ? normalizeConversationAttachment(updated) : row
+  )
+}
+
+async function saveAttachmentRename() {
+  const target = attachmentRenameTarget.value
+  if (!target || attachmentRenameSaving.value) return
+  attachmentRenameSaving.value = true
+  try {
+    await renameFileTreeAttachment(target, attachmentRenameDraft.value)
+    closeAttachmentRename()
+  } catch (err) {
+    error.value = err instanceof Error ? err.message : '重命名失败'
+  } finally {
+    attachmentRenameSaving.value = false
+  }
+}
+
+function requestRemoveFileTreeAttachment(item: ConversationAttachment) {
+  attachmentDeleteTarget.value = item
+  attachmentDeleteOpen.value = true
+}
+
+function closeAttachmentDelete() {
+  if (attachmentDeleting.value) return
+  attachmentDeleteOpen.value = false
+  attachmentDeleteTarget.value = null
+}
+
+async function confirmRemoveFileTreeAttachment() {
+  const target = attachmentDeleteTarget.value
+  if (!target || attachmentDeleting.value) return
+  attachmentDeleting.value = true
+  try {
+    if (currentId.value && target.conversationId !== 'new') {
+      await apiFetch(`/conversations/${currentId.value}/attachments/${target.attachment.id}`, { method: 'DELETE' })
+      conversationAttachments.value = conversationAttachments.value.filter((item) => item.attachment.id !== target.attachment.id)
+    } else {
+      draftConversationAttachments.value = draftConversationAttachments.value.filter((item) => item.attachment.id !== target.attachment.id)
+    }
+    pendingAttachments.value = pendingAttachments.value.filter((item) => item.id !== target.attachment.id)
+    attachmentDeleteOpen.value = false
+    attachmentDeleteTarget.value = null
+  } catch (err) {
+    error.value = err instanceof Error ? err.message : '移除文件失败'
+  } finally {
+    attachmentDeleting.value = false
   }
 }
 const shellClass = computed(() => (themeMode.value === 'dark' ? 'theme-dark' : 'theme-light'))
@@ -1828,6 +2013,7 @@ function applyConversationEvent(event: string, data: any) {
         if (!attachments.some((attachment) => attachment.id === data.attachment.id)) {
           message.attachments = [...attachments, data.attachment]
         }
+        void addUploadedAttachmentToFileTree(data.attachment)
       }
       message.status = 'streaming'
       const progress = message.imageProgress || message.image_progress
@@ -2042,6 +2228,10 @@ function newChat() {
   window.localStorage.removeItem(CURRENT_CONVERSATION_STORAGE_KEY)
   messages.value = []
   messagesLoading.value = false
+  conversationAttachments.value = []
+  draftConversationAttachments.value = []
+  pendingAttachments.value = []
+  fileTreeLoading.value = false
   showScrollToBottom.value = false
   userHasScrolledUp = false
   error.value = ''
@@ -2166,6 +2356,8 @@ async function openConversation(id: string, focusMessageId?: string | null) {
     )
     if (loadId !== activeConversationLoad) return
     messages.value = loadedMessages
+    await loadConversationAttachments(id)
+    if (loadId !== activeConversationLoad) return
     messagesLoading.value = false
     syncActiveRequestState()
     syncImagePolling()
@@ -2324,10 +2516,7 @@ async function uploadAttachmentFile(file: File) {
       method: 'POST',
       body: JSON.stringify({ uploadId: presign.uploadId, filename: uploadFile.name, contentType: uploadFile.type })
     })
-    pendingAttachments.value.push(attachment)
-    if (isReferenceDocument(attachment)) {
-      setDocumentReferenceEnabled(attachment.id, true)
-    }
+    await addUploadedAttachmentToFileTree(attachment)
   } catch (err) {
     error.value = err instanceof Error ? err.message : '附件上传失败'
   } finally {
@@ -2397,13 +2586,13 @@ function handleComposerDrop(event: DragEvent) {
 }
 
 async function send() {
-  if ((!input.value.trim() && !pendingAttachments.value.length) || currentConversationStreaming.value) return
+  if ((!input.value.trim() && !selectedFileTreeAttachments.value.length) || currentConversationStreaming.value) return
   const isImageGeneration = selectedModelIsImageGeneration()
-  if (isImageGeneration && pendingAttachments.value.length) {
+  if (isImageGeneration && selectedFileTreeAttachments.value.length) {
     error.value = '图像生成暂不支持同时上传附件。'
     return
   }
-  if (pendingAttachments.value.some(isImageAttachment) && !selectedModelSupportsVision()) {
+  if (selectedFileTreeAttachments.value.some((item) => isImageAttachment(item.attachment)) && !selectedModelSupportsVision()) {
     error.value = '当前模型不支持图片理解，请切换到支持视觉的模型。'
     return
   }
@@ -2411,13 +2600,13 @@ async function send() {
   userHasScrolledUp = false
   error.value = ''
   const userText = input.value
-  const outgoingAttachments = [...pendingAttachments.value]
-  const attachmentIds = pendingAttachments.value.map((item) => item.id)
-  const referencedAttachmentIds = Array.from(
-    new Set([...selectedReferenceDocuments.value.map((item) => item.id), ...attachmentIds])
-  )
+  const selectedAttachments = selectedFileTreeAttachments.value.map((item) => fileTreeAttachmentForPreview(item))
+  const selectedIds = selectedFileTreeAttachmentIds.value
+  const pendingIds = new Set(pendingAttachments.value.map((item) => item.id))
+  const attachmentIds = selectedIds.filter((id) => pendingIds.has(id))
+  const referencedAttachmentIds = selectedIds
+  let targetConversationId = currentId.value
   input.value = ''
-  pendingAttachments.value = []
   const draftConversationId = currentId.value || 'new'
   const draftUserId = `local-${Date.now()}`
   const draftAssistantId = `stream-${Date.now()}`
@@ -2432,7 +2621,7 @@ async function send() {
     content: userText,
     status: 'completed',
     totalTokens: 0,
-    attachments: outgoingAttachments,
+    attachments: selectedAttachments,
     createdAt: nowIso
   }
   const assistantDraft: Message = {
@@ -2452,8 +2641,18 @@ async function send() {
   insertMessageInDisplayOrder(assistantDraft)
   syncActiveRequestState()
   await scrollMessagesToBottom('auto')
-  const path = currentId.value ? `/conversations/${currentId.value}/messages` : '/conversations/new/messages'
   try {
+    if (!targetConversationId && draftConversationAttachments.value.length) {
+      const created = await apiFetch<Conversation>('/conversations', {
+        method: 'POST',
+        body: JSON.stringify({ title: (userText.trim() || '新对话').slice(0, 30) })
+      })
+      targetConversationId = created.id
+      currentId.value = created.id
+      window.localStorage.setItem(CURRENT_CONVERSATION_STORAGE_KEY, created.id)
+      await bindDraftFileTreeToConversation(created.id)
+    }
+    const path = targetConversationId ? `/conversations/${targetConversationId}/messages` : '/conversations/new/messages'
     const result = await apiFetch<SendMessageResponse>(path, {
       method: 'POST',
       body: JSON.stringify({
@@ -2468,7 +2667,6 @@ async function send() {
     const userMessage = result.userMessage || result.user_message
     const assistantMessage = result.assistantMessage || result.assistant_message
     if (newConversationId) {
-      syncNewConversationDocumentSelection(newConversationId)
       currentId.value = newConversationId
       window.localStorage.setItem(CURRENT_CONVERSATION_STORAGE_KEY, newConversationId)
     }
@@ -2494,6 +2692,7 @@ async function send() {
     syncImagePolling()
     await loadConversations()
     await loadContextStats()
+    pendingAttachments.value = pendingAttachments.value.filter((item) => !selectedIds.includes(item.id))
   } catch (err) {
     cancelPendingScroll()
     const apiErr = err instanceof ApiError ? err : null
@@ -2644,7 +2843,7 @@ watch(searchQuery, () => {
 
 onMounted(async () => {
   loadAppearance()
-  loadDocumentReferenceSelection()
+  loadFileTreePinned()
   await Promise.all([loadModels(), loadConversations()])
   const storedConversationId = window.localStorage.getItem(CURRENT_CONVERSATION_STORAGE_KEY)
   if (storedConversationId && conversations.value.some((conversation) => conversation.id === storedConversationId)) {
@@ -2854,44 +3053,111 @@ onUnmounted(() => {
         </div>
       </header>
 
-      <section
-        ref="messageScroller"
-        class="chat-surface flex-1 min-h-0 overflow-y-auto overscroll-contain px-6 py-8"
-        @scroll="handleScrollerScroll"
-        @wheel.passive="handleScrollerWheel"
-        @touchstart.passive="handleScrollerTouchStart"
-      >
-        <div class="chat-flow mx-auto">
-          <div v-if="messagesLoading" class="message-skeleton-stack" aria-label="正在加载消息">
-            <div class="message-skeleton-row assistant">
-              <div class="message-skeleton-block">
-                <span class="skeleton-line wide" />
-                <span class="skeleton-line medium" />
-                <span class="skeleton-line narrow" />
+      <div class="chat-workspace" :class="{ 'file-tree-collapsed': !fileTreePinned }">
+        <section
+          ref="messageScroller"
+          class="chat-surface flex-1 min-h-0 overflow-y-auto overscroll-contain px-6 py-8"
+          @scroll="handleScrollerScroll"
+          @wheel.passive="handleScrollerWheel"
+          @touchstart.passive="handleScrollerTouchStart"
+        >
+          <div class="chat-flow mx-auto">
+            <div v-if="messagesLoading" class="message-skeleton-stack" aria-label="正在加载消息">
+              <div class="message-skeleton-row assistant">
+                <div class="message-skeleton-block">
+                  <span class="skeleton-line wide" />
+                  <span class="skeleton-line medium" />
+                  <span class="skeleton-line narrow" />
+                </div>
+              </div>
+              <div class="message-skeleton-row user">
+                <div class="message-skeleton-bubble">
+                  <span class="skeleton-line medium" />
+                </div>
+              </div>
+              <div class="message-skeleton-row assistant">
+                <div class="message-skeleton-block">
+                  <span class="skeleton-line wide" />
+                  <span class="skeleton-line wide" />
+                  <span class="skeleton-line short" />
+                </div>
               </div>
             </div>
-            <div class="message-skeleton-row user">
-              <div class="message-skeleton-bubble">
-                <span class="skeleton-line medium" />
-              </div>
-            </div>
-            <div class="message-skeleton-row assistant">
-              <div class="message-skeleton-block">
-                <span class="skeleton-line wide" />
-                <span class="skeleton-line wide" />
-                <span class="skeleton-line short" />
-              </div>
-            </div>
+            <ChatMessage
+              v-else
+              v-for="message in messages"
+              :key="message.clientKey || message.id"
+              :message="message"
+              @preview-attachment="openAttachmentPreview"
+            />
           </div>
-          <ChatMessage
-            v-else
-            v-for="message in messages"
-            :key="message.clientKey || message.id"
-            :message="message"
-            @preview-attachment="openAttachmentPreview"
-          />
-        </div>
-      </section>
+        </section>
+
+        <aside class="file-tree-panel" :class="{ collapsed: !fileTreePinned }" aria-label="对话文件树">
+          <button class="file-tree-pin" type="button" :title="fileTreePinned ? '收起文件树' : '展开文件树'" @click="toggleFileTreePinned">
+            <PinOff v-if="fileTreePinned" :size="17" />
+            <Pin v-else :size="17" />
+          </button>
+          <template v-if="fileTreePinned">
+            <header class="file-tree-header">
+              <div>
+                <strong>文件树</strong>
+                <span>{{ activeFileTreeAttachments.length }} 个文件 · {{ selectedFileTreeAttachments.length }} 已选</span>
+              </div>
+            </header>
+            <div v-if="fileTreeLoading" class="file-tree-empty">正在加载文件...</div>
+            <div v-else-if="!activeFileTreeAttachments.length" class="file-tree-empty">当前对话暂无文件</div>
+            <div v-else class="file-tree-groups">
+              <section class="file-tree-group">
+                <button class="file-tree-group-head" type="button" @click="toggleFileTreeGroup('images')">
+                  <ImageIcon :size="16" />
+                  <span>图片</span>
+                  <em>{{ fileTreeImages.length }}</em>
+                </button>
+                <div v-if="fileTreeGroupOpen.images" class="file-tree-list">
+                  <article v-for="item in fileTreeImages" :key="item.id" class="file-tree-item" :class="{ selected: item.selected }">
+                    <input type="checkbox" :checked="item.selected" @change="handleFileTreeSelectionChange(item, $event)" />
+                    <button class="file-tree-thumb image" type="button" @click="openAttachmentPreview(fileTreeAttachmentForPreview(item))">
+                      <img :src="attachmentPreviewUrl(item.attachment.id)" :alt="fileTreeDisplayName(item)" />
+                    </button>
+                    <button class="file-tree-meta" type="button" @click="openAttachmentPreview(fileTreeAttachmentForPreview(item))">
+                      <strong>{{ fileTreeDisplayName(item) }}</strong>
+                      <span>{{ formatBytes(item.attachment.sizeBytes) }} · {{ parseStatusText[item.attachment.parseStatus] || item.attachment.parseStatus }}</span>
+                    </button>
+                    <div class="file-tree-actions">
+                      <button type="button" title="重命名" @click="openAttachmentRename(item)"><Pencil :size="14" /></button>
+                      <button type="button" title="移除" @click="requestRemoveFileTreeAttachment(item)"><Trash2 :size="14" /></button>
+                    </div>
+                  </article>
+                </div>
+              </section>
+              <section class="file-tree-group">
+                <button class="file-tree-group-head" type="button" @click="toggleFileTreeGroup('documents')">
+                  <FileText :size="16" />
+                  <span>文档</span>
+                  <em>{{ fileTreeDocuments.length }}</em>
+                </button>
+                <div v-if="fileTreeGroupOpen.documents" class="file-tree-list">
+                  <article v-for="item in fileTreeDocuments" :key="item.id" class="file-tree-item" :class="{ selected: item.selected }">
+                    <input type="checkbox" :checked="item.selected" @change="handleFileTreeSelectionChange(item, $event)" />
+                    <button class="file-tree-thumb document" type="button" @click="openAttachmentPreview(fileTreeAttachmentForPreview(item))">
+                      <FileText :size="17" />
+                    </button>
+                    <button class="file-tree-meta" type="button" @click="openAttachmentPreview(fileTreeAttachmentForPreview(item))">
+                      <strong>{{ fileTreeDisplayName(item) }}</strong>
+                      <span>{{ attachmentKindLabel(item.attachment) }} · {{ parseStatusText[item.attachment.parseStatus] || item.attachment.parseStatus }}</span>
+                    </button>
+                    <div class="file-tree-actions">
+                      <button type="button" title="重命名" @click="openAttachmentRename(item)"><Pencil :size="14" /></button>
+                      <button type="button" title="移除" @click="requestRemoveFileTreeAttachment(item)"><Trash2 :size="14" /></button>
+                    </div>
+                  </article>
+                </div>
+              </section>
+            </div>
+          </template>
+        </aside>
+      </div>
 
       <footer ref="chatFooter" class="chat-footer p-4">
         <Transition name="welcome-rise">
@@ -2920,52 +3186,13 @@ onUnmounted(() => {
           @dragleave="handleComposerDragLeave"
           @drop="handleComposerDrop"
         >
-          <div v-if="uploadingAttachmentNames.length || pendingAttachments.length || availableReferenceDocuments.length" class="composer-attachments">
+          <div v-if="uploadingAttachmentNames.length" class="composer-attachments">
             <div v-for="name in uploadingAttachmentNames" :key="`uploading-${name}`" class="composer-attachment-card is-uploading">
               <div class="composer-attachment-loading" aria-hidden="true" />
               <div class="composer-attachment-meta">
                 <strong>{{ name }}</strong>
                 <span>上传中</span>
               </div>
-            </div>
-            <div v-if="availableReferenceDocuments.length" class="composer-reference-group" aria-label="引用文档">
-              <label
-                v-for="item in availableReferenceDocuments"
-                :key="`reference-${item.id}`"
-                class="composer-reference-chip"
-                :class="{ 'is-selected': documentReferenceEnabled(item.id) }"
-              >
-                <input
-                  type="checkbox"
-                  :checked="documentReferenceEnabled(item.id)"
-                  @change="handleDocumentReferenceToggle(item.id, $event)"
-                />
-                <button class="composer-reference-preview" type="button" :title="`预览：${item.filename}`" @click.prevent="openAttachmentPreview(item)">
-                  <FileText :size="15" />
-                  <span>{{ item.filename }}</span>
-                </button>
-              </label>
-            </div>
-            <div
-              v-for="item in pendingAttachments"
-              :key="item.id"
-              class="composer-attachment-card"
-              :class="{ 'is-image': isImageAttachment(item), 'is-file': !isImageAttachment(item) }"
-            >
-              <button class="composer-attachment-preview" type="button" @click="openAttachmentPreview(item)">
-                <img v-if="isImageAttachment(item)" :src="attachmentPreviewUrl(item.id)" :alt="item.filename" />
-                <template v-else>
-                  <span class="composer-file-icon" :class="attachmentKindClass(item)"><FileText :size="21" /></span>
-                  <span class="composer-attachment-meta">
-                    <strong>{{ item.filename }}</strong>
-                    <em>{{ attachmentKindLabel(item) }}</em>
-                  </span>
-                </template>
-              </button>
-              <button class="composer-attachment-remove" type="button" title="移除本次附件" aria-label="移除本次附件" @click.stop="removePendingAttachment(item.id)">
-                <X :size="14" />
-              </button>
-              <span v-if="isImageAttachment(item)" class="composer-attachment-status">{{ parseStatusText[item.parseStatus] || item.parseStatus }}</span>
             </div>
           </div>
           <button
@@ -2997,7 +3224,7 @@ onUnmounted(() => {
             </div>
 
             <div class="composer-right-tools">
-              <button class="send-button" type="submit" :disabled="currentConversationStreaming || (!input.trim() && !pendingAttachments.length)" title="发送" aria-label="发送">
+              <button class="send-button" type="submit" :disabled="currentConversationStreaming || (!input.trim() && !selectedFileTreeAttachments.length)" title="发送" aria-label="发送">
                 <Send :size="18" />
               </button>
             </div>
@@ -3901,6 +4128,52 @@ onUnmounted(() => {
             <button type="button" class="confirm-secondary-button" :disabled="Boolean(deletingConversationId)" @click="closeDeleteConfirm">取消</button>
             <button type="button" class="confirm-danger-button" :disabled="Boolean(deletingConversationId)" @click="confirmDeleteConversation">
               {{ deletingConversationId ? '删除中...' : '确认删除' }}
+            </button>
+          </div>
+        </section>
+      </div>
+    </Transition>
+
+    <Transition name="dialog-pop">
+      <div v-if="attachmentRenameOpen" class="confirm-modal-backdrop" @click.self="closeAttachmentRename">
+        <form class="confirm-modal" role="dialog" aria-modal="true" aria-label="重命名文件" @submit.prevent="saveAttachmentRename">
+          <div class="confirm-modal-header">
+            <h2>重命名文件</h2>
+            <button type="button" class="confirm-modal-close" title="关闭" aria-label="关闭" @click="closeAttachmentRename">
+              <X :size="18" />
+            </button>
+          </div>
+          <input
+            v-model="attachmentRenameDraft"
+            class="rename-input"
+            maxlength="255"
+            placeholder="文件显示名"
+            autofocus
+          />
+          <div class="confirm-modal-actions">
+            <button type="button" class="confirm-secondary-button" :disabled="attachmentRenameSaving" @click="closeAttachmentRename">取消</button>
+            <button type="submit" class="confirm-primary-button" :disabled="attachmentRenameSaving || !attachmentRenameDraft.trim()">
+              {{ attachmentRenameSaving ? '保存中...' : '保存' }}
+            </button>
+          </div>
+        </form>
+      </div>
+    </Transition>
+
+    <Transition name="dialog-pop">
+      <div v-if="attachmentDeleteOpen" class="confirm-modal-backdrop" @click.self="closeAttachmentDelete">
+        <section class="confirm-modal" role="dialog" aria-modal="true" aria-label="移除文件">
+          <div class="confirm-modal-header">
+            <h2>从当前对话移除？</h2>
+            <button type="button" class="confirm-modal-close" title="关闭" aria-label="关闭" @click="closeAttachmentDelete">
+              <X :size="18" />
+            </button>
+          </div>
+          <p>文件「{{ attachmentDeleteTarget ? fileTreeDisplayName(attachmentDeleteTarget) : '未命名文件' }}」将从当前对话文件树移除，其他对话不受影响。</p>
+          <div class="confirm-modal-actions">
+            <button type="button" class="confirm-secondary-button" :disabled="attachmentDeleting" @click="closeAttachmentDelete">取消</button>
+            <button type="button" class="confirm-danger-button" :disabled="attachmentDeleting" @click="confirmRemoveFileTreeAttachment">
+              {{ attachmentDeleting ? '移除中...' : '确认移除' }}
             </button>
           </div>
         </section>

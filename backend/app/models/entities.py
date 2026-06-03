@@ -173,6 +173,19 @@ class MessageAttachment(Base):
     attachment_id: Mapped[str] = mapped_column(ForeignKey("attachments.id", ondelete="CASCADE"), primary_key=True)
 
 
+class ConversationAttachment(Base, TimestampMixin):
+    __tablename__ = "conversation_attachments"
+    __table_args__ = (UniqueConstraint("conversation_id", "attachment_id", name="uq_conversation_attachment"),)
+
+    id: Mapped[str] = mapped_column(String(36), primary_key=True, default=uuid_str)
+    conversation_id: Mapped[str] = mapped_column(ForeignKey("conversations.id", ondelete="CASCADE"), index=True, nullable=False)
+    attachment_id: Mapped[str] = mapped_column(ForeignKey("attachments.id", ondelete="CASCADE"), index=True, nullable=False)
+    user_id: Mapped[str] = mapped_column(ForeignKey("users.id", ondelete="CASCADE"), index=True, nullable=False)
+    selected: Mapped[bool] = mapped_column(Boolean, default=True, nullable=False)
+    display_name: Mapped[str | None] = mapped_column(String(255), nullable=True)
+    removed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=False), nullable=True)
+
+
 class ConversationCompaction(Base, TimestampMixin):
     __tablename__ = "conversation_compactions"
 

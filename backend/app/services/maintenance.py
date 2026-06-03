@@ -14,6 +14,7 @@ from app.models.entities import (
     Attachment,
     AttachmentChunk,
     Conversation,
+    ConversationAttachment,
     ConversationCompaction,
     CosTrafficDaily,
     Message,
@@ -202,6 +203,7 @@ async def run_cleanup(db: AsyncSession, kind: str) -> dict[str, Any]:
             bytes_deleted += _safe_unlink(attachment.cos_key)
             bytes_deleted += _safe_unlink(str(Path(get_settings().local_cache_root) / f"thumb-{attachment.id}.jpg"))
         if attachment_ids:
+            await db.execute(delete(ConversationAttachment).where(ConversationAttachment.attachment_id.in_(attachment_ids)))
             await db.execute(delete(MessageAttachment).where(MessageAttachment.attachment_id.in_(attachment_ids)))
             await db.execute(delete(AttachmentChunk).where(AttachmentChunk.attachment_id.in_(attachment_ids)))
             await db.execute(delete(Attachment).where(Attachment.id.in_(attachment_ids)))
@@ -243,6 +245,7 @@ async def purge_user(db: AsyncSession, user_id: str) -> dict[str, Any]:
         item.id for item in (await db.execute(select(Conversation).where(Conversation.user_id == user_id))).scalars().all()
     ]
     if attachment_ids:
+        await db.execute(delete(ConversationAttachment).where(ConversationAttachment.attachment_id.in_(attachment_ids)))
         await db.execute(delete(MessageAttachment).where(MessageAttachment.attachment_id.in_(attachment_ids)))
     if conversation_ids:
         await db.execute(delete(ConversationCompaction).where(ConversationCompaction.conversation_id.in_(conversation_ids)))

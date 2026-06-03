@@ -7,7 +7,7 @@ from sqlalchemy import select
 from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine
 
 from app.core.db import Base
-from app.models.entities import ApiKeyGroup, Attachment, Conversation, Message, MessageAttachment, User, UserApiKey, UserQuota
+from app.models.entities import ApiKeyGroup, Attachment, Conversation, ConversationAttachment, Message, MessageAttachment, User, UserApiKey, UserQuota
 from app.providers.openai_compatible import StreamEvent
 from app.security.crypto import encrypt_api_key
 from app.services import chat
@@ -320,9 +320,110 @@ def test_prepare_chat_messages_persists_referenced_document_without_new_upload(m
                     )
                 ).scalars().all()
                 assert [link.attachment_id for link in links] == ["att-1"]
+                tree_rows = (
+                    await db.execute(
+                        select(ConversationAttachment).where(
+                            ConversationAttachment.conversation_id == "conv-1",
+                            ConversationAttachment.attachment_id == "att-1",
+                            ConversationAttachment.removed_at.is_(None),
+                        )
+                    )
+                ).scalars().all()
+                assert len(tree_rows) == 1
+                assert tree_rows[0].selected is True
 
             assert enqueued["attachment_ids"] == []
             assert enqueued["referenced_attachment_ids"] == ["att-1"]
+        finally:
+            await engine.dispose()
+
+    asyncio.run(run())
+
+
+def test_prepare_chat_messages_only_persists_checked_references(monkeypatch):
+    async def run():
+        engine, session_maker = await _make_session()
+        enqueued = {}
+
+        monkeypatch.setattr(chat, "SessionLocal", session_maker)
+
+        async def fake_resolve_api_key_for_model(db, user_id, model, quota=None, **kwargs):
+            return captured["api_key"]
+
+        async def fake_enqueue(user_id, prepared, payload):
+            enqueued["attachment_ids"] = list(payload.attachment_ids)
+            enqueued["referenced_attachment_ids"] = list(payload.referenced_attachment_ids)
+
+        async def fake_publish(*args, **kwargs):
+            return None
+
+        captured = {}
+        monkeypatch.setattr(chat, "resolve_api_key_for_model", fake_resolve_api_key_for_model)
+        monkeypatch.setattr(chat, "enqueue_chat_generation", fake_enqueue)
+        monkeypatch.setattr(chat, "publish_conversation_event", fake_publish)
+
+        try:
+            async with session_maker() as db:
+                group = ApiKeyGroup(name=api_keys.DEFAULT_CHAT_GROUP_NAME, purpose=api_keys.GROUP_PURPOSE_CHAT, is_system=True)
+                db.add(group)
+                await db.flush()
+                db.add(User(id="user-1", username="user-1", password_hash="hash", status="active"))
+                db.add(UserQuota(user_id="user-1", max_storage_bytes=1024, default_model="gpt-5.5"))
+                api_key = _key("user-1", group.id)
+                db.add(api_key)
+                db.add(Conversation(id="conv-1", user_id="user-1", title="测试"))
+                db.add_all([
+                    Attachment(
+                        id="att-selected",
+                        user_id="user-1",
+                        filename="selected.txt",
+                        sha256="sha-selected",
+                        sha256_active_key="sha-selected",
+                        mime_sniffed="text/plain",
+                        size_bytes=100,
+                        cos_key="selected.txt",
+                        parse_status="success",
+                        context_text="选中文档",
+                        context_text_tokens=4,
+                    ),
+                    Attachment(
+                        id="att-unselected",
+                        user_id="user-1",
+                        filename="unselected.txt",
+                        sha256="sha-unselected",
+                        sha256_active_key="sha-unselected",
+                        mime_sniffed="text/plain",
+                        size_bytes=100,
+                        cos_key="unselected.txt",
+                        parse_status="success",
+                        context_text="未选中文档",
+                        context_text_tokens=4,
+                    ),
+                ])
+                await db.commit()
+                captured["api_key"] = api_key
+
+            prepared = await chat.create_queued_chat(
+                "user-1",
+                chat.SendMessageRequest(
+                    content="只问选中的",
+                    model="gpt-5.5",
+                    attachment_ids=["att-selected"],
+                    referenced_attachment_ids=["att-selected"],
+                ),
+                conversation_id="conv-1",
+            )
+
+            async with session_maker() as db:
+                links = (
+                    await db.execute(
+                        select(MessageAttachment).where(MessageAttachment.message_id == prepared.user_message_id)
+                    )
+                ).scalars().all()
+                assert [link.attachment_id for link in links] == ["att-selected"]
+
+            assert enqueued["attachment_ids"] == ["att-selected"]
+            assert enqueued["referenced_attachment_ids"] == ["att-selected"]
         finally:
             await engine.dispose()
 

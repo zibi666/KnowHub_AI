@@ -24,6 +24,7 @@ from app.core.db import SessionLocal
 from app.models.entities import (
     Attachment,
     Conversation,
+    ConversationAttachment,
     ConversationCompaction,
     Message,
     MessageAttachment,
@@ -435,6 +436,38 @@ def attach_images_to_current_user_message(context: list[dict], image_attachments
     message["content"] = parts
 
 
+async def ensure_conversation_file_tree_attachments(
+    db,
+    user_id: str,
+    conversation_id: str,
+    attachments: list[Attachment],
+) -> None:
+    attachment_ids = unique_ids([attachment.id for attachment in attachments])
+    if not attachment_ids:
+        return
+    existing = (
+        await db.execute(
+            select(ConversationAttachment).where(
+                ConversationAttachment.user_id == user_id,
+                ConversationAttachment.conversation_id == conversation_id,
+                ConversationAttachment.attachment_id.in_(attachment_ids),
+            )
+        )
+    ).scalars().all()
+    existing_ids = {item.attachment_id for item in existing}
+    for attachment in attachments:
+        if attachment.id in existing_ids:
+            continue
+        db.add(
+            ConversationAttachment(
+                user_id=user_id,
+                conversation_id=conversation_id,
+                attachment_id=attachment.id,
+                selected=True,
+            )
+        )
+
+
 async def _latest_completed_message_id(db, user_id: str, conversation_id: str) -> str | None:
     messages = (
         await db.execute(
@@ -494,12 +527,12 @@ async def resolve_message_attachments(
 
     uploaded_image_count = sum(1 for attachment in upload_attachments if is_image_attachment(attachment))
     referenced_image_count = sum(1 for attachment in referenced_attachments if is_image_attachment(attachment))
-    if uploaded_image_count and not model_supports_vision(model):
+    if referenced_image_count and not model_supports_vision(model):
         raise HTTPException(
             status_code=400,
             detail={
                 "code": "VISION_MODEL_REQUIRED",
-                "message": "当前模型不支持图片理解，请切换到支持视觉的模型后再发送图片。",
+                "message": "当前模型不支持图片理解，请取消勾选图片或切换到支持视觉的模型后再发送。",
             },
         )
     if referenced_image_count > settings.vision_image_max_count:
@@ -609,6 +642,7 @@ async def prepare_chat_messages(user_id: str, payload: SendMessageRequest, conve
         await db.flush()
         for attachment in referenced_attachments:
             db.add(MessageAttachment(message_id=user_message.id, attachment_id=attachment.id))
+        await ensure_conversation_file_tree_attachments(db, user_id, conversation_id, referenced_attachments)
 
         assistant = Message(
             user_id=user_id,
@@ -818,6 +852,7 @@ async def stream_chat(user_id: str, payload: SendMessageRequest, conversation_id
         user_message_id = user_message.id
         for attachment in referenced_attachments:
             db.add(MessageAttachment(message_id=user_message.id, attachment_id=attachment.id))
+        await ensure_conversation_file_tree_attachments(db, user_id, conversation_id, referenced_attachments)
 
         assistant = Message(
             user_id=user_id,

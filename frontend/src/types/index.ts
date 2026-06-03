@@ -98,6 +98,20 @@ export interface Attachment {
   createdAt?: string
 }
 
+export interface ConversationAttachment {
+  id: string
+  conversationId: string
+  conversation_id?: string
+  attachment: Attachment
+  selected: boolean
+  displayName?: string | null
+  display_name?: string | null
+  createdAt: string
+  created_at?: string
+  updatedAt: string
+  updated_at?: string
+}
+
 export interface ImageGenerationSettings {
   size: string
   quality: string
