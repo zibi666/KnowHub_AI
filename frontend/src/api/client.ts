@@ -9,7 +9,7 @@ export class ApiError extends Error {
   detail: Record<string, any>
 
   constructor(code: string, message: string, status: number, detail: Record<string, any> = {}) {
-    super(localizeApiMessage(code, message))
+    super(formatApiErrorMessage(code, message, detail))
     this.code = code
     this.status = status
     this.detail = detail
@@ -45,6 +45,20 @@ export function localizeApiMessage(code: string, fallback = '请求失败') {
   const message = ERROR_MESSAGES[code]
   if (message && fallback && fallback !== code && fallback !== message) return `${message}：${fallback}`
   return message || fallback || '请求失败'
+}
+
+function formatProbeAttempt(attempt: Record<string, any>, index: number) {
+  const status = attempt.status ? `HTTP ${attempt.status}` : '无 HTTP 状态'
+  const contentType = attempt.contentType ? `，Content-Type: ${attempt.contentType}` : ''
+  const preview = attempt.responsePreview ? `，响应片段：${attempt.responsePreview}` : ''
+  return `${index + 1}. ${attempt.url || attempt.baseUrl || '未知地址'}：${status}${contentType}。${attempt.message || attempt.reason || '请求失败'}${preview}`
+}
+
+export function formatApiErrorMessage(code: string, fallback = '请求失败', detail: Record<string, any> = {}) {
+  const base = localizeApiMessage(code, fallback)
+  const attempts = Array.isArray(detail.attempts) ? detail.attempts : []
+  if (!attempts.length) return base
+  return `${base}\n${attempts.map(formatProbeAttempt).join('\n')}`
 }
 
 export async function apiFetch<T>(path: string, init: RequestInit = {}): Promise<T> {

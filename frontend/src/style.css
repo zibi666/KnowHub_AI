@@ -386,7 +386,7 @@ body,
   top: 72px;
   right: 24px;
   z-index: 80;
-  max-width: min(360px, calc(100vw - 32px));
+  max-width: min(720px, calc(100vw - 32px));
   border: 1px solid color-mix(in srgb, #22c55e 42%, var(--input-border));
   border-radius: 8px;
   background: color-mix(in srgb, #052e16 82%, var(--panel-bg));
@@ -395,6 +395,13 @@ body,
   font-size: 0.875rem;
   line-height: 1.45;
   padding: 0.75rem 0.95rem;
+  white-space: pre-line;
+}
+
+.admin-toast.error {
+  border-color: color-mix(in srgb, #ef4444 42%, var(--input-border));
+  background: color-mix(in srgb, #450a0a 82%, var(--panel-bg));
+  color: #fecaca;
 }
 
 .admin-toast-enter-active,
@@ -2280,6 +2287,11 @@ body,
   border: 1px solid color-mix(in srgb, #ef4444 35%, transparent);
   background: color-mix(in srgb, #ef4444 12%, transparent);
   color: #f87171;
+  white-space: pre-line;
+}
+
+.key-error {
+  white-space: pre-line;
 }
 
 .chat-search-backdrop,

@@ -6,6 +6,7 @@ import time
 from collections.abc import AsyncIterator
 from dataclasses import dataclass
 from typing import Any
+from urllib.parse import urlparse
 
 import httpx
 
@@ -22,57 +23,150 @@ class StreamEvent:
     data: dict[str, Any]
 
 
+@dataclass
+class ModelProbeResult:
+    models: list[str]
+    base_url: str
+
+
 class OpenAICompatibleProvider:
     def __init__(self, base_url: str | None = None) -> None:
         settings = get_settings()
         self.base_url = (base_url or settings.model_base_url).rstrip("/")
 
-    async def probe_models(self, api_key: str) -> list[str]:
-        headers = {"Authorization": f"Bearer {api_key}"}
+    def _model_probe_base_urls(self) -> list[str]:
+        urls = [self.base_url]
+        parsed = urlparse(self.base_url)
+        if not parsed.path.rstrip("/").endswith("/v1"):
+            urls.append(f"{self.base_url}/v1")
+        return urls
+
+    @staticmethod
+    def _response_preview(text: str) -> str:
+        return " ".join((text or "").strip().split())[:300]
+
+    @staticmethod
+    def _content_type(response: httpx.Response) -> str:
+        return response.headers.get("content-type") or response.headers.get("Content-Type") or ""
+
+    def _model_probe_failure(
+        self,
+        *,
+        base_url: str,
+        reason: str,
+        message: str,
+        status_code: int | None = None,
+        content_type: str | None = None,
+        response_preview: str | None = None,
+    ) -> dict[str, Any]:
+        detail: dict[str, Any] = {
+            "baseUrl": base_url,
+            "url": f"{base_url}/models",
+            "reason": reason,
+            "message": message,
+        }
+        if status_code is not None:
+            detail["status"] = status_code
+        if content_type:
+            detail["contentType"] = content_type
+        if response_preview:
+            detail["responsePreview"] = response_preview
+        return detail
+
+    async def _probe_models_once(self, client: httpx.AsyncClient, base_url: str, headers: dict[str, str]) -> ModelProbeResult | dict[str, Any]:
+        request_url = f"{base_url}/models"
         try:
-            async with httpx.AsyncClient(timeout=30) as client:
-                response = await client.get(f"{self.base_url}/models", headers=headers)
-        except httpx.TimeoutException as exc:
-            raise api_error(
-                "UPSTREAM_ERROR",
-                "Model list request timed out",
-                status_code=504,
-                extra={"baseUrl": self.base_url},
-            ) from exc
+            response = await client.get(request_url, headers=headers)
+        except httpx.TimeoutException:
+            return self._model_probe_failure(
+                base_url=base_url,
+                reason="timeout",
+                message="模型列表请求超时，请检查 BaseURL 是否可访问。",
+            )
         except httpx.RequestError as exc:
-            raise api_error(
-                "UPSTREAM_ERROR",
-                f"Model list request failed: {exc}",
-                extra={"baseUrl": self.base_url},
-            ) from exc
+            return self._model_probe_failure(
+                base_url=base_url,
+                reason="request_error",
+                message=f"模型列表请求失败：{exc}",
+            )
+
+        content_type = self._content_type(response)
+        response_preview = self._response_preview(response.text)
         if response.status_code in {401, 403}:
-            raise api_error("API_KEY_INVALID", "上游拒绝了该 API Key")
+            return self._model_probe_failure(
+                base_url=base_url,
+                reason="api_key_rejected",
+                message="上游拒绝了该 API Key，可能是密钥无效、密钥不属于该 BaseURL，或权限不足。",
+                status_code=response.status_code,
+                content_type=content_type,
+                response_preview=response_preview,
+            )
         if response.status_code >= 400:
-            body = (response.text or "").strip()
-            message = f"Model list request failed with HTTP {response.status_code}"
-            if body:
-                message = f"{message}: {body[:300]}"
-            raise api_error(
-                "UPSTREAM_ERROR",
-                message,
-                extra={"baseUrl": self.base_url, "upstreamStatus": response.status_code},
+            return self._model_probe_failure(
+                base_url=base_url,
+                reason="http_error",
+                message=f"模型列表请求返回 HTTP {response.status_code}。",
+                status_code=response.status_code,
+                content_type=content_type,
+                response_preview=response_preview,
             )
         try:
             payload = response.json()
-        except ValueError as exc:
-            raise api_error(
-                "UPSTREAM_ERROR",
-                "Model list response was not valid JSON",
-                extra={"baseUrl": self.base_url},
-            ) from exc
+        except ValueError:
+            reason = "html_response" if "html" in content_type.lower() or response_preview.lower().startswith("<!doctype html") else "invalid_json"
+            return self._model_probe_failure(
+                base_url=base_url,
+                reason=reason,
+                message="模型列表接口返回的不是 JSON，可能 BaseURL 指向了网页入口，或该服务不是 OpenAI-compatible /models 接口。",
+                status_code=response.status_code,
+                content_type=content_type,
+                response_preview=response_preview,
+            )
         models = self.parse_models(payload)
         if not models:
-            raise api_error(
-                "UPSTREAM_ERROR",
-                "Model list response format is invalid or empty",
-                extra={"baseUrl": self.base_url},
+            return self._model_probe_failure(
+                base_url=base_url,
+                reason="invalid_model_list",
+                message="模型列表响应格式不正确或为空，未找到可用模型 ID。",
+                status_code=response.status_code,
+                content_type=content_type,
+                response_preview=response_preview,
             )
-        return sorted(set(models))
+        return ModelProbeResult(models=sorted(set(models)), base_url=base_url)
+
+    def _raise_model_probe_error(self, attempts: list[dict[str, Any]]) -> None:
+        lines = ["无法从上游获取模型列表，已尝试以下地址："]
+        for index, attempt in enumerate(attempts, start=1):
+            status = f"HTTP {attempt['status']}" if "status" in attempt else "无 HTTP 状态"
+            content_type = f"，Content-Type: {attempt['contentType']}" if attempt.get("contentType") else ""
+            preview = f"，响应片段: {attempt['responsePreview']}" if attempt.get("responsePreview") else ""
+            lines.append(f"{index}. {attempt['url']}：{status}{content_type}。{attempt['message']}{preview}")
+        message = "\n".join(lines)
+        raise api_error(
+            "API_KEY_INVALID" if any(attempt.get("reason") == "api_key_rejected" for attempt in attempts) else "UPSTREAM_ERROR",
+            message,
+            extra={
+                "baseUrl": self.base_url,
+                "attempts": attempts,
+                "reason": "model_probe_failed",
+            },
+        )
+
+    async def probe_models_with_base_url(self, api_key: str) -> ModelProbeResult:
+        headers = {"Authorization": f"Bearer {api_key}"}
+        attempts: list[dict[str, Any]] = []
+        async with httpx.AsyncClient(timeout=30) as client:
+            for base_url in self._model_probe_base_urls():
+                result = await self._probe_models_once(client, base_url, headers)
+                if isinstance(result, ModelProbeResult):
+                    self.base_url = result.base_url
+                    return result
+                attempts.append(result)
+        self._raise_model_probe_error(attempts)
+        raise RuntimeError("unreachable")
+
+    async def probe_models(self, api_key: str) -> list[str]:
+        return (await self.probe_models_with_base_url(api_key)).models
 
     async def embeddings(
         self,
