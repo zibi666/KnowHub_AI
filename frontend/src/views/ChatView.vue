@@ -178,6 +178,7 @@ const chatFooter = ref<HTMLElement | null>(null)
 const showScrollToBottom = ref(false)
 let userHasScrolledUp = false
 let programmaticScrollUntil = 0
+let questionNavLockUntil = 0
 
 const themeMode = ref<ThemeMode>('dark')
 const bubbleColor = ref<BubbleColor>('blue')
@@ -1822,21 +1823,29 @@ function refreshActiveQuestionFromScroll() {
     activeQuestionMessageId.value = null
     return
   }
+  if (Date.now() < questionNavLockUntil && activeQuestionMessageId.value) return
   const scrollerRect = scroller.getBoundingClientRect()
-  const anchorY = scrollerRect.top + scrollerRect.height * 0.42
+  const anchorY = scrollerRect.top + Math.min(scrollerRect.height * 0.28, 150)
   let bestId = items[0].id
-  let bestDistance = Number.POSITIVE_INFINITY
+  let bestTop = Number.NEGATIVE_INFINITY
+  let nearestId = items[0].id
+  let nearestDistance = Number.POSITIVE_INFINITY
   for (const item of items) {
     const node = scroller.querySelector<HTMLElement>(`[data-message-id="${CSS.escape(item.id)}"]`)
     if (!node) continue
     const rect = node.getBoundingClientRect()
-    const messageY = rect.top + Math.min(rect.height * 0.35, 96)
-    const distance = Math.abs(messageY - anchorY)
-    if (distance < bestDistance) {
-      bestDistance = distance
+    const messageTop = rect.top
+    const distance = Math.abs(messageTop - anchorY)
+    if (messageTop <= anchorY + 8 && messageTop > bestTop) {
+      bestTop = messageTop
       bestId = item.id
     }
+    if (distance < nearestDistance) {
+      nearestDistance = distance
+      nearestId = item.id
+    }
   }
+  if (bestTop === Number.NEGATIVE_INFINITY) bestId = nearestId
   activeQuestionMessageId.value = bestId
 }
 
@@ -1876,8 +1885,12 @@ async function returnToBottom() {
 async function jumpToQuestion(messageId: string) {
   questionNavExpanded.value = true
   activeQuestionMessageId.value = messageId
-  await scrollToMessage(messageId)
-  window.setTimeout(() => refreshActiveQuestionFromScroll(), 420)
+  questionNavLockUntil = Date.now() + 1400
+  await scrollToMessage(messageId, 'start')
+  window.setTimeout(() => {
+    questionNavLockUntil = 0
+    refreshActiveQuestionFromScroll()
+  }, 1450)
 }
 
 function scheduleScrollToBottom(force = false) {
@@ -2472,7 +2485,7 @@ async function openConversation(id: string, focusMessageId?: string | null) {
   }
 }
 
-async function scrollToMessage(messageId: string) {
+async function scrollToMessage(messageId: string, block: ScrollLogicalPosition = 'center') {
   await waitForMessageLayout()
   const target = Array.from(document.querySelectorAll<HTMLElement>('[data-message-id]')).find(
     (item) => item.dataset.messageId === messageId
@@ -2482,7 +2495,7 @@ async function scrollToMessage(messageId: string) {
     return
   }
   userHasScrolledUp = true
-  target.scrollIntoView({ behavior: 'smooth', block: 'center' })
+  target.scrollIntoView({ behavior: 'smooth', block })
   target.classList.add('message-search-highlight')
   window.setTimeout(() => target.classList.remove('message-search-highlight'), 1800)
 }
