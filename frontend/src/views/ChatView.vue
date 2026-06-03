@@ -400,27 +400,35 @@ function setMessageFirstTokenSeconds(message: Message, seconds: number | undefin
   message.first_token_seconds = seconds
 }
 
+function clearRuntimeProgress(message: Message) {
+  message.elapsedSeconds = undefined
+  message.elapsed_seconds = undefined
+  message.startedAt = undefined
+  message.started_at = undefined
+}
+
 function freezeFirstTokenSeconds(message: Message, data: any = {}) {
   const incomingFirstToken = incomingFirstTokenSeconds(data)
   if (incomingFirstToken !== undefined) {
     setMessageFirstTokenSeconds(message, incomingFirstToken)
-    message.elapsedSeconds = incomingFirstToken
-    message.elapsed_seconds = incomingFirstToken
+    if (message.status !== 'streaming' && data.status !== 'streaming') clearRuntimeProgress(message)
     return
   }
   if (messageFirstTokenSeconds(message) !== undefined) return
   setMessageFirstTokenSeconds(message, currentRuntimeElapsed(message))
+  if (message.status !== 'streaming' && data.status !== 'streaming') clearRuntimeProgress(message)
 }
 
 function applyRuntimeProgress(message: Message, data: any = {}) {
   const existingStartedAt = normalizeProgressTimestamp(message.startedAt ?? message.started_at)
   const incomingStartedAt = normalizeProgressTimestamp(data.startedAt ?? data.started_at)
-  const fallbackStartedAt = message.status === 'streaming' ? messageCreatedAtMs(message) : undefined
+  const targetStatus = data.status || message.status
+  const isStreamingProgress = targetStatus === 'streaming'
+  const fallbackStartedAt = isStreamingProgress ? messageCreatedAtMs(message) : undefined
   const now = Date.now()
-  const startedAt = existingStartedAt ?? incomingStartedAt ?? fallbackStartedAt ?? (message.status === 'streaming' ? now : undefined)
+  const startedAt = existingStartedAt ?? incomingStartedAt ?? fallbackStartedAt ?? (isStreamingProgress ? now : undefined)
   const firstTokenSeconds = incomingFirstTokenSeconds(data)
   const incomingElapsed = normalizeProgressElapsed(data.elapsedSeconds ?? data.elapsed_seconds)
-  const isStreamingProgress = message.status === 'streaming' || data.status === 'streaming'
   const existingElapsed = currentRuntimeElapsed(message, isStreamingProgress)
   const elapsedSeconds =
     isStreamingProgress
@@ -446,14 +454,10 @@ function applyRuntimeProgress(message: Message, data: any = {}) {
 
 function normalizeLoadedMessage(message: Message): Message {
   const progress = message.imageProgress || message.image_progress
-  if (
-    message.status === 'streaming' ||
-    message.elapsedSeconds !== undefined ||
-    message.elapsed_seconds !== undefined ||
-    message.startedAt !== undefined ||
-    message.started_at !== undefined
-  ) {
+  if (message.status === 'streaming') {
     applyRuntimeProgress(message)
+  } else {
+    clearRuntimeProgress(message)
   }
   if (progress && message.status === 'streaming') {
     const elapsedSeconds = Math.max(
@@ -2079,14 +2083,17 @@ function applyConversationEvent(event: string, data: any) {
   }
   if (event === 'message_completed' || event === 'message_failed') {
     if (message) {
-      applyRuntimeProgress(message, data)
-      if (typeof data.content === 'string' && data.content.trim()) freezeFirstTokenSeconds(message, data)
       message.status = data.status || (event === 'message_completed' ? 'completed' : 'failed_no_output')
       if (typeof data.content === 'string') message.content = data.content
+      applyRuntimeProgress(message, { ...data, status: message.status })
+      if (message.content.trim()) freezeFirstTokenSeconds(message, { ...data, status: message.status })
       if (event === 'message_failed' && !message.content.trim() && typeof data.message === 'string' && data.message.trim()) {
         message.content = data.message.trim()
       }
-      if (message.status !== 'streaming') message.imageProgress = undefined
+      if (message.status !== 'streaming') {
+        clearRuntimeProgress(message)
+        message.imageProgress = undefined
+      }
     }
     syncActiveRequestState()
     if (!messages.value.some((item) => item.role === 'assistant' && item.status === 'streaming' && messageIsImageGeneration(item))) {
@@ -3134,23 +3141,25 @@ onUnmounted(() => {
                   </button>
                   <Transition name="file-tree-list">
                     <div v-if="fileTreeGroupOpen.images" class="file-tree-list">
-                      <article v-for="item in fileTreeImages" :key="item.id" class="file-tree-item" :class="{ selected: item.selected }">
-                        <label class="file-tree-check" :title="item.selected ? '取消勾选' : '勾选引用'">
-                          <input type="checkbox" :checked="item.selected" @change="handleFileTreeSelectionChange(item, $event)" />
-                          <span aria-hidden="true" />
-                        </label>
-                        <button class="file-tree-thumb image" type="button" @click="openAttachmentPreview(fileTreeAttachmentForPreview(item))">
-                          <img :src="attachmentPreviewUrl(item.attachment.id)" :alt="fileTreeDisplayName(item)" />
-                        </button>
-                        <button class="file-tree-meta" type="button" @click="openAttachmentPreview(fileTreeAttachmentForPreview(item))">
-                          <strong>{{ fileTreeDisplayName(item) }}</strong>
-                          <span>{{ formatBytes(item.attachment.sizeBytes) }} · {{ parseStatusText[item.attachment.parseStatus] || item.attachment.parseStatus }}</span>
-                        </button>
-                        <div class="file-tree-actions">
-                          <button type="button" title="重命名" @click="openAttachmentRename(item)"><Pencil :size="14" /></button>
-                          <button type="button" title="移除" @click="requestRemoveFileTreeAttachment(item)"><Trash2 :size="14" /></button>
-                        </div>
-                      </article>
+                      <div class="file-tree-list-inner">
+                        <article v-for="item in fileTreeImages" :key="item.id" class="file-tree-item" :class="{ selected: item.selected }">
+                          <label class="file-tree-check" :title="item.selected ? '取消勾选' : '勾选引用'">
+                            <input type="checkbox" :checked="item.selected" @change="handleFileTreeSelectionChange(item, $event)" />
+                            <span aria-hidden="true" />
+                          </label>
+                          <button class="file-tree-thumb image" type="button" @click="openAttachmentPreview(fileTreeAttachmentForPreview(item))">
+                            <img :src="attachmentPreviewUrl(item.attachment.id)" :alt="fileTreeDisplayName(item)" />
+                          </button>
+                          <button class="file-tree-meta" type="button" @click="openAttachmentPreview(fileTreeAttachmentForPreview(item))">
+                            <strong>{{ fileTreeDisplayName(item) }}</strong>
+                            <span>{{ formatBytes(item.attachment.sizeBytes) }} · {{ parseStatusText[item.attachment.parseStatus] || item.attachment.parseStatus }}</span>
+                          </button>
+                          <div class="file-tree-actions">
+                            <button type="button" title="重命名" @click="openAttachmentRename(item)"><Pencil :size="14" /></button>
+                            <button type="button" title="移除" @click="requestRemoveFileTreeAttachment(item)"><Trash2 :size="14" /></button>
+                          </div>
+                        </article>
+                      </div>
                     </div>
                   </Transition>
                 </section>
@@ -3162,23 +3171,25 @@ onUnmounted(() => {
                   </button>
                   <Transition name="file-tree-list">
                     <div v-if="fileTreeGroupOpen.documents" class="file-tree-list">
-                      <article v-for="item in fileTreeDocuments" :key="item.id" class="file-tree-item" :class="{ selected: item.selected }">
-                        <label class="file-tree-check" :title="item.selected ? '取消勾选' : '勾选引用'">
-                          <input type="checkbox" :checked="item.selected" @change="handleFileTreeSelectionChange(item, $event)" />
-                          <span aria-hidden="true" />
-                        </label>
-                        <button class="file-tree-thumb document" type="button" @click="openAttachmentPreview(fileTreeAttachmentForPreview(item))">
-                          <FileText :size="17" />
-                        </button>
-                        <button class="file-tree-meta" type="button" @click="openAttachmentPreview(fileTreeAttachmentForPreview(item))">
-                          <strong>{{ fileTreeDisplayName(item) }}</strong>
-                          <span>{{ attachmentKindLabel(item.attachment) }} · {{ parseStatusText[item.attachment.parseStatus] || item.attachment.parseStatus }}</span>
-                        </button>
-                        <div class="file-tree-actions">
-                          <button type="button" title="重命名" @click="openAttachmentRename(item)"><Pencil :size="14" /></button>
-                          <button type="button" title="移除" @click="requestRemoveFileTreeAttachment(item)"><Trash2 :size="14" /></button>
-                        </div>
-                      </article>
+                      <div class="file-tree-list-inner">
+                        <article v-for="item in fileTreeDocuments" :key="item.id" class="file-tree-item" :class="{ selected: item.selected }">
+                          <label class="file-tree-check" :title="item.selected ? '取消勾选' : '勾选引用'">
+                            <input type="checkbox" :checked="item.selected" @change="handleFileTreeSelectionChange(item, $event)" />
+                            <span aria-hidden="true" />
+                          </label>
+                          <button class="file-tree-thumb document" type="button" @click="openAttachmentPreview(fileTreeAttachmentForPreview(item))">
+                            <FileText :size="17" />
+                          </button>
+                          <button class="file-tree-meta" type="button" @click="openAttachmentPreview(fileTreeAttachmentForPreview(item))">
+                            <strong>{{ fileTreeDisplayName(item) }}</strong>
+                            <span>{{ attachmentKindLabel(item.attachment) }} · {{ parseStatusText[item.attachment.parseStatus] || item.attachment.parseStatus }}</span>
+                          </button>
+                          <div class="file-tree-actions">
+                            <button type="button" title="重命名" @click="openAttachmentRename(item)"><Pencil :size="14" /></button>
+                            <button type="button" title="移除" @click="requestRemoveFileTreeAttachment(item)"><Trash2 :size="14" /></button>
+                          </div>
+                        </article>
+                      </div>
                     </div>
                   </Transition>
                 </section>

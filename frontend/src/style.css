@@ -3397,32 +3397,14 @@ body,
   z-index: 8;
   width: min(20.5rem, calc(100vw - 2rem));
   max-height: min(72vh, calc(100vh - 10.5rem));
-  overflow: hidden;
-  border: 1px solid color-mix(in srgb, var(--text) 11%, transparent);
-  border-radius: 8px;
-  background:
-    linear-gradient(180deg, color-mix(in srgb, var(--control-bg) 92%, #fff 3%), color-mix(in srgb, var(--surface-bg) 91%, #000 8%));
-  box-shadow: 0 22px 58px rgba(0, 0, 0, 0.34), 0 1px 0 color-mix(in srgb, #fff 9%, transparent) inset;
-  backdrop-filter: blur(18px) saturate(126%);
-  -webkit-backdrop-filter: blur(18px) saturate(126%);
+  pointer-events: none;
   transform-origin: top right;
-  transition:
-    width 260ms var(--ease-out-soft),
-    max-height 260ms var(--ease-out-soft),
-    border-color 180ms ease,
-    box-shadow 220ms ease,
-    transform 260ms var(--ease-out-soft),
-    background 180ms ease;
 }
 
 .file-tree-panel.collapsed {
   width: 2.85rem;
   height: 2.85rem;
   max-height: 2.85rem;
-  border-color: color-mix(in srgb, var(--text) 8%, transparent);
-  background: color-mix(in srgb, var(--control-bg) 86%, transparent);
-  box-shadow: 0 14px 36px rgba(0, 0, 0, 0.28);
-  transform: translateX(0.15rem) scale(0.98);
 }
 
 .file-tree-pin {
@@ -3430,6 +3412,7 @@ body,
   top: 0.58rem;
   right: 0.58rem;
   z-index: 2;
+  pointer-events: auto;
   display: inline-flex;
   width: 1.72rem;
   height: 1.72rem;
@@ -3439,7 +3422,10 @@ body,
   border-radius: 7px;
   color: var(--muted);
   background: color-mix(in srgb, var(--control-bg) 82%, transparent);
-  transition: background 160ms ease, border-color 160ms ease, color 160ms ease, transform 180ms var(--ease-out-soft);
+  box-shadow: 0 10px 26px rgba(0, 0, 0, 0.18);
+  backdrop-filter: blur(14px) saturate(120%);
+  -webkit-backdrop-filter: blur(14px) saturate(120%);
+  transition: background 210ms ease, border-color 210ms ease, color 210ms ease, transform 240ms var(--ease-out-soft);
 }
 
 .file-tree-pin:hover {
@@ -3450,19 +3436,38 @@ body,
 }
 
 .file-tree-body {
+  pointer-events: auto;
   min-height: 0;
+  max-height: min(72vh, calc(100vh - 10.5rem));
+  overflow: hidden;
+  border: 1px solid color-mix(in srgb, var(--text) 11%, transparent);
+  border-radius: 8px;
+  background:
+    linear-gradient(180deg, color-mix(in srgb, var(--control-bg) 92%, #fff 3%), color-mix(in srgb, var(--surface-bg) 91%, #000 8%));
+  box-shadow: 0 22px 58px rgba(0, 0, 0, 0.34), 0 1px 0 color-mix(in srgb, #fff 9%, transparent) inset;
+  backdrop-filter: blur(18px) saturate(126%);
+  -webkit-backdrop-filter: blur(18px) saturate(126%);
+  transform: translate3d(0, 0, 0) scale(1);
+  transform-origin: top right;
+  will-change: opacity, transform;
 }
 
-.file-tree-body-enter-active,
+.file-tree-body-enter-active {
+  transition:
+    opacity 380ms ease,
+    transform 460ms var(--ease-menu);
+}
+
 .file-tree-body-leave-active {
-  transition: opacity 220ms ease, transform 260ms var(--ease-out-soft), filter 220ms ease;
+  transition:
+    opacity 260ms ease,
+    transform 320ms var(--ease-in-soft);
 }
 
 .file-tree-body-enter-from,
 .file-tree-body-leave-to {
   opacity: 0;
-  filter: blur(3px);
-  transform: translateX(0.75rem) scale(0.985);
+  transform: translate3d(0.75rem, -0.2rem, 0) scale(0.965);
 }
 
 .file-tree-header {
@@ -3520,7 +3525,7 @@ body,
   color: var(--muted);
   padding: 0.48rem 0.52rem;
   text-align: left;
-  transition: color 160ms ease, background 160ms ease, transform 180ms var(--ease-out-soft);
+  transition: color 220ms ease, background 220ms ease, transform 240ms var(--ease-out-soft);
 }
 
 .file-tree-group-head:hover {
@@ -3536,21 +3541,56 @@ body,
 
 .file-tree-list {
   display: grid;
+  grid-template-rows: 1fr;
   gap: 0.42rem;
-  max-height: 60rem;
   overflow: hidden;
+  opacity: 1;
+  transform: translate3d(0, 0, 0);
+  will-change: grid-template-rows, opacity, transform;
 }
 
-.file-tree-list-enter-active,
+.file-tree-list > * {
+  min-height: 0;
+}
+
+.file-tree-list-inner {
+  display: grid;
+  gap: 0.42rem;
+  min-height: 0;
+  overflow: hidden;
+  opacity: 1;
+  transform: translate3d(0, 0, 0);
+  transition:
+    opacity 300ms ease,
+    transform 360ms var(--ease-menu);
+  will-change: opacity, transform;
+}
+
+.file-tree-list-enter-active {
+  transition:
+    grid-template-rows 360ms var(--ease-menu),
+    opacity 300ms ease,
+    transform 360ms var(--ease-menu);
+}
+
 .file-tree-list-leave-active {
-  transition: opacity 210ms ease, max-height 260ms var(--ease-out-soft), transform 240ms var(--ease-out-soft);
+  transition:
+    grid-template-rows 280ms var(--ease-in-soft),
+    opacity 220ms ease,
+    transform 280ms var(--ease-in-soft);
 }
 
 .file-tree-list-enter-from,
 .file-tree-list-leave-to {
+  grid-template-rows: 0fr;
   opacity: 0;
-  max-height: 0;
-  transform: translateY(-0.28rem);
+  transform: translate3d(0, -0.32rem, 0);
+}
+
+.file-tree-list-enter-from .file-tree-list-inner,
+.file-tree-list-leave-to .file-tree-list-inner {
+  opacity: 0;
+  transform: translate3d(0, -0.28rem, 0);
 }
 
 .file-tree-item {
@@ -3566,10 +3606,10 @@ body,
   padding: 0.48rem;
   box-shadow: 0 0 0 rgba(0, 0, 0, 0);
   transition:
-    border-color 190ms ease,
-    background 190ms ease,
-    box-shadow 220ms ease,
-    transform 220ms var(--ease-out-soft);
+    border-color 230ms ease,
+    background 230ms ease,
+    box-shadow 260ms ease,
+    transform 260ms var(--ease-out-soft);
 }
 
 .file-tree-item.selected {
@@ -3612,10 +3652,10 @@ body,
   background: color-mix(in srgb, var(--surface-bg) 78%, transparent);
   box-shadow: 0 0 0 0 color-mix(in srgb, var(--bubble-bg) 0%, transparent);
   transition:
-    background 170ms ease,
-    border-color 170ms ease,
-    box-shadow 220ms ease,
-    transform 220ms var(--ease-out-soft);
+    background 220ms ease,
+    border-color 220ms ease,
+    box-shadow 260ms ease,
+    transform 260ms var(--ease-out-soft);
 }
 
 .file-tree-check span::after {
@@ -3626,7 +3666,7 @@ body,
   border-bottom: 2px solid #fff;
   opacity: 0;
   transform: translateY(-1px) rotate(-45deg) scale(0.55);
-  transition: opacity 150ms ease, transform 210ms var(--ease-out-soft);
+  transition: opacity 190ms ease, transform 240ms var(--ease-out-soft);
 }
 
 .file-tree-check input:checked + span {
@@ -3657,7 +3697,7 @@ body,
   border-radius: 7px;
   background: color-mix(in srgb, var(--control-bg) 86%, transparent);
   color: var(--muted);
-  transition: background 170ms ease, border-color 170ms ease, color 170ms ease, transform 190ms var(--ease-out-soft);
+  transition: background 220ms ease, border-color 220ms ease, color 220ms ease, transform 240ms var(--ease-out-soft);
 }
 
 .file-tree-item:hover .file-tree-thumb {
@@ -3704,7 +3744,7 @@ body,
   gap: 0.15rem;
   opacity: 0;
   transform: translateX(0.25rem);
-  transition: opacity 170ms ease, transform 190ms var(--ease-out-soft);
+  transition: opacity 220ms ease, transform 240ms var(--ease-out-soft);
 }
 
 .file-tree-item:hover .file-tree-actions,
@@ -3721,7 +3761,7 @@ body,
   justify-content: center;
   border-radius: 6px;
   color: var(--muted);
-  transition: background 150ms ease, color 150ms ease, transform 170ms var(--ease-out-soft);
+  transition: background 210ms ease, color 210ms ease, transform 230ms var(--ease-out-soft);
 }
 
 .file-tree-actions button:hover {
@@ -4417,6 +4457,13 @@ body,
   .dialog-pop-leave-active .access-switch-modal,
   .dialog-pop-leave-active .confirm-modal {
     transition-duration: 220ms !important;
+  }
+
+  .file-tree-body,
+  .file-tree-list,
+  .file-tree-list-inner {
+    transform: none !important;
+    will-change: auto;
   }
 }
 

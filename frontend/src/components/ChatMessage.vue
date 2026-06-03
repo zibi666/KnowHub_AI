@@ -73,9 +73,13 @@ function formatElapsedSeconds(seconds: number | undefined) {
   const rest = Math.floor(seconds % 60)
   return `${minutes} 分 ${String(rest).padStart(2, '0')} 秒`
 }
+function normalizeStartedAt(value: number | undefined) {
+  if (!Number.isFinite(value) || value === undefined || value <= 0) return undefined
+  return value < 10_000_000_000 ? value * 1000 : value
+}
 const streamingElapsed = computed(() => {
   if (props.message.status !== 'streaming' || props.message.imageProgress || props.message.content.trim()) return ''
-  const startedAt = props.message.startedAt || props.message.started_at
+  const startedAt = normalizeStartedAt(props.message.startedAt ?? props.message.started_at)
   const baseElapsed = props.message.elapsedSeconds ?? props.message.elapsed_seconds ?? 0
   const seconds = startedAt ? Math.max(baseElapsed || 0, Math.floor((nowMs.value - startedAt) / 1000)) : baseElapsed
   return formatElapsedSeconds(seconds)
