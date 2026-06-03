@@ -3289,7 +3289,7 @@ onUnmounted(() => {
                           <div class="settings-api-row-meta">
                             <span>{{ key.endpointName || key.baseUrl || '当前 BaseURL' }}</span>
                             <span>{{ key.groupName || 'gpt-chat' }}</span>
-                            <span class="key-mask">{{ key.apiKey || key.maskedKey }}</span>
+                            <span class="key-mask">{{ key.maskedKey || (key.last4 ? '****' + key.last4 : '未展示') }}</span>
                             <strong v-if="key.isActive">当前分组使用</strong>
                           </div>
                           <div class="settings-api-row-actions">
@@ -3555,7 +3555,7 @@ onUnmounted(() => {
                 >
                   <span class="access-switch-row-main">
                     <strong>{{ key.name }}</strong>
-                    <small>{{ key.groupName || 'gpt-chat' }} · {{ key.maskedKey || key.apiKey || (key.last4 ? '****' + key.last4 : '未展示') }}</small>
+                    <small>{{ key.groupName || 'gpt-chat' }} · {{ key.maskedKey || (key.last4 ? '****' + key.last4 : '未展示') }}</small>
                     <em>{{ key.endpointName || key.baseUrl || activeModelEndpoint?.name || '当前 BaseURL' }}</em>
                   </span>
                   <span class="access-switch-badge">

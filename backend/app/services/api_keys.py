@@ -786,11 +786,15 @@ async def create_api_key_for_user(
     group = await db.get(ApiKeyGroup, group_id)
     endpoint = await load_model_endpoint(db, user_id, endpoint_id)
     provider = OpenAICompatibleProvider(endpoint.base_url)
+    try:
+        models = await provider.probe_models(api_key)
     except Exception as exc:
         endpoint.last_probe_error = str(exc)
         endpoint.probed_at = datetime.utcnow()
         await db.commit()
         raise
+    endpoint.last_probe_error = None
+    endpoint.probed_at = datetime.utcnow()
     slot_group_ids = await key_slot_group_ids(db, group)
     existing_query = select(UserApiKey).where(
         UserApiKey.user_id == user_id,
