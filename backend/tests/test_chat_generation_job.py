@@ -22,10 +22,11 @@ async def _make_session():
 @dataclass
 class DummyContextBundle:
     messages: list[dict]
+    prompt_tokens_estimated: int = 1
 
     def event_data(self) -> dict:
         return {
-            "prompt_tokens_estimated": 1,
+            "prompt_tokens_estimated": self.prompt_tokens_estimated,
             "context_window_tokens": 128000,
             "prompt_budget_tokens": 96000,
             "has_active_compaction": False,
@@ -135,6 +136,100 @@ def test_run_chat_generation_job_passes_user_quota_to_key_resolver(monkeypatch):
                 assert assistant.status == "completed"
                 assert assistant.content == "你好"
                 assert captured["quota"].user_id == "user-1"
+        finally:
+            await engine.dispose()
+
+    asyncio.run(run())
+
+
+def test_run_chat_generation_job_persists_empty_response_reason(monkeypatch):
+    async def run():
+        engine, session_maker = await _make_session()
+        published_events = []
+
+        monkeypatch.setattr(chat, "SessionLocal", session_maker)
+
+        async def fake_publish(conversation_id, event, data):
+            published_events.append((conversation_id, event, data))
+
+        async def fake_build_context_bundle(*args, **kwargs):
+            return DummyContextBundle(messages=[{"role": "user", "content": "你好"}])
+
+        async def fake_record_usage(*args, **kwargs):
+            return None
+
+        async def fake_maybe_auto_compact(*args, **kwargs):
+            return None
+
+        async def fake_resolve_api_key_for_model(db, user_id, model, quota=None, **kwargs):
+            return captured["api_key"]
+
+        async def fake_chat_stream(self, **kwargs):
+            if False:
+                yield StreamEvent("token", {"text": ""})
+
+        captured = {}
+        monkeypatch.setattr(chat, "publish_conversation_event", fake_publish)
+        monkeypatch.setattr(chat, "build_context_bundle", fake_build_context_bundle)
+        monkeypatch.setattr(chat, "record_usage", fake_record_usage)
+        monkeypatch.setattr(chat, "maybe_auto_compact", fake_maybe_auto_compact)
+        monkeypatch.setattr(chat, "resolve_api_key_for_model", fake_resolve_api_key_for_model)
+        monkeypatch.setattr(chat.OpenAICompatibleProvider, "chat_stream", fake_chat_stream)
+
+        try:
+            async with session_maker() as db:
+                group = ApiKeyGroup(name=api_keys.DEFAULT_CHAT_GROUP_NAME, purpose=api_keys.GROUP_PURPOSE_CHAT, is_system=True)
+                db.add(group)
+                await db.flush()
+                db.add(User(id="user-1", username="user-1", password_hash="hash", status="active"))
+                quota = UserQuota(user_id="user-1", max_storage_bytes=1024, default_model="gpt-5.5")
+                db.add(quota)
+                api_key = _key("user-1", group.id)
+                api_key.base_url = "https://api.0029.org/v1"
+                db.add(api_key)
+                conversation = Conversation(id="conv-1", user_id="user-1", title="测试")
+                user_message = Message(
+                    id="msg-user",
+                    user_id="user-1",
+                    conversation_id="conv-1",
+                    role="user",
+                    content="你好",
+                    status="completed",
+                )
+                assistant = Message(
+                    id="msg-assistant",
+                    user_id="user-1",
+                    conversation_id="conv-1",
+                    parent_message_id="msg-user",
+                    role="assistant",
+                    content="",
+                    status="streaming",
+                    model="gpt-5.5",
+                )
+                db.add_all([conversation, user_message, assistant])
+                await db.commit()
+                captured["api_key"] = api_key
+
+            await chat.run_chat_generation_job(
+                "user-1",
+                "conv-1",
+                "msg-user",
+                "msg-assistant",
+                "gpt-5.5",
+            )
+
+            async with session_maker() as db:
+                assistant = await db.get(Message, "msg-assistant")
+                assert assistant.status == "failed_no_output"
+                assert "模型返回了空回复" in assistant.content
+                assert "https://api.0029.org/v1" in assistant.content
+                assert assistant.completion_tokens == 0
+                assert assistant.total_tokens == 0
+
+            failed_events = [data for _, event, data in published_events if event == "message_failed"]
+            assert len(failed_events) == 1
+            assert failed_events[0]["content"] == assistant.content
+            assert failed_events[0]["message"] == assistant.content
         finally:
             await engine.dispose()
 

@@ -55,6 +55,12 @@ DEFAULT_CHAT_MODEL = "gpt-5.5"
 IMAGE_GENERATION_MAX_WAIT_SECONDS = 14 * 60
 
 _STREAM_END = object()
+EMPTY_CHAT_RESPONSE_MESSAGE = (
+    "模型返回了空回复：上游接口请求已完成，但没有返回任何可显示的文本。"
+    "常见原因是上游服务或代理临时异常、模型不完全兼容当前流式接口，"
+    "或当前会话上下文触发了上游空响应。请重试；如果连续出现，请切换模型，"
+    "或检查该 BaseURL 的 /responses 与 /chat/completions 兼容性。"
+)
 
 
 async def _safe_anext(gen: AsyncIterator) -> object:
@@ -67,6 +73,17 @@ async def _safe_anext(gen: AsyncIterator) -> object:
 
 def json_line(event: str, data: dict) -> bytes:
     return (json.dumps({"event": event, "data": data}, ensure_ascii=False) + "\n\n").encode("utf-8")
+
+
+def empty_chat_response_message(model: str | None = None, base_url: str | None = None) -> str:
+    details: list[str] = []
+    if model:
+        details.append(f"模型：{model}")
+    if base_url:
+        details.append(f"BaseURL：{base_url.rstrip('/')}")
+    if not details:
+        return EMPTY_CHAT_RESPONSE_MESSAGE
+    return f"{EMPTY_CHAT_RESPONSE_MESSAGE}（{'，'.join(details)}）"
 
 
 def sse_line(event: str, data: dict) -> bytes:
@@ -1059,24 +1076,30 @@ async def stream_chat(user_id: str, payload: SendMessageRequest, conversation_id
         # Detect empty response — this is almost always a bug or upstream
         # failure, not a legitimate empty reply.  Surface it to the user.
         if not content.strip():
+            message = empty_chat_response_message(model, api_key_row.base_url)
             logger.warning(
                 "stream_chat EMPTY RESPONSE user=%s conv=%s model=%s "
-                "est_tokens=%d usage=%s",
+                "base_url=%s context_messages=%d est_tokens=%d usage=%s",
                 user_id, conversation_id, model,
+                api_key_row.base_url,
+                len(context),
                 context_bundle.prompt_tokens_estimated, usage,
             )
             # Save as failed so it doesn't pollute conversation history
             async with SessionLocal() as db:
                 assistant = await db.get(Message, assistant_message_id)
                 if assistant:
-                    assistant.content = ""
+                    assistant.content = message
                     assistant.status = "failed_no_output"
+                    assistant.completion_tokens = 0
+                    assistant.total_tokens = 0
+                    assistant.tokens_source = None
                     await db.commit()
             yield json_line(
                 "error",
                 {
                     "code": "UPSTREAM_ERROR",
-                    "message": "模型返回了空回复，可能是上游服务暂时异常或本轮输入过长，请稍后重试或减少本轮输入/附件内容",
+                    "message": message,
                     "retryable": True,
                 },
             )
@@ -1190,28 +1213,33 @@ async def stream_chat(user_id: str, payload: SendMessageRequest, conversation_id
             code = exc.detail.get("code", code)
             message = exc.detail.get("message", message)
         logger.error("stream_chat HTTPException user=%s conv=%s code=%s msg=%s", user_id, conversation_id, code, message)
+        content = "".join(buffer)
+        persisted_content = content or message
         async with SessionLocal() as db:
             assistant = await db.get(Message, assistant_message_id)
             if assistant:
-                assistant.content = "".join(buffer)
-                assistant.status = "failed_partial" if buffer else "failed_no_output"
-                assistant.completion_tokens = estimate_tokens_text(assistant.content)
+                assistant.content = persisted_content
+                assistant.status = "failed_partial" if content else "failed_no_output"
+                assistant.completion_tokens = estimate_tokens_text(content) if content else 0
                 assistant.total_tokens = assistant.completion_tokens
-                assistant.tokens_source = "estimated" if buffer else None
+                assistant.tokens_source = "estimated" if content else None
                 await db.commit()
         yield json_line("error", {"code": code, "message": message, "retryable": True})
     except Exception as exc:
         logger.exception("stream_chat unexpected error user=%s conv=%s", user_id, conversation_id)
+        content = "".join(buffer)
+        message = str(exc)[:500] or "回复生成失败，请稍后重试。"
+        persisted_content = content or message
         async with SessionLocal() as db:
             assistant = await db.get(Message, assistant_message_id)
             if assistant:
-                assistant.content = "".join(buffer)
-                assistant.status = "failed_partial" if buffer else "failed_no_output"
-                assistant.completion_tokens = estimate_tokens_text(assistant.content)
+                assistant.content = persisted_content
+                assistant.status = "failed_partial" if content else "failed_no_output"
+                assistant.completion_tokens = estimate_tokens_text(content) if content else 0
                 assistant.total_tokens = assistant.completion_tokens
-                assistant.tokens_source = "estimated" if buffer else None
+                assistant.tokens_source = "estimated" if content else None
                 await db.commit()
-        yield json_line("error", {"code": "UPSTREAM_ERROR", "message": str(exc)[:500], "retryable": True})
+        yield json_line("error", {"code": "UPSTREAM_ERROR", "message": message, "retryable": True})
 
 
 async def stream_image_generation_chat(
@@ -1883,7 +1911,7 @@ async def run_chat_generation_job(
                 allow_auto_choose_multiple=True,
             )
             if not api_key_row:
-                raise HTTPException(status_code=400, detail={"code": "KEY_REQUIRED", "message": "璇峰厛缁戝畾妯″瀷 API Key"})
+                raise HTTPException(status_code=400, detail={"code": "KEY_REQUIRED", "message": "请先绑定模型 API Key"})
             api_key = decrypt_api_key(api_key_row.ciphertext)
 
         await publish_conversation_event(
@@ -2010,7 +2038,27 @@ async def run_chat_generation_job(
 
         content = "".join(buffer)
         if not content.strip():
-            await _persist_assistant_partial(assistant_message_id, "", status="failed_no_output")
+            message = empty_chat_response_message(model, api_key_row.base_url)
+            logger.warning(
+                "chat_generation EMPTY RESPONSE user=%s conv=%s msg=%s model=%s "
+                "base_url=%s context_messages=%d est_tokens=%d usage=%s",
+                user_id,
+                conversation_id,
+                assistant_message_id,
+                model,
+                api_key_row.base_url,
+                len(context),
+                context_bundle.prompt_tokens_estimated,
+                usage,
+            )
+            await _persist_assistant_partial(
+                assistant_message_id,
+                message,
+                status="failed_no_output",
+                completion_tokens=0,
+                total_tokens=0,
+                tokens_source=None,
+            )
             async with SessionLocal() as db:
                 assistant = await db.get(Message, assistant_message_id)
             await publish_conversation_event(
@@ -2019,10 +2067,10 @@ async def run_chat_generation_job(
                 {
                     "conversation_id": conversation_id,
                     "message_id": assistant_message_id,
-                    "content": "",
+                    "content": message,
                     "status": "failed_no_output",
                     "code": "UPSTREAM_ERROR",
-                    "message": "妯″瀷杩斿洖浜嗙┖鍥炲",
+                    "message": message,
                     **message_progress_event_data(assistant),
                 },
             )
@@ -2124,9 +2172,10 @@ async def run_chat_generation_job(
         if isinstance(exc.detail, dict):
             code = exc.detail.get("code", code)
         content = "".join(buffer)
+        failed_content = content or message
         await _persist_assistant_partial(
             assistant_message_id,
-            content,
+            failed_content,
             status="failed_partial" if content else "failed_no_output",
             completion_tokens=estimate_tokens_text(content) if content else 0,
             total_tokens=estimate_tokens_text(content) if content else 0,
@@ -2140,7 +2189,7 @@ async def run_chat_generation_job(
             {
                 "conversation_id": conversation_id,
                 "message_id": assistant_message_id,
-                "content": content,
+                "content": failed_content,
                 "status": "failed_partial" if content else "failed_no_output",
                 "code": code,
                 "message": message,
@@ -2150,9 +2199,11 @@ async def run_chat_generation_job(
     except Exception as exc:
         logger.exception("chat_generation unexpected error user=%s conv=%s msg=%s", user_id, conversation_id, assistant_message_id)
         content = "".join(buffer)
+        message = str(exc)[:500] or "回复生成失败，请稍后重试。"
+        failed_content = content or message
         await _persist_assistant_partial(
             assistant_message_id,
-            content,
+            failed_content,
             status="failed_partial" if content else "failed_no_output",
             completion_tokens=estimate_tokens_text(content) if content else 0,
             total_tokens=estimate_tokens_text(content) if content else 0,
@@ -2166,10 +2217,10 @@ async def run_chat_generation_job(
             {
                 "conversation_id": conversation_id,
                 "message_id": assistant_message_id,
-                "content": content,
+                "content": failed_content,
                 "status": "failed_partial" if content else "failed_no_output",
                 "code": "UPSTREAM_ERROR",
-                "message": str(exc)[:500],
+                "message": message,
                 **message_progress_event_data(assistant),
             },
         )

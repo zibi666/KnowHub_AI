@@ -29,7 +29,7 @@ const showThinkingPanel = computed(
 )
 const emptyAssistantFailureText = computed(() => {
   if (props.message.content.trim()) return ''
-  if (props.message.status === 'failed_no_output') return '回复生成失败，请重试'
+  if (props.message.status === 'failed_no_output') return '回复生成失败：上游没有返回可显示文本，可能是模型服务或代理临时异常，请重试或切换模型。'
   if (props.message.status === 'failed_partial') return '回复生成中断，请重试'
   if (props.message.status === 'interrupted') return '回复已中断'
   return ''
