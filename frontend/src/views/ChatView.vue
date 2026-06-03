@@ -136,6 +136,8 @@ const draftConversationAttachments = ref<ConversationAttachment[]>([])
 const fileTreeLoading = ref(false)
 const fileTreePinned = ref(true)
 const fileTreeGroupOpen = ref<Record<FileTreeGroup, boolean>>({ images: true, documents: true })
+const questionNavExpanded = ref(false)
+const activeQuestionMessageId = ref<string | null>(null)
 const attachmentRenameOpen = ref(false)
 const attachmentRenameSaving = ref(false)
 const attachmentRenameDraft = ref('')
@@ -288,6 +290,39 @@ const selectedFileTreeAttachments = computed(() => activeFileTreeAttachments.val
 const selectedFileTreeAttachmentIds = computed(() => selectedFileTreeAttachments.value.map((item) => item.attachment.id))
 const fileTreeImages = computed(() => activeFileTreeAttachments.value.filter((item) => isImageAttachment(item.attachment)))
 const fileTreeDocuments = computed(() => activeFileTreeAttachments.value.filter((item) => !isImageAttachment(item.attachment)))
+const userQuestionNavItems = computed(() =>
+  messages.value
+    .filter((message) => message.role === 'user')
+    .map((message, index) => {
+      const text = message.content.trim().replace(/\s+/g, ' ')
+      const fallback = message.attachments?.length ? '附件消息' : '空消息'
+      return {
+        id: message.id,
+        index: index + 1,
+        title: text || fallback,
+        summary: text ? truncateQuestionTitle(text) : fallback
+      }
+    })
+)
+const activeQuestionIndex = computed(() => {
+  const index = userQuestionNavItems.value.findIndex((item) => item.id === activeQuestionMessageId.value)
+  return index >= 0 ? index : Math.max(0, userQuestionNavItems.value.length - 1)
+})
+const visibleQuestionNavItems = computed(() => {
+  const items = userQuestionNavItems.value
+  if (items.length <= 10) return items
+  const active = activeQuestionIndex.value
+  const start = Math.min(Math.max(active - 4, 0), items.length - 10)
+  return items.slice(start, start + 10)
+})
+const questionNavHasBefore = computed(() => {
+  const first = visibleQuestionNavItems.value[0]
+  return Boolean(first && userQuestionNavItems.value.findIndex((item) => item.id === first.id) > 0)
+})
+const questionNavHasAfter = computed(() => {
+  const last = visibleQuestionNavItems.value[visibleQuestionNavItems.value.length - 1]
+  return Boolean(last && userQuestionNavItems.value.findIndex((item) => item.id === last.id) < userQuestionNavItems.value.length - 1)
+})
 const recentSearchConversations = computed(() => conversations.value.slice(0, 10))
 const conversationUsage = computed(() => {
   const assistantMessages = messages.value.filter((message) => message.role === 'assistant')
@@ -322,6 +357,11 @@ function isImageAttachment(item: Attachment) {
 
 function isReferenceDocument(item: Attachment) {
   return !isImageAttachment(item) && item.parseStatus === 'success'
+}
+
+function truncateQuestionTitle(text: string) {
+  const normalized = text.trim().replace(/\s+/g, ' ')
+  return normalized.length > 28 ? `${normalized.slice(0, 28)}...` : normalized
 }
 
 function selectedModelSupportsVision() {
@@ -1775,7 +1815,33 @@ function handleScrollerTouchStart() {
   pauseAutoScrollFromUserScroll()
 }
 
+function refreshActiveQuestionFromScroll() {
+  const scroller = messageScroller.value
+  const items = userQuestionNavItems.value
+  if (!scroller || !items.length) {
+    activeQuestionMessageId.value = null
+    return
+  }
+  const scrollerRect = scroller.getBoundingClientRect()
+  const anchorY = scrollerRect.top + scrollerRect.height * 0.42
+  let bestId = items[0].id
+  let bestDistance = Number.POSITIVE_INFINITY
+  for (const item of items) {
+    const node = scroller.querySelector<HTMLElement>(`[data-message-id="${CSS.escape(item.id)}"]`)
+    if (!node) continue
+    const rect = node.getBoundingClientRect()
+    const messageY = rect.top + Math.min(rect.height * 0.35, 96)
+    const distance = Math.abs(messageY - anchorY)
+    if (distance < bestDistance) {
+      bestDistance = distance
+      bestId = item.id
+    }
+  }
+  activeQuestionMessageId.value = bestId
+}
+
 function handleScrollerScroll() {
+  refreshActiveQuestionFromScroll()
   const nearBottom = isNearBottom(36)
   const awayFromBottom = !nearBottom
   showScrollToBottom.value = messages.value.length > 0 && awayFromBottom
@@ -1805,6 +1871,13 @@ async function scrollLoadedConversationToBottom(loadId: number) {
 async function returnToBottom() {
   userHasScrolledUp = false
   await scrollMessagesToBottom('smooth')
+}
+
+async function jumpToQuestion(messageId: string) {
+  questionNavExpanded.value = true
+  activeQuestionMessageId.value = messageId
+  await scrollToMessage(messageId)
+  window.setTimeout(() => refreshActiveQuestionFromScroll(), 420)
 }
 
 function scheduleScrollToBottom(force = false) {
@@ -2856,6 +2929,19 @@ watch(
   }
 )
 
+watch(
+  () => userQuestionNavItems.value.map((item) => item.id).join('|'),
+  async () => {
+    if (!userQuestionNavItems.value.length) {
+      activeQuestionMessageId.value = null
+      questionNavExpanded.value = false
+      return
+    }
+    await waitForMessageLayout()
+    refreshActiveQuestionFromScroll()
+  }
+)
+
 function closeFloatingMenus() {
   settingsMenuOpen.value = false
 }
@@ -3116,6 +3202,49 @@ onUnmounted(() => {
             />
           </div>
         </section>
+
+        <aside
+          v-if="userQuestionNavItems.length > 0"
+          class="question-nav-panel"
+          :class="{ expanded: questionNavExpanded, 'has-before': questionNavHasBefore, 'has-after': questionNavHasAfter }"
+          aria-label="当前对话问题导航"
+          @mouseenter="questionNavExpanded = true"
+          @mouseleave="questionNavExpanded = false"
+        >
+          <button
+            class="question-nav-rail"
+            type="button"
+            title="展开问题导航"
+            aria-label="展开问题导航"
+            @click="questionNavExpanded = !questionNavExpanded"
+          >
+            <span
+              v-for="item in visibleQuestionNavItems"
+              :key="`rail-${item.id}`"
+              class="question-nav-mark"
+              :class="{ active: item.id === activeQuestionMessageId }"
+              aria-hidden="true"
+            />
+          </button>
+          <Transition name="question-nav-card">
+            <div v-if="questionNavExpanded" class="question-nav-card">
+              <div class="question-nav-scroll">
+                <button
+                  v-for="item in userQuestionNavItems"
+                  :key="item.id"
+                  class="question-nav-item"
+                  :class="{ active: item.id === activeQuestionMessageId }"
+                  type="button"
+                  :title="item.title"
+                  @click="jumpToQuestion(item.id)"
+                >
+                  <span>{{ item.index }}. {{ item.summary }}</span>
+                  <em aria-hidden="true" />
+                </button>
+              </div>
+            </div>
+          </Transition>
+        </aside>
 
         <aside class="file-tree-panel" :class="{ collapsed: !fileTreePinned }" aria-label="对话文件树">
           <button class="file-tree-pin" type="button" :title="fileTreePinned ? '收起文件树' : '展开文件树'" @click="toggleFileTreePinned">
