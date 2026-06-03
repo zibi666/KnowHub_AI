@@ -3397,14 +3397,16 @@ body,
   z-index: 8;
   width: min(20.5rem, calc(100vw - 2rem));
   max-height: min(72vh, calc(100vh - 10.5rem));
+  min-width: min(20.5rem, calc(100vw - 2rem));
   pointer-events: none;
+  contain: layout paint;
   transform-origin: top right;
 }
 
 .file-tree-panel.collapsed {
-  width: 2.85rem;
+  width: min(20.5rem, calc(100vw - 2rem));
   height: 2.85rem;
-  max-height: 2.85rem;
+  max-height: min(72vh, calc(100vh - 10.5rem));
 }
 
 .file-tree-pin {
@@ -3450,24 +3452,26 @@ body,
   transform: translate3d(0, 0, 0) scale(1);
   transform-origin: top right;
   will-change: opacity, transform;
+  backface-visibility: hidden;
+  contain: layout paint;
 }
 
 .file-tree-body-enter-active {
   transition:
-    opacity 380ms ease,
-    transform 460ms var(--ease-menu);
+    opacity 360ms ease,
+    transform 420ms var(--ease-out-soft);
 }
 
 .file-tree-body-leave-active {
   transition:
-    opacity 260ms ease,
-    transform 320ms var(--ease-in-soft);
+    opacity 240ms ease,
+    transform 280ms var(--ease-in-soft);
 }
 
 .file-tree-body-enter-from,
 .file-tree-body-leave-to {
   opacity: 0;
-  transform: translate3d(0.75rem, -0.2rem, 0) scale(0.965);
+  transform: translate3d(0.65rem, -0.16rem, 0) scale(0.975);
 }
 
 .file-tree-header {
@@ -3547,6 +3551,7 @@ body,
   opacity: 1;
   transform: translate3d(0, 0, 0);
   will-change: grid-template-rows, opacity, transform;
+  contain: layout paint;
 }
 
 .file-tree-list > * {
@@ -3568,16 +3573,16 @@ body,
 
 .file-tree-list-enter-active {
   transition:
-    grid-template-rows 360ms var(--ease-menu),
-    opacity 300ms ease,
-    transform 360ms var(--ease-menu);
+    grid-template-rows 340ms var(--ease-out-soft),
+    opacity 260ms ease,
+    transform 340ms var(--ease-out-soft);
 }
 
 .file-tree-list-leave-active {
   transition:
-    grid-template-rows 280ms var(--ease-in-soft),
-    opacity 220ms ease,
-    transform 280ms var(--ease-in-soft);
+    grid-template-rows 260ms var(--ease-in-soft),
+    opacity 190ms ease,
+    transform 260ms var(--ease-in-soft);
 }
 
 .file-tree-list-enter-from,
@@ -5577,12 +5582,17 @@ body,
     top: 4.8rem;
     right: 0.7rem;
     width: min(20rem, calc(100vw - 1.4rem));
+    min-width: min(20rem, calc(100vw - 1.4rem));
     max-height: min(70vh, calc(100vh - 9rem));
   }
 
   .file-tree-panel.collapsed {
-    width: 2.75rem;
+    width: min(20rem, calc(100vw - 1.4rem));
     right: 0.7rem;
+  }
+
+  .file-tree-body {
+    max-height: min(70vh, calc(100vh - 9rem));
   }
 
   .chat-sidebar {
