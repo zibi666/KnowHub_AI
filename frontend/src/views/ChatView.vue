@@ -3259,7 +3259,27 @@ onUnmounted(() => {
                   <span>{{ activeFileTreeAttachments.length }} 个文件 · {{ selectedFileTreeAttachments.length }} 已选</span>
                 </div>
               </header>
-              <div v-if="fileTreeLoading" class="file-tree-empty">正在加载文件...</div>
+              <div v-if="fileTreeLoading" class="file-tree-skeleton" aria-label="正在加载文件树">
+                <section v-for="group in ['images', 'documents']" :key="group" class="file-tree-skeleton-group">
+                  <div class="file-tree-skeleton-head">
+                    <span class="skeleton-pill file-tree-skeleton-icon" />
+                    <span class="skeleton-line medium" />
+                    <span class="skeleton-line short" />
+                  </div>
+                  <div
+                    v-for="item in group === 'images' ? 2 : 3"
+                    :key="`${group}-${item}`"
+                    class="file-tree-skeleton-item"
+                  >
+                    <span class="skeleton-pill file-tree-skeleton-check" />
+                    <span class="skeleton-pill file-tree-skeleton-thumb" />
+                    <span class="file-tree-skeleton-meta">
+                      <span class="skeleton-line" :class="item % 2 ? 'wide' : 'medium'" />
+                      <span class="skeleton-line short" />
+                    </span>
+                  </div>
+                </section>
+              </div>
               <div v-else-if="!activeFileTreeAttachments.length" class="file-tree-empty">当前对话暂无文件</div>
               <div v-else class="file-tree-groups">
                 <section class="file-tree-group">
