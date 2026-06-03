@@ -3403,41 +3403,41 @@ body,
 }
 
 .question-nav-rail {
-  display: grid;
-  gap: 0.52rem;
-  width: 1.85rem;
-  min-height: 2.55rem;
-  justify-items: center;
-  padding: 0.58rem 0.26rem;
+  display: flex;
+  width: 2.05rem;
+  min-height: auto;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  gap: 0.58rem;
+  padding: 0.18rem 0;
   pointer-events: auto;
   border-radius: 999px;
-  background: color-mix(in srgb, var(--surface-bg) 58%, transparent);
-  border: 1px solid color-mix(in srgb, var(--text) 8%, transparent);
-  box-shadow: 0 12px 30px rgba(0, 0, 0, 0.22);
-  backdrop-filter: blur(12px) saturate(118%);
-  -webkit-backdrop-filter: blur(12px) saturate(118%);
+  background: transparent;
+  border: 0;
+  box-shadow: none;
   transition:
-    background 220ms ease,
-    border-color 220ms ease,
+    opacity 220ms ease,
     transform 220ms var(--ease-out-soft);
 }
 
 .question-nav-panel:hover .question-nav-rail,
 .question-nav-panel.expanded .question-nav-rail {
-  background: color-mix(in srgb, var(--control-bg) 78%, transparent);
-  border-color: color-mix(in srgb, var(--bubble-bg) 22%, transparent);
-  transform: translateX(-0.12rem);
+  opacity: 0.98;
+  transform: none;
 }
 
 .question-nav-mark {
   display: block;
-  width: 0.52rem;
-  height: 0.13rem;
+  width: 0.72rem;
+  height: 0.16rem;
+  flex: 0 0 auto;
   border-radius: 999px;
-  background: color-mix(in srgb, var(--muted) 46%, transparent);
-  opacity: 0.72;
+  background: color-mix(in srgb, var(--muted) 58%, transparent);
+  opacity: 0.82;
   transition:
     width 180ms ease,
+    height 180ms ease,
     background 180ms ease,
     box-shadow 220ms ease,
     opacity 180ms ease,
@@ -3445,17 +3445,18 @@ body,
 }
 
 .question-nav-mark.active {
-  width: 1.05rem;
-  background: color-mix(in srgb, var(--bubble-bg) 82%, #61a5ff 18%);
-  box-shadow: 0 0 0 1px color-mix(in srgb, var(--bubble-bg) 20%, transparent), 0 0 14px color-mix(in srgb, var(--bubble-bg) 34%, transparent);
+  width: 1.35rem;
+  height: 0.2rem;
+  background: color-mix(in srgb, var(--bubble-bg) 88%, #5eb0ff 12%);
+  box-shadow: 0 0 0 1px color-mix(in srgb, var(--bubble-bg) 18%, transparent), 0 0 16px color-mix(in srgb, var(--bubble-bg) 38%, transparent);
   opacity: 1;
-  transform: scaleX(1.03);
+  transform: none;
 }
 
 .question-nav-card {
   position: absolute;
   top: 50%;
-  right: 2.45rem;
+  right: 2.5rem;
   width: min(20rem, calc(100vw - 7.5rem));
   max-height: min(24rem, calc(100vh - 13rem));
   overflow: hidden;
@@ -3536,7 +3537,7 @@ body,
 
 .question-nav-item.active {
   color: color-mix(in srgb, var(--bubble-bg) 84%, #d8e9ff 16%);
-  border-color: color-mix(in srgb, var(--bubble-bg) 22%, transparent);
+  border-color: color-mix(in srgb, var(--bubble-bg) 12%, transparent);
   background: color-mix(in srgb, var(--bubble-bg) 13%, transparent);
 }
 
