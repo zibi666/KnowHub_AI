@@ -70,6 +70,7 @@ const ATTACHMENT_IMAGE_MIN_COMPRESS_BYTES = 450 * 1024
 
 type ReasoningEffort = 'low' | 'medium' | 'high' | 'xhigh'
 type FileTreeGroup = 'images' | 'documents'
+type QuestionNavPlacement = 'center' | 'below-file-tree' | 'compact-corner'
 const reasoningOptions: Array<{ value: ReasoningEffort; label: string; hint: string }> = [
   { value: 'low', label: '低', hint: '最快，适合闲聊 / 简短答疑' },
   { value: 'medium', label: '中', hint: '默认。日常使用平衡速度与质量' },
@@ -176,12 +177,19 @@ const contextStats = ref({
 const messageScroller = ref<HTMLElement | null>(null)
 const chatFooter = ref<HTMLElement | null>(null)
 const questionNavScroll = ref<HTMLElement | null>(null)
+const questionNavPanel = ref<HTMLElement | null>(null)
+const fileTreePanel = ref<HTMLElement | null>(null)
 const showScrollToBottom = ref(false)
 const questionNavHasBefore = ref(false)
 const questionNavHasAfter = ref(false)
+const questionNavPlacement = ref<QuestionNavPlacement>('center')
+const questionNavTop = ref('50%')
+const questionNavMaxHeight = ref('24rem')
 let userHasScrolledUp = false
 let programmaticScrollUntil = 0
 let questionNavLockUntil = 0
+let questionNavLayoutFrame: number | null = null
+let fileTreeResizeObserver: ResizeObserver | null = null
 
 const themeMode = ref<ThemeMode>('dark')
 const bubbleColor = ref<BubbleColor>('blue')
@@ -2947,14 +2955,67 @@ function scheduleComposerResize() {
   })
 }
 
+function availableQuestionNavBottom() {
+  const footerRect = chatFooter.value?.getBoundingClientRect()
+  if (footerRect?.top) return Math.max(120, footerRect.top - 14)
+  return Math.max(120, window.innerHeight - 96)
+}
+
+function updateQuestionNavLayout() {
+  questionNavLayoutFrame = null
+  if (!fileTreePinned.value || !fileTreePanel.value) {
+    questionNavPlacement.value = 'center'
+    questionNavTop.value = '50%'
+    questionNavMaxHeight.value = '24rem'
+    void nextTick().then(() => {
+      void syncActiveQuestionNavRow()
+      updateQuestionNavOverflow()
+    })
+    return
+  }
+
+  const treeRect = fileTreePanel.value.getBoundingClientRect()
+  const bottomLimit = availableQuestionNavBottom()
+  const gap = 14
+  const belowTop = Math.max(treeRect.bottom + gap, 96)
+  const belowSpace = bottomLimit - belowTop
+  const rowHeight = 26
+  const rowGap = 12
+  const preferredRows = questionNavExpanded.value ? 6 : 5
+  const minimumBelowHeight = preferredRows * rowHeight + Math.max(0, preferredRows - 1) * rowGap + 10
+
+  if (belowSpace >= minimumBelowHeight) {
+    questionNavPlacement.value = 'below-file-tree'
+    questionNavTop.value = `${belowTop}px`
+    questionNavMaxHeight.value = `${Math.min(belowSpace, 320)}px`
+  } else {
+    const compactHeight = Math.max(112, Math.min(220, bottomLimit - 92))
+    questionNavPlacement.value = 'compact-corner'
+    questionNavTop.value = `${Math.max(92, bottomLimit - compactHeight)}px`
+    questionNavMaxHeight.value = `${compactHeight}px`
+  }
+
+  void nextTick().then(() => {
+    void syncActiveQuestionNavRow()
+    updateQuestionNavOverflow()
+  })
+}
+
+function scheduleQuestionNavLayout() {
+  if (questionNavLayoutFrame !== null) return
+  questionNavLayoutFrame = window.requestAnimationFrame(updateQuestionNavLayout)
+}
+
 watch(input, async () => {
   await nextTick()
   resizeComposerInput()
+  scheduleQuestionNavLayout()
 })
 
 watch(composerExpanded, async () => {
   await nextTick()
   resizeComposerInput()
+  scheduleQuestionNavLayout()
 })
 
 watch(
@@ -2983,8 +3044,36 @@ watch(
 )
 
 watch(questionNavExpanded, async () => {
+  scheduleQuestionNavLayout()
   await syncActiveQuestionNavRow()
   updateQuestionNavOverflow()
+})
+
+watch(fileTreePinned, async () => {
+  await nextTick()
+  scheduleQuestionNavLayout()
+})
+
+watch(
+  () => [
+    activeFileTreeAttachments.value.length,
+    fileTreeImages.value.length,
+    fileTreeDocuments.value.length,
+    fileTreeGroupOpen.value.images,
+    fileTreeGroupOpen.value.documents,
+    fileTreeLoading.value
+  ],
+  async () => {
+    await nextTick()
+    scheduleQuestionNavLayout()
+  }
+)
+
+watch(fileTreePanel, async (panel) => {
+  fileTreeResizeObserver?.disconnect()
+  if (panel && fileTreeResizeObserver) fileTreeResizeObserver.observe(panel)
+  await nextTick()
+  scheduleQuestionNavLayout()
 })
 
 function closeFloatingMenus() {
@@ -3006,7 +3095,11 @@ onMounted(async () => {
   }
   await nextTick()
   resizeComposerInput()
+  fileTreeResizeObserver = new ResizeObserver(() => scheduleQuestionNavLayout())
+  if (fileTreePanel.value) fileTreeResizeObserver.observe(fileTreePanel.value)
+  scheduleQuestionNavLayout()
   window.addEventListener('resize', scheduleComposerResize)
+  window.addEventListener('resize', scheduleQuestionNavLayout)
 })
 
 onUnmounted(() => {
@@ -3018,9 +3111,16 @@ onUnmounted(() => {
     window.cancelAnimationFrame(composerResizeFrame)
     composerResizeFrame = null
   }
+  if (questionNavLayoutFrame !== null) {
+    window.cancelAnimationFrame(questionNavLayoutFrame)
+    questionNavLayoutFrame = null
+  }
+  fileTreeResizeObserver?.disconnect()
+  fileTreeResizeObserver = null
   composerMeasureElement?.remove()
   composerMeasureElement = null
   window.removeEventListener('resize', scheduleComposerResize)
+  window.removeEventListener('resize', scheduleQuestionNavLayout)
 })
 </script>
 
@@ -3250,8 +3350,16 @@ onUnmounted(() => {
 
         <aside
           v-if="userQuestionNavItems.length > 0"
+          ref="questionNavPanel"
           class="question-nav-panel"
-          :class="{ expanded: questionNavExpanded, 'has-before': questionNavHasBefore, 'has-after': questionNavHasAfter }"
+          :class="{
+            expanded: questionNavExpanded,
+            'has-before': questionNavHasBefore,
+            'has-after': questionNavHasAfter,
+            'below-file-tree': questionNavPlacement === 'below-file-tree',
+            'compact-corner': questionNavPlacement === 'compact-corner'
+          }"
+          :style="{ '--question-nav-top': questionNavTop, '--question-nav-max-height': questionNavMaxHeight }"
           aria-label="当前对话问题导航"
           @mouseenter="questionNavExpanded = true"
           @mouseleave="questionNavExpanded = false"
@@ -3289,7 +3397,7 @@ onUnmounted(() => {
           </div>
         </aside>
 
-        <aside class="file-tree-panel" :class="{ collapsed: !fileTreePinned }" aria-label="对话文件树">
+        <aside ref="fileTreePanel" class="file-tree-panel" :class="{ collapsed: !fileTreePinned }" aria-label="对话文件树">
           <button class="file-tree-pin" type="button" :title="fileTreePinned ? '收起文件树' : '展开文件树'" @click="toggleFileTreePinned">
             <PinOff v-if="fileTreePinned" :size="17" />
             <Pin v-else :size="17" />
