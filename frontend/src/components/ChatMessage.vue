@@ -82,7 +82,8 @@ const streamingElapsed = computed(() => {
 })
 const finalElapsed = computed(() => {
   if (props.message.imageProgress) return ''
-  const elapsed = props.message.firstTokenSeconds ?? props.message.first_token_seconds ?? props.message.elapsedSeconds ?? props.message.elapsed_seconds
+  if (props.message.status === 'streaming') return ''
+  const elapsed = props.message.firstTokenSeconds ?? props.message.first_token_seconds ?? undefined
   return formatElapsedSeconds(elapsed)
 })
 const generatedImageProgressLabel = computed(() => {

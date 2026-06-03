@@ -351,10 +351,10 @@ function messageCreatedAtMs(message: Message) {
   return createdAt !== undefined ? Math.min(createdAt, Date.now()) : Date.now()
 }
 
-function currentRuntimeElapsed(message: Message) {
+function currentRuntimeElapsed(message: Message, live = message.status === 'streaming') {
   const startedAt = normalizeProgressTimestamp(message.startedAt ?? message.started_at)
   const baseElapsed = normalizeProgressElapsed(message.elapsedSeconds ?? message.elapsed_seconds) ?? 0
-  if (!startedAt) return baseElapsed
+  if (!live || !startedAt) return baseElapsed
   return Math.max(baseElapsed, Math.floor((Date.now() - startedAt) / 1000), 0)
 }
 
@@ -418,9 +418,10 @@ function applyRuntimeProgress(message: Message, data: any = {}) {
   const startedAt = existingStartedAt ?? incomingStartedAt ?? fallbackStartedAt ?? (message.status === 'streaming' ? now : undefined)
   const firstTokenSeconds = incomingFirstTokenSeconds(data)
   const incomingElapsed = normalizeProgressElapsed(data.elapsedSeconds ?? data.elapsed_seconds)
-  const existingElapsed = currentRuntimeElapsed(message)
+  const isStreamingProgress = message.status === 'streaming' || data.status === 'streaming'
+  const existingElapsed = currentRuntimeElapsed(message, isStreamingProgress)
   const elapsedSeconds =
-    message.status === 'streaming' || data.status === 'streaming'
+    isStreamingProgress
       ? Math.max(existingElapsed, incomingElapsed ?? 0)
       : Math.max(existingElapsed, incomingElapsed ?? normalizeProgressElapsed(message.elapsedSeconds ?? message.elapsed_seconds) ?? 0)
   if (firstTokenSeconds !== undefined) {
@@ -3098,64 +3099,76 @@ onUnmounted(() => {
             <PinOff v-if="fileTreePinned" :size="17" />
             <Pin v-else :size="17" />
           </button>
-          <template v-if="fileTreePinned">
-            <header class="file-tree-header">
-              <div>
-                <strong>文件树</strong>
-                <span>{{ activeFileTreeAttachments.length }} 个文件 · {{ selectedFileTreeAttachments.length }} 已选</span>
+          <Transition name="file-tree-body">
+            <div v-if="fileTreePinned" class="file-tree-body">
+              <header class="file-tree-header">
+                <div>
+                  <strong>文件树</strong>
+                  <span>{{ activeFileTreeAttachments.length }} 个文件 · {{ selectedFileTreeAttachments.length }} 已选</span>
+                </div>
+              </header>
+              <div v-if="fileTreeLoading" class="file-tree-empty">正在加载文件...</div>
+              <div v-else-if="!activeFileTreeAttachments.length" class="file-tree-empty">当前对话暂无文件</div>
+              <div v-else class="file-tree-groups">
+                <section class="file-tree-group">
+                  <button class="file-tree-group-head" type="button" @click="toggleFileTreeGroup('images')">
+                    <ImageIcon :size="16" />
+                    <span>图片</span>
+                    <em>{{ fileTreeImages.length }}</em>
+                  </button>
+                  <Transition name="file-tree-list">
+                    <div v-if="fileTreeGroupOpen.images" class="file-tree-list">
+                      <article v-for="item in fileTreeImages" :key="item.id" class="file-tree-item" :class="{ selected: item.selected }">
+                        <label class="file-tree-check" :title="item.selected ? '取消勾选' : '勾选引用'">
+                          <input type="checkbox" :checked="item.selected" @change="handleFileTreeSelectionChange(item, $event)" />
+                          <span aria-hidden="true" />
+                        </label>
+                        <button class="file-tree-thumb image" type="button" @click="openAttachmentPreview(fileTreeAttachmentForPreview(item))">
+                          <img :src="attachmentPreviewUrl(item.attachment.id)" :alt="fileTreeDisplayName(item)" />
+                        </button>
+                        <button class="file-tree-meta" type="button" @click="openAttachmentPreview(fileTreeAttachmentForPreview(item))">
+                          <strong>{{ fileTreeDisplayName(item) }}</strong>
+                          <span>{{ formatBytes(item.attachment.sizeBytes) }} · {{ parseStatusText[item.attachment.parseStatus] || item.attachment.parseStatus }}</span>
+                        </button>
+                        <div class="file-tree-actions">
+                          <button type="button" title="重命名" @click="openAttachmentRename(item)"><Pencil :size="14" /></button>
+                          <button type="button" title="移除" @click="requestRemoveFileTreeAttachment(item)"><Trash2 :size="14" /></button>
+                        </div>
+                      </article>
+                    </div>
+                  </Transition>
+                </section>
+                <section class="file-tree-group">
+                  <button class="file-tree-group-head" type="button" @click="toggleFileTreeGroup('documents')">
+                    <FileText :size="16" />
+                    <span>文档</span>
+                    <em>{{ fileTreeDocuments.length }}</em>
+                  </button>
+                  <Transition name="file-tree-list">
+                    <div v-if="fileTreeGroupOpen.documents" class="file-tree-list">
+                      <article v-for="item in fileTreeDocuments" :key="item.id" class="file-tree-item" :class="{ selected: item.selected }">
+                        <label class="file-tree-check" :title="item.selected ? '取消勾选' : '勾选引用'">
+                          <input type="checkbox" :checked="item.selected" @change="handleFileTreeSelectionChange(item, $event)" />
+                          <span aria-hidden="true" />
+                        </label>
+                        <button class="file-tree-thumb document" type="button" @click="openAttachmentPreview(fileTreeAttachmentForPreview(item))">
+                          <FileText :size="17" />
+                        </button>
+                        <button class="file-tree-meta" type="button" @click="openAttachmentPreview(fileTreeAttachmentForPreview(item))">
+                          <strong>{{ fileTreeDisplayName(item) }}</strong>
+                          <span>{{ attachmentKindLabel(item.attachment) }} · {{ parseStatusText[item.attachment.parseStatus] || item.attachment.parseStatus }}</span>
+                        </button>
+                        <div class="file-tree-actions">
+                          <button type="button" title="重命名" @click="openAttachmentRename(item)"><Pencil :size="14" /></button>
+                          <button type="button" title="移除" @click="requestRemoveFileTreeAttachment(item)"><Trash2 :size="14" /></button>
+                        </div>
+                      </article>
+                    </div>
+                  </Transition>
+                </section>
               </div>
-            </header>
-            <div v-if="fileTreeLoading" class="file-tree-empty">正在加载文件...</div>
-            <div v-else-if="!activeFileTreeAttachments.length" class="file-tree-empty">当前对话暂无文件</div>
-            <div v-else class="file-tree-groups">
-              <section class="file-tree-group">
-                <button class="file-tree-group-head" type="button" @click="toggleFileTreeGroup('images')">
-                  <ImageIcon :size="16" />
-                  <span>图片</span>
-                  <em>{{ fileTreeImages.length }}</em>
-                </button>
-                <div v-if="fileTreeGroupOpen.images" class="file-tree-list">
-                  <article v-for="item in fileTreeImages" :key="item.id" class="file-tree-item" :class="{ selected: item.selected }">
-                    <input type="checkbox" :checked="item.selected" @change="handleFileTreeSelectionChange(item, $event)" />
-                    <button class="file-tree-thumb image" type="button" @click="openAttachmentPreview(fileTreeAttachmentForPreview(item))">
-                      <img :src="attachmentPreviewUrl(item.attachment.id)" :alt="fileTreeDisplayName(item)" />
-                    </button>
-                    <button class="file-tree-meta" type="button" @click="openAttachmentPreview(fileTreeAttachmentForPreview(item))">
-                      <strong>{{ fileTreeDisplayName(item) }}</strong>
-                      <span>{{ formatBytes(item.attachment.sizeBytes) }} · {{ parseStatusText[item.attachment.parseStatus] || item.attachment.parseStatus }}</span>
-                    </button>
-                    <div class="file-tree-actions">
-                      <button type="button" title="重命名" @click="openAttachmentRename(item)"><Pencil :size="14" /></button>
-                      <button type="button" title="移除" @click="requestRemoveFileTreeAttachment(item)"><Trash2 :size="14" /></button>
-                    </div>
-                  </article>
-                </div>
-              </section>
-              <section class="file-tree-group">
-                <button class="file-tree-group-head" type="button" @click="toggleFileTreeGroup('documents')">
-                  <FileText :size="16" />
-                  <span>文档</span>
-                  <em>{{ fileTreeDocuments.length }}</em>
-                </button>
-                <div v-if="fileTreeGroupOpen.documents" class="file-tree-list">
-                  <article v-for="item in fileTreeDocuments" :key="item.id" class="file-tree-item" :class="{ selected: item.selected }">
-                    <input type="checkbox" :checked="item.selected" @change="handleFileTreeSelectionChange(item, $event)" />
-                    <button class="file-tree-thumb document" type="button" @click="openAttachmentPreview(fileTreeAttachmentForPreview(item))">
-                      <FileText :size="17" />
-                    </button>
-                    <button class="file-tree-meta" type="button" @click="openAttachmentPreview(fileTreeAttachmentForPreview(item))">
-                      <strong>{{ fileTreeDisplayName(item) }}</strong>
-                      <span>{{ attachmentKindLabel(item.attachment) }} · {{ parseStatusText[item.attachment.parseStatus] || item.attachment.parseStatus }}</span>
-                    </button>
-                    <div class="file-tree-actions">
-                      <button type="button" title="重命名" @click="openAttachmentRename(item)"><Pencil :size="14" /></button>
-                      <button type="button" title="移除" @click="requestRemoveFileTreeAttachment(item)"><Trash2 :size="14" /></button>
-                    </div>
-                  </article>
-                </div>
-              </section>
             </div>
-          </template>
+          </Transition>
         </aside>
       </div>
 
