@@ -175,7 +175,10 @@ const contextStats = ref({
 })
 const messageScroller = ref<HTMLElement | null>(null)
 const chatFooter = ref<HTMLElement | null>(null)
+const questionNavScroll = ref<HTMLElement | null>(null)
 const showScrollToBottom = ref(false)
+const questionNavHasBefore = ref(false)
+const questionNavHasAfter = ref(false)
 let userHasScrolledUp = false
 let programmaticScrollUntil = 0
 let questionNavLockUntil = 0
@@ -305,25 +308,6 @@ const userQuestionNavItems = computed(() =>
       }
     })
 )
-const activeQuestionIndex = computed(() => {
-  const index = userQuestionNavItems.value.findIndex((item) => item.id === activeQuestionMessageId.value)
-  return index >= 0 ? index : Math.max(0, userQuestionNavItems.value.length - 1)
-})
-const visibleQuestionNavItems = computed(() => {
-  const items = userQuestionNavItems.value
-  if (items.length <= 10) return items
-  const active = activeQuestionIndex.value
-  const start = Math.min(Math.max(active - 4, 0), items.length - 10)
-  return items.slice(start, start + 10)
-})
-const questionNavHasBefore = computed(() => {
-  const first = visibleQuestionNavItems.value[0]
-  return Boolean(first && userQuestionNavItems.value.findIndex((item) => item.id === first.id) > 0)
-})
-const questionNavHasAfter = computed(() => {
-  const last = visibleQuestionNavItems.value[visibleQuestionNavItems.value.length - 1]
-  return Boolean(last && userQuestionNavItems.value.findIndex((item) => item.id === last.id) < userQuestionNavItems.value.length - 1)
-})
 const recentSearchConversations = computed(() => conversations.value.slice(0, 10))
 const conversationUsage = computed(() => {
   const assistantMessages = messages.value.filter((message) => message.role === 'assistant')
@@ -1816,6 +1800,43 @@ function handleScrollerTouchStart() {
   pauseAutoScrollFromUserScroll()
 }
 
+function updateQuestionNavOverflow() {
+  const scroller = questionNavScroll.value
+  if (!scroller) {
+    questionNavHasBefore.value = false
+    questionNavHasAfter.value = false
+    return
+  }
+  questionNavHasBefore.value = scroller.scrollTop > 3
+  questionNavHasAfter.value = scroller.scrollTop + scroller.clientHeight < scroller.scrollHeight - 3
+}
+
+async function syncActiveQuestionNavRow() {
+  await nextTick()
+  const scroller = questionNavScroll.value
+  const activeId = activeQuestionMessageId.value
+  if (!scroller || !activeId) {
+    updateQuestionNavOverflow()
+    return
+  }
+  const row = scroller.querySelector<HTMLElement>(`[data-question-nav-id="${CSS.escape(activeId)}"]`)
+  if (!row) {
+    updateQuestionNavOverflow()
+    return
+  }
+  const rowTop = row.offsetTop
+  const rowBottom = rowTop + row.offsetHeight
+  const viewTop = scroller.scrollTop
+  const viewBottom = viewTop + scroller.clientHeight
+  if (rowTop < viewTop + 8) {
+    scroller.scrollTo({ top: Math.max(rowTop - 8, 0), behavior: questionNavExpanded.value ? 'smooth' : 'auto' })
+  } else if (rowBottom > viewBottom - 8) {
+    scroller.scrollTo({ top: rowBottom - scroller.clientHeight + 8, behavior: questionNavExpanded.value ? 'smooth' : 'auto' })
+  } else {
+    updateQuestionNavOverflow()
+  }
+}
+
 function refreshActiveQuestionFromScroll() {
   const scroller = messageScroller.value
   const items = userQuestionNavItems.value
@@ -1847,6 +1868,7 @@ function refreshActiveQuestionFromScroll() {
   }
   if (bestTop === Number.NEGATIVE_INFINITY) bestId = nearestId
   activeQuestionMessageId.value = bestId
+  void syncActiveQuestionNavRow()
 }
 
 function handleScrollerScroll() {
@@ -1886,6 +1908,7 @@ async function jumpToQuestion(messageId: string) {
   questionNavExpanded.value = true
   activeQuestionMessageId.value = messageId
   questionNavLockUntil = Date.now() + 1400
+  void syncActiveQuestionNavRow()
   await scrollToMessage(messageId, 'start')
   window.setTimeout(() => {
     questionNavLockUntil = 0
@@ -2948,12 +2971,21 @@ watch(
     if (!userQuestionNavItems.value.length) {
       activeQuestionMessageId.value = null
       questionNavExpanded.value = false
+      questionNavHasBefore.value = false
+      questionNavHasAfter.value = false
       return
     }
     await waitForMessageLayout()
     refreshActiveQuestionFromScroll()
+    await syncActiveQuestionNavRow()
+    updateQuestionNavOverflow()
   }
 )
+
+watch(questionNavExpanded, async () => {
+  await syncActiveQuestionNavRow()
+  updateQuestionNavOverflow()
+})
 
 function closeFloatingMenus() {
   settingsMenuOpen.value = false
@@ -3224,27 +3256,16 @@ onUnmounted(() => {
           @mouseenter="questionNavExpanded = true"
           @mouseleave="questionNavExpanded = false"
         >
-          <button
-            class="question-nav-rail"
-            type="button"
-            title="展开问题导航"
-            aria-label="展开问题导航"
-            @click="questionNavExpanded = !questionNavExpanded"
-          >
-            <span
-              v-for="item in visibleQuestionNavItems"
-              :key="`rail-${item.id}`"
-              class="question-nav-mark"
-              :class="{ active: item.id === activeQuestionMessageId }"
-              aria-hidden="true"
-            />
-          </button>
-          <Transition name="question-nav-card">
-            <div v-if="questionNavExpanded" class="question-nav-card">
-              <div class="question-nav-scroll">
+          <div class="question-nav-card">
+            <div ref="questionNavScroll" class="question-nav-scroll" @scroll="updateQuestionNavOverflow">
+              <div
+                v-for="item in userQuestionNavItems"
+                :key="item.id"
+                class="question-nav-row"
+                :class="{ active: item.id === activeQuestionMessageId }"
+                :data-question-nav-id="item.id"
+              >
                 <button
-                  v-for="item in userQuestionNavItems"
-                  :key="item.id"
                   class="question-nav-item"
                   :class="{ active: item.id === activeQuestionMessageId }"
                   type="button"
@@ -3252,11 +3273,20 @@ onUnmounted(() => {
                   @click="jumpToQuestion(item.id)"
                 >
                   <span>{{ item.index }}. {{ item.summary }}</span>
-                  <em aria-hidden="true" />
+                </button>
+                <button
+                  class="question-nav-rail"
+                  :class="{ active: item.id === activeQuestionMessageId }"
+                  type="button"
+                  :title="item.title"
+                  aria-label="跳转到该问题"
+                  @click="jumpToQuestion(item.id)"
+                >
+                  <span class="question-nav-mark" :class="{ active: item.id === activeQuestionMessageId }" aria-hidden="true" />
                 </button>
               </div>
             </div>
-          </Transition>
+          </div>
         </aside>
 
         <aside class="file-tree-panel" :class="{ collapsed: !fileTreePinned }" aria-label="对话文件树">
