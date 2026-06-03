@@ -4280,6 +4280,56 @@ body,
   padding: 0.4rem 2.4rem 0.4rem 0.55rem;
 }
 
+.composer-reference-group {
+  display: flex;
+  min-width: 100%;
+  flex-wrap: wrap;
+  gap: 0.45rem;
+}
+
+.composer-reference-chip {
+  display: inline-flex;
+  max-width: min(320px, 100%);
+  min-width: 0;
+  align-items: center;
+  gap: 0.42rem;
+  border: 1px solid color-mix(in srgb, var(--text) 9%, transparent);
+  border-radius: 999px;
+  background: color-mix(in srgb, var(--control-bg) 82%, transparent);
+  color: var(--muted);
+  padding: 0.32rem 0.58rem 0.32rem 0.42rem;
+  font-size: 0.8rem;
+  line-height: 1;
+}
+
+.composer-reference-chip.is-selected {
+  border-color: color-mix(in srgb, var(--bubble-bg) 55%, transparent);
+  background: color-mix(in srgb, var(--bubble-bg) 12%, var(--control-bg));
+  color: var(--text);
+}
+
+.composer-reference-chip input {
+  width: 0.9rem;
+  height: 0.9rem;
+  accent-color: var(--bubble-bg);
+  flex: 0 0 auto;
+}
+
+.composer-reference-preview {
+  display: inline-flex;
+  min-width: 0;
+  align-items: center;
+  gap: 0.35rem;
+  color: inherit;
+}
+
+.composer-reference-preview span {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
 .composer-attachment-preview {
   display: flex;
   width: 100%;

@@ -1,10 +1,13 @@
 import asyncio
 from dataclasses import dataclass
 
+import pytest
+from fastapi import HTTPException
+from sqlalchemy import select
 from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine
 
 from app.core.db import Base
-from app.models.entities import ApiKeyGroup, Conversation, Message, User, UserApiKey, UserQuota
+from app.models.entities import ApiKeyGroup, Attachment, Conversation, Message, MessageAttachment, User, UserApiKey, UserQuota
 from app.providers.openai_compatible import StreamEvent
 from app.security.crypto import encrypt_api_key
 from app.services import chat
@@ -230,6 +233,196 @@ def test_run_chat_generation_job_persists_empty_response_reason(monkeypatch):
             assert len(failed_events) == 1
             assert failed_events[0]["content"] == assistant.content
             assert failed_events[0]["message"] == assistant.content
+        finally:
+            await engine.dispose()
+
+    asyncio.run(run())
+
+
+def test_prepare_chat_messages_persists_referenced_document_without_new_upload(monkeypatch):
+    async def run():
+        engine, session_maker = await _make_session()
+        enqueued = {}
+
+        monkeypatch.setattr(chat, "SessionLocal", session_maker)
+
+        async def fake_resolve_api_key_for_model(db, user_id, model, quota=None, **kwargs):
+            return captured["api_key"]
+
+        async def fake_enqueue(user_id, prepared, payload):
+            enqueued["attachment_ids"] = list(payload.attachment_ids)
+            enqueued["referenced_attachment_ids"] = list(payload.referenced_attachment_ids)
+
+        async def fake_publish(*args, **kwargs):
+            return None
+
+        captured = {}
+        monkeypatch.setattr(chat, "resolve_api_key_for_model", fake_resolve_api_key_for_model)
+        monkeypatch.setattr(chat, "enqueue_chat_generation", fake_enqueue)
+        monkeypatch.setattr(chat, "publish_conversation_event", fake_publish)
+
+        try:
+            async with session_maker() as db:
+                group = ApiKeyGroup(name=api_keys.DEFAULT_CHAT_GROUP_NAME, purpose=api_keys.GROUP_PURPOSE_CHAT, is_system=True)
+                db.add(group)
+                await db.flush()
+                db.add(User(id="user-1", username="user-1", password_hash="hash", status="active"))
+                quota = UserQuota(user_id="user-1", max_storage_bytes=1024, default_model="gpt-5.5")
+                db.add(quota)
+                api_key = _key("user-1", group.id)
+                db.add(api_key)
+                conversation = Conversation(id="conv-1", user_id="user-1", title="测试")
+                first_user = Message(
+                    id="msg-user-1",
+                    user_id="user-1",
+                    conversation_id="conv-1",
+                    role="user",
+                    content="先读这个文档",
+                    status="completed",
+                )
+                first_assistant = Message(
+                    id="msg-assistant-1",
+                    user_id="user-1",
+                    conversation_id="conv-1",
+                    parent_message_id="msg-user-1",
+                    role="assistant",
+                    content="已阅读",
+                    status="completed",
+                    model="gpt-5.5",
+                )
+                attachment = Attachment(
+                    id="att-1",
+                    user_id="user-1",
+                    filename="notes.txt",
+                    sha256="sha",
+                    sha256_active_key="sha",
+                    mime_sniffed="text/plain",
+                    size_bytes=100,
+                    cos_key="notes.txt",
+                    parse_status="success",
+                    context_text="文档内容",
+                    context_text_tokens=4,
+                )
+                db.add_all([conversation, first_user, first_assistant, attachment])
+                await db.commit()
+                captured["api_key"] = api_key
+
+            prepared = await chat.create_queued_chat(
+                "user-1",
+                chat.SendMessageRequest(content="继续追问文档", model="gpt-5.5", referenced_attachment_ids=["att-1"]),
+                conversation_id="conv-1",
+            )
+
+            async with session_maker() as db:
+                links = (
+                    await db.execute(
+                        select(MessageAttachment).where(MessageAttachment.message_id == prepared.user_message_id)
+                    )
+                ).scalars().all()
+                assert [link.attachment_id for link in links] == ["att-1"]
+
+            assert enqueued["attachment_ids"] == []
+            assert enqueued["referenced_attachment_ids"] == ["att-1"]
+        finally:
+            await engine.dispose()
+
+    asyncio.run(run())
+
+
+def test_prepare_chat_messages_rejects_missing_referenced_document(monkeypatch):
+    async def run():
+        engine, session_maker = await _make_session()
+        captured = {}
+
+        monkeypatch.setattr(chat, "SessionLocal", session_maker)
+
+        async def fake_resolve_api_key_for_model(db, user_id, model, quota=None, **kwargs):
+            return captured["api_key"]
+
+        monkeypatch.setattr(chat, "resolve_api_key_for_model", fake_resolve_api_key_for_model)
+
+        try:
+            async with session_maker() as db:
+                group = ApiKeyGroup(name=api_keys.DEFAULT_CHAT_GROUP_NAME, purpose=api_keys.GROUP_PURPOSE_CHAT, is_system=True)
+                db.add(group)
+                await db.flush()
+                db.add(User(id="user-1", username="user-1", password_hash="hash", status="active"))
+                quota = UserQuota(user_id="user-1", max_storage_bytes=1024, default_model="gpt-5.5")
+                db.add(quota)
+                api_key = _key("user-1", group.id)
+                db.add(api_key)
+                db.add(Conversation(id="conv-1", user_id="user-1", title="测试"))
+                await db.commit()
+                captured["api_key"] = api_key
+
+            with pytest.raises(HTTPException) as exc_info:
+                await chat.prepare_chat_messages(
+                    "user-1",
+                    chat.SendMessageRequest(content="继续追问文档", model="gpt-5.5", referenced_attachment_ids=["missing-att"]),
+                    conversation_id="conv-1",
+                )
+
+            assert exc_info.value.status_code == 400
+            assert exc_info.value.detail == {"code": "ATTACHMENT_NOT_FOUND", "message": "引用的文档不存在或已被删除"}
+        finally:
+            await engine.dispose()
+
+    asyncio.run(run())
+
+
+def test_prepare_chat_messages_rejects_unparsed_referenced_document(monkeypatch):
+    async def run():
+        engine, session_maker = await _make_session()
+        captured = {}
+
+        monkeypatch.setattr(chat, "SessionLocal", session_maker)
+
+        async def fake_resolve_api_key_for_model(db, user_id, model, quota=None, **kwargs):
+            return captured["api_key"]
+
+        monkeypatch.setattr(chat, "resolve_api_key_for_model", fake_resolve_api_key_for_model)
+
+        try:
+            async with session_maker() as db:
+                group = ApiKeyGroup(name=api_keys.DEFAULT_CHAT_GROUP_NAME, purpose=api_keys.GROUP_PURPOSE_CHAT, is_system=True)
+                db.add(group)
+                await db.flush()
+                db.add(User(id="user-1", username="user-1", password_hash="hash", status="active"))
+                quota = UserQuota(user_id="user-1", max_storage_bytes=1024, default_model="gpt-5.5")
+                db.add(quota)
+                api_key = _key("user-1", group.id)
+                db.add(api_key)
+                conversation = Conversation(id="conv-1", user_id="user-1", title="测试")
+                attachment = Attachment(
+                    id="att-processing",
+                    user_id="user-1",
+                    filename="notes.txt",
+                    sha256="sha-processing",
+                    sha256_active_key="sha-processing",
+                    mime_sniffed="text/plain",
+                    size_bytes=100,
+                    cos_key="notes.txt",
+                    parse_status="processing",
+                    context_text="",
+                    context_text_tokens=0,
+                )
+                db.add_all([conversation, attachment])
+                await db.commit()
+                captured["api_key"] = api_key
+
+            with pytest.raises(HTTPException) as exc_info:
+                await chat.prepare_chat_messages(
+                    "user-1",
+                    chat.SendMessageRequest(
+                        content="继续追问文档",
+                        model="gpt-5.5",
+                        referenced_attachment_ids=["att-processing"],
+                    ),
+                    conversation_id="conv-1",
+                )
+
+            assert exc_info.value.status_code == 400
+            assert exc_info.value.detail == {"code": "ATTACHMENT_NOT_READY", "message": "notes.txt 尚未解析完成"}
         finally:
             await engine.dispose()
 

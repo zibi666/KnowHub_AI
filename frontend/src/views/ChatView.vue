@@ -61,12 +61,14 @@ const SIDEBAR_STORAGE_KEY = 'private-gpt-sidebar-collapsed'
 const WELCOME_STORAGE_KEY = 'private-gpt-welcome-message'
 const WELCOME_SIZE_STORAGE_KEY = 'private-gpt-welcome-font-size'
 const CURRENT_CONVERSATION_STORAGE_KEY = 'private-gpt-current-conversation'
+const DOCUMENT_REFERENCE_STORAGE_KEY = 'private-gpt-document-references'
 const IMAGE_FINALIZATION_MIN_MS = 800
 const ATTACHMENT_IMAGE_MAX_EDGE = 1920
 const ATTACHMENT_IMAGE_QUALITY = 0.82
 const ATTACHMENT_IMAGE_MIN_COMPRESS_BYTES = 450 * 1024
 
 type ReasoningEffort = 'low' | 'medium' | 'high' | 'xhigh'
+type DocumentReferenceSelection = Record<string, Record<string, boolean>>
 const reasoningOptions: Array<{ value: ReasoningEffort; label: string; hint: string }> = [
   { value: 'low', label: '低', hint: '最快，适合闲聊 / 简短答疑' },
   { value: 'medium', label: '中', hint: '默认。日常使用平衡速度与质量' },
@@ -128,6 +130,7 @@ const selectedModel = ref('')
 const reasoningEffort = ref<ReasoningEffort>('medium')
 const streaming = ref(false)
 const pendingAttachments = ref<Attachment[]>([])
+const documentReferenceSelection = ref<DocumentReferenceSelection>({})
 const uploadingAttachmentNames = ref<string[]>([])
 const composerDragActive = ref(false)
 const composerCompact = ref(true)
@@ -266,6 +269,25 @@ const imageFinalizationTimers = new Map<string, number>()
 
 const currentConversation = computed(() => conversations.value.find((item) => item.id === currentId.value))
 const currentConversationStreaming = computed(() => messages.value.some((message) => message.status === 'streaming'))
+const availableReferenceDocuments = computed(() => {
+  const byId = new Map<string, Attachment>()
+  for (const message of messages.value) {
+    for (const attachment of message.attachments || []) {
+      if (isReferenceDocument(attachment) && !byId.has(attachment.id)) {
+        byId.set(attachment.id, attachment)
+      }
+    }
+  }
+  for (const attachment of pendingAttachments.value) {
+    if (isReferenceDocument(attachment) && !byId.has(attachment.id)) {
+      byId.set(attachment.id, attachment)
+    }
+  }
+  return Array.from(byId.values())
+})
+const selectedReferenceDocuments = computed(() =>
+  availableReferenceDocuments.value.filter((attachment) => documentReferenceEnabled(attachment.id))
+)
 const recentSearchConversations = computed(() => conversations.value.slice(0, 10))
 const conversationUsage = computed(() => {
   const assistantMessages = messages.value.filter((message) => message.role === 'assistant')
@@ -286,6 +308,7 @@ const canUseCompactComposer = computed(
     isEmptyChat.value &&
     !composerExpanded.value &&
     pendingAttachments.value.length === 0 &&
+    availableReferenceDocuments.value.length === 0 &&
     uploadingAttachmentNames.value.length === 0
 )
 const composerClasses = computed(() => ({
@@ -297,6 +320,62 @@ const composerClasses = computed(() => ({
 
 function isImageAttachment(item: Attachment) {
   return item.mimeSniffed?.startsWith('image/')
+}
+
+function isReferenceDocument(item: Attachment) {
+  return !isImageAttachment(item) && item.parseStatus === 'success'
+}
+
+function currentReferenceSelection() {
+  const conversationId = currentId.value || 'new'
+  return documentReferenceSelection.value[conversationId] || {}
+}
+
+function documentReferenceEnabled(id: string) {
+  return currentReferenceSelection()[id] !== false
+}
+
+function saveDocumentReferenceSelection() {
+  window.localStorage.setItem(DOCUMENT_REFERENCE_STORAGE_KEY, JSON.stringify(documentReferenceSelection.value))
+}
+
+function loadDocumentReferenceSelection() {
+  try {
+    const raw = window.localStorage.getItem(DOCUMENT_REFERENCE_STORAGE_KEY)
+    const parsed = raw ? JSON.parse(raw) : {}
+    if (parsed && typeof parsed === 'object') {
+      documentReferenceSelection.value = parsed as DocumentReferenceSelection
+    }
+  } catch {
+    documentReferenceSelection.value = {}
+  }
+}
+
+function setDocumentReferenceEnabled(id: string, enabled: boolean) {
+  const conversationId = currentId.value || 'new'
+  documentReferenceSelection.value = {
+    ...documentReferenceSelection.value,
+    [conversationId]: {
+      ...(documentReferenceSelection.value[conversationId] || {}),
+      [id]: enabled
+    }
+  }
+  saveDocumentReferenceSelection()
+}
+
+function handleDocumentReferenceToggle(id: string, event: Event) {
+  const input = event.target as HTMLInputElement | null
+  setDocumentReferenceEnabled(id, input?.checked === true)
+}
+
+function syncNewConversationDocumentSelection(conversationId: string) {
+  const draft = documentReferenceSelection.value.new
+  if (!draft || documentReferenceSelection.value[conversationId]) return
+  documentReferenceSelection.value = {
+    ...documentReferenceSelection.value,
+    [conversationId]: { ...draft }
+  }
+  saveDocumentReferenceSelection()
 }
 
 function selectedModelSupportsVision() {
@@ -2246,6 +2325,9 @@ async function uploadAttachmentFile(file: File) {
       body: JSON.stringify({ uploadId: presign.uploadId, filename: uploadFile.name, contentType: uploadFile.type })
     })
     pendingAttachments.value.push(attachment)
+    if (isReferenceDocument(attachment)) {
+      setDocumentReferenceEnabled(attachment.id, true)
+    }
   } catch (err) {
     error.value = err instanceof Error ? err.message : '附件上传失败'
   } finally {
@@ -2331,6 +2413,9 @@ async function send() {
   const userText = input.value
   const outgoingAttachments = [...pendingAttachments.value]
   const attachmentIds = pendingAttachments.value.map((item) => item.id)
+  const referencedAttachmentIds = Array.from(
+    new Set([...selectedReferenceDocuments.value.map((item) => item.id), ...attachmentIds])
+  )
   input.value = ''
   pendingAttachments.value = []
   const draftConversationId = currentId.value || 'new'
@@ -2375,7 +2460,7 @@ async function send() {
         content: userText,
         model: selectedModel.value,
         attachmentIds,
-        referencedAttachmentIds: attachmentIds,
+        referencedAttachmentIds,
         reasoningEffort: reasoningEffort.value
       })
     })
@@ -2383,6 +2468,7 @@ async function send() {
     const userMessage = result.userMessage || result.user_message
     const assistantMessage = result.assistantMessage || result.assistant_message
     if (newConversationId) {
+      syncNewConversationDocumentSelection(newConversationId)
       currentId.value = newConversationId
       window.localStorage.setItem(CURRENT_CONVERSATION_STORAGE_KEY, newConversationId)
     }
@@ -2558,6 +2644,7 @@ watch(searchQuery, () => {
 
 onMounted(async () => {
   loadAppearance()
+  loadDocumentReferenceSelection()
   await Promise.all([loadModels(), loadConversations()])
   const storedConversationId = window.localStorage.getItem(CURRENT_CONVERSATION_STORAGE_KEY)
   if (storedConversationId && conversations.value.some((conversation) => conversation.id === storedConversationId)) {
@@ -2833,13 +2920,31 @@ onUnmounted(() => {
           @dragleave="handleComposerDragLeave"
           @drop="handleComposerDrop"
         >
-          <div v-if="uploadingAttachmentNames.length || pendingAttachments.length" class="composer-attachments">
+          <div v-if="uploadingAttachmentNames.length || pendingAttachments.length || availableReferenceDocuments.length" class="composer-attachments">
             <div v-for="name in uploadingAttachmentNames" :key="`uploading-${name}`" class="composer-attachment-card is-uploading">
               <div class="composer-attachment-loading" aria-hidden="true" />
               <div class="composer-attachment-meta">
                 <strong>{{ name }}</strong>
                 <span>上传中</span>
               </div>
+            </div>
+            <div v-if="availableReferenceDocuments.length" class="composer-reference-group" aria-label="引用文档">
+              <label
+                v-for="item in availableReferenceDocuments"
+                :key="`reference-${item.id}`"
+                class="composer-reference-chip"
+                :class="{ 'is-selected': documentReferenceEnabled(item.id) }"
+              >
+                <input
+                  type="checkbox"
+                  :checked="documentReferenceEnabled(item.id)"
+                  @change="handleDocumentReferenceToggle(item.id, $event)"
+                />
+                <button class="composer-reference-preview" type="button" :title="`预览：${item.filename}`" @click.prevent="openAttachmentPreview(item)">
+                  <FileText :size="15" />
+                  <span>{{ item.filename }}</span>
+                </button>
+              </label>
             </div>
             <div
               v-for="item in pendingAttachments"

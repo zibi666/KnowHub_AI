@@ -86,6 +86,18 @@ def empty_chat_response_message(model: str | None = None, base_url: str | None =
     return f"{EMPTY_CHAT_RESPONSE_MESSAGE}（{'，'.join(details)}）"
 
 
+def unique_ids(ids: list[str] | None) -> list[str]:
+    result: list[str] = []
+    seen: set[str] = set()
+    for item in ids or []:
+        candidate = (item or "").strip()
+        if not candidate or candidate in seen:
+            continue
+        result.append(candidate)
+        seen.add(candidate)
+    return result
+
+
 def sse_line(event: str, data: dict) -> bytes:
     return f"event: {event}\ndata: {json.dumps(data, ensure_ascii=False)}\n\n".encode("utf-8")
 
@@ -439,6 +451,66 @@ async def _latest_completed_message_id(db, user_id: str, conversation_id: str) -
     return branch[-1].id if branch else None
 
 
+async def resolve_message_attachments(
+    db,
+    user_id: str,
+    payload: SendMessageRequest,
+    model: str,
+    settings,
+) -> tuple[list[Attachment], list[Attachment]]:
+    upload_ids = unique_ids(payload.attachment_ids)
+    reference_ids = unique_ids([*unique_ids(payload.referenced_attachment_ids), *upload_ids])
+    lookup_ids = unique_ids([*upload_ids, *reference_ids])
+    if not lookup_ids:
+        return [], []
+
+    rows = (
+        await db.execute(
+            select(Attachment).where(
+                Attachment.user_id == user_id,
+                Attachment.id.in_(lookup_ids),
+                Attachment.deleted_at.is_(None),
+            )
+        )
+    ).scalars().all()
+    rows_by_id = {attachment.id: attachment for attachment in rows}
+    missing_ids = [attachment_id for attachment_id in lookup_ids if attachment_id not in rows_by_id]
+    if missing_ids:
+        raise HTTPException(
+            status_code=400,
+            detail={"code": "ATTACHMENT_NOT_FOUND", "message": "引用的文档不存在或已被删除"},
+        )
+
+    for attachment_id in lookup_ids:
+        attachment = rows_by_id[attachment_id]
+        if attachment.parse_status != "success":
+            raise HTTPException(
+                status_code=400,
+                detail={"code": "ATTACHMENT_NOT_READY", "message": f"{attachment.filename} 尚未解析完成"},
+            )
+
+    upload_attachments = [rows_by_id[attachment_id] for attachment_id in upload_ids]
+    referenced_attachments = [rows_by_id[attachment_id] for attachment_id in reference_ids]
+
+    uploaded_image_count = sum(1 for attachment in upload_attachments if is_image_attachment(attachment))
+    referenced_image_count = sum(1 for attachment in referenced_attachments if is_image_attachment(attachment))
+    if uploaded_image_count and not model_supports_vision(model):
+        raise HTTPException(
+            status_code=400,
+            detail={
+                "code": "VISION_MODEL_REQUIRED",
+                "message": "当前模型不支持图片理解，请切换到支持视觉的模型后再发送图片。",
+            },
+        )
+    if referenced_image_count > settings.vision_image_max_count:
+        raise HTTPException(
+            status_code=400,
+            detail={"code": "QUOTA_EXCEEDED", "message": f"每次最多发送 {settings.vision_image_max_count} 张图片"},
+        )
+
+    return upload_attachments, referenced_attachments
+
+
 @dataclass
 class PreparedChat:
     conversation_id: str
@@ -501,38 +573,15 @@ async def prepare_chat_messages(user_id: str, payload: SendMessageRequest, conve
             if not conversation or conversation.user_id != user_id or conversation.deleted_at is not None:
                 raise HTTPException(status_code=403, detail={"code": "FORBIDDEN", "message": "会话不存在"})
 
-        attachments = []
-        if payload.attachment_ids:
-            rows = (
-                await db.execute(
-                    select(Attachment).where(
-                        Attachment.user_id == user_id,
-                        Attachment.id.in_(payload.attachment_ids),
-                        Attachment.deleted_at.is_(None),
-                    )
-                )
-            ).scalars().all()
-            image_count = sum(1 for attachment in rows if is_image_attachment(attachment))
-            if image_count and not model_supports_vision(model):
-                raise HTTPException(
-                    status_code=400,
-                    detail={
-                        "code": "VISION_MODEL_REQUIRED",
-                        "message": "当前模型不支持图片理解，请切换到支持视觉的模型后再发送图片。",
-                    },
-                )
-            if image_count > settings.vision_image_max_count:
-                raise HTTPException(
-                    status_code=400,
-                    detail={"code": "QUOTA_EXCEEDED", "message": f"每次最多发送 {settings.vision_image_max_count} 张图片"},
-                )
-            for attachment in rows:
-                if attachment.parse_status != "success":
-                    raise HTTPException(
-                        status_code=400,
-                        detail={"code": "ATTACHMENT_NOT_READY", "message": f"{attachment.filename} 尚未解析完成"},
-                    )
-            attachments = rows
+        upload_attachments, referenced_attachments = await resolve_message_attachments(
+            db,
+            user_id,
+            payload,
+            model,
+            settings,
+        )
+        payload.attachment_ids = [attachment.id for attachment in upload_attachments]
+        payload.referenced_attachment_ids = [attachment.id for attachment in referenced_attachments]
 
         parent_message_id = await _latest_completed_message_id(db, user_id, conversation_id)
         if payload.retry_of_message_id:
@@ -558,7 +607,7 @@ async def prepare_chat_messages(user_id: str, payload: SendMessageRequest, conve
         )
         db.add(user_message)
         await db.flush()
-        for attachment in attachments:
+        for attachment in referenced_attachments:
             db.add(MessageAttachment(message_id=user_message.id, attachment_id=attachment.id))
 
         assistant = Message(
@@ -720,46 +769,27 @@ async def stream_chat(user_id: str, payload: SendMessageRequest, conversation_id
                 yield json_line("error", {"code": "FORBIDDEN", "message": "会话不存在", "retryable": False})
                 return
 
-        attachments = []
-        if payload.attachment_ids:
-            rows = (
-                await db.execute(
-                    select(Attachment).where(
-                        Attachment.user_id == user_id,
-                        Attachment.id.in_(payload.attachment_ids),
-                        Attachment.deleted_at.is_(None),
-                    )
-                )
-            ).scalars().all()
-            image_count = sum(1 for attachment in rows if is_image_attachment(attachment))
-            if image_count and not model_supports_vision(model):
-                yield json_line(
-                    "error",
-                    {
-                        "code": "VISION_MODEL_REQUIRED",
-                        "message": "当前模型不支持图片理解，请切换到支持视觉的模型后再发送图片。",
-                        "retryable": False,
-                    },
-                )
-                return
-            if image_count > settings.vision_image_max_count:
-                yield json_line(
-                    "error",
-                    {
-                        "code": "QUOTA_EXCEEDED",
-                        "message": f"每次最多发送 {settings.vision_image_max_count} 张图片",
-                        "retryable": False,
-                    },
-                )
-                return
-            for attachment in rows:
-                if attachment.parse_status != "success":
-                    yield json_line(
-                        "error",
-                        {"code": "ATTACHMENT_NOT_READY", "message": f"{attachment.filename} 尚未解析完成", "retryable": True},
-                    )
-                    return
-            attachments = rows
+        try:
+            upload_attachments, referenced_attachments = await resolve_message_attachments(
+                db,
+                user_id,
+                payload,
+                model,
+                settings,
+            )
+        except HTTPException as exc:
+            detail = exc.detail if isinstance(exc.detail, dict) else {}
+            yield json_line(
+                "error",
+                {
+                    "code": detail.get("code", "ATTACHMENT_ERROR"),
+                    "message": detail.get("message", str(exc.detail)),
+                    "retryable": detail.get("code") == "ATTACHMENT_NOT_READY",
+                },
+            )
+            return
+        payload.attachment_ids = [attachment.id for attachment in upload_attachments]
+        payload.referenced_attachment_ids = [attachment.id for attachment in referenced_attachments]
 
         parent_message_id = await _latest_completed_message_id(db, user_id, conversation_id)
         if payload.retry_of_message_id:
@@ -786,7 +816,7 @@ async def stream_chat(user_id: str, payload: SendMessageRequest, conversation_id
         db.add(user_message)
         await db.flush()
         user_message_id = user_message.id
-        for attachment in attachments:
+        for attachment in referenced_attachments:
             db.add(MessageAttachment(message_id=user_message.id, attachment_id=attachment.id))
 
         assistant = Message(
@@ -864,20 +894,20 @@ async def stream_chat(user_id: str, payload: SendMessageRequest, conversation_id
     try:
         context_started = time.perf_counter()
         async with SessionLocal() as db:
+            referenced_ids = unique_ids(payload.referenced_attachment_ids)
             context_bundle = await build_context_bundle(
                 db,
                 user_id,
                 conversation_id,
                 payload.content,
-                payload.referenced_attachment_ids or payload.attachment_ids,
+                referenced_ids,
                 retry_of_message_id=payload.retry_of_message_id,
                 current_message_id=user_message_id,
                 model=model,
             )
             context = context_bundle.messages
             image_attachments: list[Attachment] = []
-            if payload.referenced_attachment_ids or payload.attachment_ids:
-                referenced_ids = payload.referenced_attachment_ids or payload.attachment_ids
+            if referenced_ids:
                 rows = (
                     await db.execute(
                         select(Attachment).where(
@@ -1869,12 +1899,13 @@ async def run_chat_generation_job(
         settings = get_settings()
         async with SessionLocal() as db:
             quota = await db.get(UserQuota, user_id)
+            referenced_ids = unique_ids(payload.referenced_attachment_ids)
             context_bundle = await build_context_bundle(
                 db,
                 user_id,
                 conversation_id,
                 payload.content,
-                payload.referenced_attachment_ids or payload.attachment_ids,
+                referenced_ids,
                 retry_of_message_id=payload.retry_of_message_id,
                 current_message_id=user_message_id,
                 model=model,
@@ -1882,8 +1913,7 @@ async def run_chat_generation_job(
             context = context_bundle.messages
             context_event = context_bundle.event_data()
             image_attachments: list[Attachment] = []
-            if payload.referenced_attachment_ids or payload.attachment_ids:
-                referenced_ids = payload.referenced_attachment_ids or payload.attachment_ids
+            if referenced_ids:
                 rows = (
                     await db.execute(
                         select(Attachment).where(
