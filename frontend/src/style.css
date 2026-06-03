@@ -3403,9 +3403,9 @@ body,
     transform 280ms var(--ease-out-soft);
 }
 
-.question-nav-panel.below-file-tree,
 .question-nav-panel.compact-corner {
-  top: var(--question-nav-top);
+  top: auto;
+  bottom: 7.2rem;
   transform: none;
 }
 
@@ -3416,7 +3416,7 @@ body,
 .question-nav-card {
   position: relative;
   width: 2.2rem;
-  max-height: min(var(--question-nav-max-height, 24rem), calc(100vh - 13rem));
+  max-height: min(24rem, calc(100vh - 13rem));
   overflow: visible;
   pointer-events: auto;
   border: 0;
@@ -3430,10 +3430,6 @@ body,
 
 .question-nav-panel.expanded .question-nav-card {
   width: min(22.5rem, calc(100vw - 7.5rem));
-}
-
-.question-nav-panel.below-file-tree.expanded .question-nav-card {
-  width: min(20.5rem, calc(100vw - 2rem));
 }
 
 .question-nav-panel.compact-corner .question-nav-card {
@@ -3474,7 +3470,7 @@ body,
 
 .question-nav-scroll {
   display: flex;
-  max-height: min(var(--question-nav-max-height, 24rem), calc(100vh - 13rem));
+  max-height: min(24rem, calc(100vh - 13rem));
   flex-direction: column;
   gap: 0.72rem;
   overflow-y: auto;
@@ -3616,18 +3612,18 @@ body,
   top: 5.35rem;
   right: 1rem;
   z-index: 8;
-  width: min(20.5rem, calc(100vw - 2rem));
-  max-height: min(72vh, calc(100vh - 10.5rem));
-  min-width: min(20.5rem, calc(100vw - 2rem));
+  width: min(17.5rem, calc(100vw - 2rem));
+  max-height: min(24rem, calc(100vh - 11rem));
+  min-width: min(17.5rem, calc(100vw - 2rem));
   pointer-events: none;
   contain: layout paint;
   transform-origin: top right;
 }
 
 .file-tree-panel.collapsed {
-  width: min(20.5rem, calc(100vw - 2rem));
+  width: min(17.5rem, calc(100vw - 2rem));
   height: 2.85rem;
-  max-height: min(72vh, calc(100vh - 10.5rem));
+  max-height: min(24rem, calc(100vh - 11rem));
 }
 
 .file-tree-pin {
@@ -3661,7 +3657,7 @@ body,
 .file-tree-body {
   pointer-events: auto;
   min-height: 0;
-  max-height: min(72vh, calc(100vh - 10.5rem));
+  max-height: min(24rem, calc(100vh - 11rem));
   overflow: hidden;
   border: 1px solid color-mix(in srgb, var(--text) 11%, transparent);
   border-radius: 8px;
@@ -3727,7 +3723,7 @@ body,
 .file-tree-skeleton {
   display: grid;
   gap: 0.62rem;
-  max-height: min(58vh, calc(100vh - 15rem));
+  max-height: min(18rem, calc(100vh - 15rem));
   overflow: hidden;
   padding: 0 0.58rem 0.72rem;
 }
@@ -3797,7 +3793,7 @@ body,
 .file-tree-groups {
   display: grid;
   gap: 0.58rem;
-  max-height: min(58vh, calc(100vh - 15rem));
+  max-height: min(18rem, calc(100vh - 15rem));
   overflow-y: auto;
   overscroll-behavior: contain;
   padding: 0 0.58rem 0.72rem;
@@ -5898,18 +5894,18 @@ body,
   .file-tree-panel {
     top: 4.8rem;
     right: 0.7rem;
-    width: min(20rem, calc(100vw - 1.4rem));
-    min-width: min(20rem, calc(100vw - 1.4rem));
-    max-height: min(70vh, calc(100vh - 9rem));
+    width: min(17.5rem, calc(100vw - 1.4rem));
+    min-width: min(17.5rem, calc(100vw - 1.4rem));
+    max-height: min(24rem, calc(100vh - 9rem));
   }
 
   .file-tree-panel.collapsed {
-    width: min(20rem, calc(100vw - 1.4rem));
+    width: min(17.5rem, calc(100vw - 1.4rem));
     right: 0.7rem;
   }
 
   .file-tree-body {
-    max-height: min(70vh, calc(100vh - 9rem));
+    max-height: min(24rem, calc(100vh - 9rem));
   }
 
   .chat-sidebar {
