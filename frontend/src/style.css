@@ -3369,9 +3369,12 @@ body,
 }
 
 .chat-surface {
+  flex: 1 1 auto;
+  min-height: 0;
   background: var(--surface-bg);
   padding-top: 5.2rem !important;
   padding-bottom: 2.4rem !important;
+  overflow-y: auto;
   scrollbar-color: var(--scroll-thumb) transparent;
   opacity: 1;
   transition: opacity 260ms ease;
@@ -3380,8 +3383,10 @@ body,
 .chat-workspace {
   position: relative;
   z-index: 1;
-  display: block;
+  display: flex;
+  flex-direction: column;
   min-height: 0;
+  width: 100%;
   flex: 1 1 auto;
 }
 
