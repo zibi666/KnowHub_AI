@@ -179,9 +179,11 @@ const questionNavScroll = ref<HTMLElement | null>(null)
 const showScrollToBottom = ref(false)
 const questionNavHasBefore = ref(false)
 const questionNavHasAfter = ref(false)
+const questionNavShortConversation = ref(false)
 let userHasScrolledUp = false
 let programmaticScrollUntil = 0
 let questionNavLockUntil = 0
+let questionNavLockedMessageId: string | null = null
 
 const themeMode = ref<ThemeMode>('dark')
 const bubbleColor = ref<BubbleColor>('blue')
@@ -286,6 +288,8 @@ let imagePollingTimer: number | null = null
 let conversationEventSource: EventSource | null = null
 let conversationEventSourceId: string | null = null
 const imageFinalizationTimers = new Map<string, number>()
+const QUESTION_NAV_EDGE_THRESHOLD = 2
+const QUESTION_NAV_SHORT_SCROLL_RANGE = 220
 
 const currentConversation = computed(() => conversations.value.find((item) => item.id === currentId.value))
 const currentConversationStreaming = computed(() => messages.value.some((message) => message.status === 'streaming'))
@@ -1188,6 +1192,10 @@ function sortConversationsByUpdatedAt(items: Conversation[]) {
   return [...items].sort((a, b) => conversationUpdatedAtMs(b) - conversationUpdatedAtMs(a))
 }
 
+function lastVisibleConversation() {
+  return conversations.value[conversations.value.length - 1]
+}
+
 function openSearchDialog() {
   settingsMenuOpen.value = false
   searchOpen.value = true
@@ -1759,18 +1767,30 @@ async function deleteAvatar() {
   }
 }
 
+function scrollBottomDistance(scroller: HTMLElement) {
+  return Math.max(0, scroller.scrollHeight - scroller.scrollTop - scroller.clientHeight)
+}
+
 function isNearBottom(threshold = 80): boolean {
   const scroller = messageScroller.value
   if (!scroller) return true
-  return scroller.scrollHeight - scroller.scrollTop - scroller.clientHeight < threshold
+  return scrollBottomDistance(scroller) < threshold
+}
+
+function isAtScrollTop(scroller: HTMLElement) {
+  return scroller.scrollTop <= QUESTION_NAV_EDGE_THRESHOLD
+}
+
+function isAtScrollBottom(scroller: HTMLElement) {
+  return scrollBottomDistance(scroller) <= QUESTION_NAV_EDGE_THRESHOLD
 }
 
 function isProgrammaticScroll() {
   return Date.now() < programmaticScrollUntil
 }
 
-function markProgrammaticScroll() {
-  programmaticScrollUntil = Date.now() + 250
+function markProgrammaticScroll(duration = 250) {
+  programmaticScrollUntil = Date.now() + duration
 }
 
 function waitForAnimationFrame(): Promise<void> {
@@ -1785,6 +1805,11 @@ async function waitForMessageLayout() {
   await waitForAnimationFrame()
 }
 
+function clearQuestionNavLock() {
+  questionNavLockUntil = 0
+  questionNavLockedMessageId = null
+}
+
 function pauseAutoScrollFromUserScroll() {
   if (!streaming.value) return
   userHasScrolledUp = true
@@ -1793,10 +1818,12 @@ function pauseAutoScrollFromUserScroll() {
 }
 
 function handleScrollerWheel(event: WheelEvent) {
+  clearQuestionNavLock()
   if (event.deltaY < 0) pauseAutoScrollFromUserScroll()
 }
 
 function handleScrollerTouchStart() {
+  clearQuestionNavLock()
   pauseAutoScrollFromUserScroll()
 }
 
@@ -1809,6 +1836,59 @@ function updateQuestionNavOverflow() {
   }
   questionNavHasBefore.value = scroller.scrollTop > 3
   questionNavHasAfter.value = scroller.scrollTop + scroller.clientHeight < scroller.scrollHeight - 3
+}
+
+function updateQuestionNavLayoutMode() {
+  const scroller = messageScroller.value
+  const items = userQuestionNavItems.value
+  if (!scroller || items.length < 2) {
+    questionNavShortConversation.value = false
+    return
+  }
+  const scrollRange = Math.max(0, scroller.scrollHeight - scroller.clientHeight)
+  const shortRange = Math.min(QUESTION_NAV_SHORT_SCROLL_RANGE, scroller.clientHeight * 0.35)
+  questionNavShortConversation.value = scrollRange <= shortRange
+}
+
+function lockActiveQuestion(messageId: string, lockDuration = 0) {
+  activeQuestionMessageId.value = messageId
+  questionNavLockedMessageId = messageId
+  questionNavLockUntil = lockDuration > 0 ? Date.now() + lockDuration : 0
+  void syncActiveQuestionNavRow()
+}
+
+function setActiveQuestionToLast(lockDuration = 0) {
+  const items = userQuestionNavItems.value
+  const lastQuestion = items[items.length - 1]
+  activeQuestionMessageId.value = lastQuestion?.id || null
+  if (lastQuestion && lockDuration > 0) {
+    lockActiveQuestion(lastQuestion.id, lockDuration)
+    return
+  }
+  void syncActiveQuestionNavRow()
+}
+
+function isQuestionNavLocked() {
+  if (!questionNavLockedMessageId) {
+    return false
+  }
+  if (questionNavLockUntil > 0 && Date.now() >= questionNavLockUntil) {
+    clearQuestionNavLock()
+    return false
+  }
+  if (!userQuestionNavItems.value.some((item) => item.id === questionNavLockedMessageId)) {
+    clearQuestionNavLock()
+    return false
+  }
+  if (activeQuestionMessageId.value !== questionNavLockedMessageId) {
+    activeQuestionMessageId.value = questionNavLockedMessageId
+    void syncActiveQuestionNavRow()
+  }
+  return true
+}
+
+function messageTopInScroller(node: HTMLElement, scroller: HTMLElement) {
+  return node.getBoundingClientRect().top - scroller.getBoundingClientRect().top + scroller.scrollTop
 }
 
 async function syncActiveQuestionNavRow() {
@@ -1840,40 +1920,38 @@ async function syncActiveQuestionNavRow() {
 function refreshActiveQuestionFromScroll() {
   const scroller = messageScroller.value
   const items = userQuestionNavItems.value
+  updateQuestionNavLayoutMode()
   if (!scroller || !items.length) {
     activeQuestionMessageId.value = null
     return
   }
-  if (Date.now() < questionNavLockUntil && activeQuestionMessageId.value) return
-  const scrollerRect = scroller.getBoundingClientRect()
-  const anchorY = scrollerRect.top + Math.min(scrollerRect.height * 0.28, 150)
+  if (isQuestionNavLocked()) return
+  if (isAtScrollTop(scroller)) {
+    activeQuestionMessageId.value = items[0].id
+    void syncActiveQuestionNavRow()
+    return
+  }
+  if (isAtScrollBottom(scroller)) {
+    setActiveQuestionToLast()
+    return
+  }
+  const anchorTop = scroller.scrollTop + scroller.clientHeight * 0.32
   let bestId = items[0].id
-  let bestTop = Number.NEGATIVE_INFINITY
-  let nearestId = items[0].id
-  let nearestDistance = Number.POSITIVE_INFINITY
   for (const item of items) {
     const node = scroller.querySelector<HTMLElement>(`[data-message-id="${CSS.escape(item.id)}"]`)
     if (!node) continue
-    const rect = node.getBoundingClientRect()
-    const messageTop = rect.top
-    const distance = Math.abs(messageTop - anchorY)
-    if (messageTop <= anchorY + 8 && messageTop > bestTop) {
-      bestTop = messageTop
+    const messageTop = messageTopInScroller(node, scroller)
+    if (messageTop <= anchorTop) {
       bestId = item.id
     }
-    if (distance < nearestDistance) {
-      nearestDistance = distance
-      nearestId = item.id
-    }
   }
-  if (bestTop === Number.NEGATIVE_INFINITY) bestId = nearestId
   activeQuestionMessageId.value = bestId
   void syncActiveQuestionNavRow()
 }
 
 function handleScrollerScroll() {
+  const nearBottom = isNearBottom(80)
   refreshActiveQuestionFromScroll()
-  const nearBottom = isNearBottom(36)
   const awayFromBottom = !nearBottom
   showScrollToBottom.value = messages.value.length > 0 && awayFromBottom
   if (!streaming.value || isProgrammaticScroll()) return
@@ -1888,8 +1966,9 @@ async function scrollMessagesToBottom(behavior: ScrollBehavior = 'smooth') {
   await nextTick()
   const scroller = messageScroller.value
   if (!scroller) return
-  markProgrammaticScroll()
+  markProgrammaticScroll(behavior === 'smooth' ? 1000 : 300)
   scroller.scrollTo({ top: scroller.scrollHeight, behavior })
+  setActiveQuestionToLast(behavior === 'smooth' ? 900 : 300)
   showScrollToBottom.value = false
 }
 
@@ -1906,14 +1985,8 @@ async function returnToBottom() {
 
 async function jumpToQuestion(messageId: string) {
   questionNavExpanded.value = true
-  activeQuestionMessageId.value = messageId
-  questionNavLockUntil = Date.now() + 1400
-  void syncActiveQuestionNavRow()
+  lockActiveQuestion(messageId)
   await scrollToMessage(messageId, 'start')
-  window.setTimeout(() => {
-    questionNavLockUntil = 0
-    refreshActiveQuestionFromScroll()
-  }, 1450)
 }
 
 function scheduleScrollToBottom(force = false) {
@@ -2518,6 +2591,7 @@ async function scrollToMessage(messageId: string, block: ScrollLogicalPosition =
     return
   }
   userHasScrolledUp = true
+  markProgrammaticScroll(block === 'start' ? 1600 : 1000)
   target.scrollIntoView({ behavior: 'smooth', block })
   target.classList.add('message-search-highlight')
   window.setTimeout(() => target.classList.remove('message-search-highlight'), 1800)
@@ -2599,7 +2673,7 @@ async function confirmDeleteConversation() {
     deleteConfirmOpen.value = false
     conversationPendingDelete.value = null
     if (currentId.value === conversation.id) {
-      const nextConversation = conversations.value[0]
+      const nextConversation = lastVisibleConversation()
       if (nextConversation) {
         await openConversation(nextConversation.id)
       } else {
@@ -2944,6 +3018,11 @@ function scheduleComposerResize() {
   composerResizeFrame = window.requestAnimationFrame(() => {
     composerResizeFrame = null
     resizeComposerInput()
+    void waitForMessageLayout().then(() => {
+      updateQuestionNavLayoutMode()
+      refreshActiveQuestionFromScroll()
+      updateQuestionNavOverflow()
+    })
   })
 }
 
@@ -2973,9 +3052,12 @@ watch(
       questionNavExpanded.value = false
       questionNavHasBefore.value = false
       questionNavHasAfter.value = false
+      questionNavShortConversation.value = false
+      clearQuestionNavLock()
       return
     }
     await waitForMessageLayout()
+    updateQuestionNavLayoutMode()
     refreshActiveQuestionFromScroll()
     await syncActiveQuestionNavRow()
     updateQuestionNavOverflow()
@@ -3003,6 +3085,9 @@ onMounted(async () => {
   const storedConversationId = window.localStorage.getItem(CURRENT_CONVERSATION_STORAGE_KEY)
   if (storedConversationId && conversations.value.some((conversation) => conversation.id === storedConversationId)) {
     await openConversation(storedConversationId)
+  } else {
+    const fallbackConversation = lastVisibleConversation()
+    if (fallbackConversation) await openConversation(fallbackConversation.id)
   }
   await nextTick()
   resizeComposerInput()
@@ -3255,7 +3340,7 @@ onUnmounted(() => {
             expanded: questionNavExpanded,
             'has-before': questionNavHasBefore,
             'has-after': questionNavHasAfter,
-            'compact-corner': fileTreePinned
+            'short-conversation': questionNavShortConversation
           }"
           aria-label="当前对话问题导航"
           @mouseenter="questionNavExpanded = true"
