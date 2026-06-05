@@ -1,6 +1,6 @@
 <script setup lang="ts">
 import { computed, nextTick, onMounted, onUnmounted, ref, watch, type CSSProperties } from 'vue'
-import { ArrowDown, Download, FileText, GitBranch, Image as ImageIcon, KeyRound, LogOut, Maximize2, MessageCircle, Minimize2, PanelLeftClose, PanelLeftOpen, Paperclip, Pencil, Pin, PinOff, Plus, RefreshCw, Search, Send, Settings, ShieldCheck, Trash2, X } from 'lucide-vue-next'
+import { ArrowDown, Download, FileText, GitBranch, Globe, Image as ImageIcon, KeyRound, LogOut, Maximize2, MessageCircle, Minimize2, PanelLeftClose, PanelLeftOpen, Paperclip, Pencil, Pin, PinOff, Plus, RefreshCw, Search, Send, Settings, ShieldCheck, Trash2, X } from 'lucide-vue-next'
 import { useRouter } from 'vue-router'
 import { ApiError, apiFetch, localizeApiMessage, readCookie } from '../api/client'
 import AppSelect from '../components/AppSelect.vue'
@@ -19,12 +19,14 @@ import type {
   Message,
   ModelEndpoint,
   SendMessageResponse,
-  User
+  User,
+  WebSearchSettings,
+  WebSearchStatus
 } from '../types'
 import { copyText } from '../utils/clipboard'
 
 type ThemeMode = 'dark' | 'light'
-type SettingsTab = 'appearance' | 'image' | 'api' | 'groups' | 'account'
+type SettingsTab = 'appearance' | 'image' | 'web' | 'api' | 'groups' | 'account'
 type GroupPurpose = 'none' | 'chat' | 'image'
 
 type ModelKeyChoice = {
@@ -279,6 +281,24 @@ const imageSettings = ref<ImageGenerationSettings>({
   outputCompression: 100,
   moderation: 'auto'
 })
+const webSearchEnabled = ref(false)
+const webSearchStatus = ref<WebSearchStatus>({ enabled: false, configured: false })
+const webSearchSettingsLoading = ref(false)
+const webSearchSettingsSaving = ref(false)
+const webSearchTesting = ref(false)
+const webSearchTestQuery = ref('')
+const webSearchTestResults = ref<Array<{ title: string; url: string; snippet?: string }>>([])
+const webSearchSettings = ref<WebSearchSettings>({
+  enabled: false,
+  searxngBaseUrl: '',
+  resultCount: 5,
+  language: 'all',
+  safesearch: '1',
+  timeoutSeconds: 20,
+  fetchTimeoutSeconds: 20,
+  maxToolCalls: 4,
+  fetchMaxChars: 12000
+})
 
 let scrollFrame: number | null = null
 let composerResizeFrame: number | null = null
@@ -293,6 +313,13 @@ const QUESTION_NAV_SHORT_SCROLL_RANGE = 220
 
 const currentConversation = computed(() => conversations.value.find((item) => item.id === currentId.value))
 const currentConversationStreaming = computed(() => messages.value.some((message) => message.status === 'streaming'))
+const webSearchAvailable = computed(() => webSearchStatus.value.enabled && webSearchStatus.value.configured && !selectedModelIsImageGeneration())
+const webSearchToggleDisabled = computed(() => currentConversationStreaming.value || (!webSearchEnabled.value && !webSearchAvailable.value))
+const webSearchToggleLabel = computed(() => {
+  if (currentConversationStreaming.value) return '生成中无法切换联网搜索'
+  if (webSearchEnabled.value) return webSearchAvailable.value ? '关闭联网搜索' : '关闭联网搜索（当前全局不可用）'
+  return webSearchAvailable.value ? '开启联网搜索' : '联网搜索未配置'
+})
 const activeFileTreeAttachments = computed(() => (currentId.value ? conversationAttachments.value : draftConversationAttachments.value))
 const selectedFileTreeAttachments = computed(() => activeFileTreeAttachments.value.filter((item) => item.selected))
 const selectedFileTreeAttachmentIds = computed(() => selectedFileTreeAttachments.value.map((item) => item.attachment.id))
@@ -547,6 +574,20 @@ function normalizeImageSettings(data: any): ImageGenerationSettings {
     outputFormat: data?.outputFormat || data?.output_format || 'png',
     outputCompression: Number(data?.outputCompression ?? data?.output_compression ?? 100),
     moderation: data?.moderation || 'auto'
+  }
+}
+
+function normalizeWebSearchSettings(data: any): WebSearchSettings {
+  return {
+    enabled: Boolean(data?.enabled),
+    searxngBaseUrl: data?.searxngBaseUrl ?? data?.searxng_base_url ?? '',
+    resultCount: Number(data?.resultCount ?? data?.result_count ?? 5),
+    language: data?.language || 'all',
+    safesearch: data?.safesearch || '1',
+    timeoutSeconds: Number(data?.timeoutSeconds ?? data?.timeout_seconds ?? 20),
+    fetchTimeoutSeconds: Number(data?.fetchTimeoutSeconds ?? data?.fetch_timeout_seconds ?? 20),
+    maxToolCalls: Number(data?.maxToolCalls ?? data?.max_tool_calls ?? 4),
+    fetchMaxChars: Number(data?.fetchMaxChars ?? data?.fetch_max_chars ?? 12000)
   }
 }
 
@@ -1188,8 +1229,23 @@ function conversationUpdatedAtMs(conversation: Conversation) {
   return parseApiDateMs(conversation.updatedAt) ?? 0
 }
 
+function normalizeConversation(conversation: Conversation): Conversation {
+  return {
+    ...conversation,
+    webSearchEnabled: Boolean(conversation.webSearchEnabled ?? conversation.web_search_enabled)
+  }
+}
+
+function activeConversationWebSearchEnabled() {
+  return Boolean(currentConversation.value?.webSearchEnabled ?? false)
+}
+
+function syncWebSearchToggleFromConversation() {
+  webSearchEnabled.value = currentId.value ? activeConversationWebSearchEnabled() : false
+}
+
 function sortConversationsByUpdatedAt(items: Conversation[]) {
-  return [...items].sort((a, b) => conversationUpdatedAtMs(b) - conversationUpdatedAtMs(a))
+  return items.map(normalizeConversation).sort((a, b) => conversationUpdatedAtMs(b) - conversationUpdatedAtMs(a))
 }
 
 function lastVisibleConversation() {
@@ -1346,6 +1402,62 @@ async function loadImageSettings() {
   }
 }
 
+async function loadWebSearchStatus() {
+  try {
+    webSearchStatus.value = await apiFetch<WebSearchStatus>('/settings/web-search/status')
+  } catch {
+    webSearchStatus.value = { enabled: false, configured: false }
+    webSearchEnabled.value = false
+  }
+}
+
+async function loadWebSearchSettings() {
+  if (auth.user?.role !== 'admin') return
+  webSearchSettingsLoading.value = true
+  try {
+    webSearchSettings.value = normalizeWebSearchSettings(await apiFetch('/admin/settings/web-search'))
+  } catch (err) {
+    settingsError.value = err instanceof Error ? err.message : '加载联网搜索设置失败'
+  } finally {
+    webSearchSettingsLoading.value = false
+  }
+}
+
+async function saveWebSearchSettings() {
+  resetSettingsMessages()
+  webSearchSettingsSaving.value = true
+  try {
+    webSearchSettings.value = normalizeWebSearchSettings(await apiFetch('/admin/settings/web-search', {
+      method: 'PATCH',
+      body: JSON.stringify(webSearchSettings.value)
+    }))
+    settingsNotice.value = '联网搜索设置已保存'
+    await loadWebSearchStatus()
+  } catch (err) {
+    settingsError.value = err instanceof Error ? err.message : '保存联网搜索设置失败'
+  } finally {
+    webSearchSettingsSaving.value = false
+  }
+}
+
+async function testWebSearchSettings() {
+  resetSettingsMessages()
+  webSearchTesting.value = true
+  webSearchTestResults.value = []
+  try {
+    const result = await apiFetch<{ results: Array<{ title: string; url: string; snippet?: string }> }>('/admin/settings/web-search/test', {
+      method: 'POST',
+      body: JSON.stringify({ query: webSearchTestQuery.value.trim() || 'OpenAI news' })
+    })
+    webSearchTestResults.value = result.results || []
+    settingsNotice.value = `测试完成，返回 ${webSearchTestResults.value.length} 条结果`
+  } catch (err) {
+    settingsError.value = err instanceof Error ? err.message : '联网搜索测试失败'
+  } finally {
+    webSearchTesting.value = false
+  }
+}
+
 async function saveImageSettings() {
   resetSettingsMessages()
   imageSettingsSaving.value = true
@@ -1363,7 +1475,7 @@ async function saveImageSettings() {
 }
 
 async function openSettings(tab: SettingsTab = 'appearance') {
-  const targetTab = tab === 'groups' && auth.user?.role !== 'admin' ? 'appearance' : tab
+  const targetTab = (tab === 'groups' || tab === 'web') && auth.user?.role !== 'admin' ? 'appearance' : tab
   settingsMenuOpen.value = false
   settingsOpen.value = true
   settingsTab.value = targetTab
@@ -1371,6 +1483,7 @@ async function openSettings(tab: SettingsTab = 'appearance') {
   resetSettingsMessages()
   if (targetTab === 'api' || targetTab === 'groups') await loadApiSettings()
   if (targetTab === 'image') await loadImageSettings()
+  if (targetTab === 'web') await loadWebSearchSettings()
 }
 
 function resetAccessSwitchMessages() {
@@ -1494,12 +1607,13 @@ async function confirmLogout() {
 }
 
 async function selectSettingsTab(tab: SettingsTab) {
-  if (tab === 'groups' && auth.user?.role !== 'admin') return
+  if ((tab === 'groups' || tab === 'web') && auth.user?.role !== 'admin') return
   settingsTab.value = tab
   resetSettingsMessages()
   if ((tab === 'api' || tab === 'groups') && !apiKeys.value.length && !apiKeyGroups.value.length) await loadApiSettings()
   if (tab === 'groups' && apiKeyGroups.value.length) await loadGroupKeys(selectedGroupId.value)
   if (tab === 'image') await loadImageSettings()
+  if (tab === 'web') await loadWebSearchSettings()
 }
 
 async function createModelEndpoint() {
@@ -2196,6 +2310,21 @@ function applyConversationEvent(event: string, data: any) {
     }
     return
   }
+  if (event === 'web_search_status') {
+    if (!message) {
+      void refreshMessageById(messageId)
+      return
+    }
+    message.status = 'streaming'
+    message.progressDetail = data.detail || '正在联网搜索...'
+    message.progress_detail = message.progressDetail
+    message.progressPhase = data.phase || 'web_search'
+    message.progress_phase = message.progressPhase
+    applyRuntimeProgress(message, data)
+    syncActiveRequestState()
+    scheduleScrollToBottom()
+    return
+  }
   if (event === 'image_status' || event === 'image_progress') {
     if (!message) {
       void refreshMessageById(messageId)
@@ -2335,6 +2464,7 @@ function syncConversationEvents() {
     'image_status',
     'image_progress',
     'image_completed',
+    'web_search_status',
     'usage',
     'context'
   ]
@@ -2423,6 +2553,27 @@ function syncImagePolling() {
   }, 3000)
 }
 
+async function toggleWebSearch() {
+  if (currentConversationStreaming.value) return
+  if (!webSearchEnabled.value && !webSearchAvailable.value) return
+  const nextValue = !webSearchEnabled.value
+  webSearchEnabled.value = nextValue
+  const conversationId = currentId.value
+  if (!conversationId) return
+  conversations.value = conversations.value.map((item) => (item.id === conversationId ? { ...item, webSearchEnabled: nextValue } : item))
+  try {
+    const updated = normalizeConversation(await apiFetch<Conversation>(`/conversations/${conversationId}`, {
+      method: 'PATCH',
+      body: JSON.stringify({ webSearchEnabled: nextValue })
+    }))
+    conversations.value = sortConversationsByUpdatedAt(conversations.value.map((item) => (item.id === updated.id ? { ...item, ...updated } : item)))
+  } catch (err) {
+    webSearchEnabled.value = !nextValue
+    conversations.value = conversations.value.map((item) => (item.id === conversationId ? { ...item, webSearchEnabled: !nextValue } : item))
+    error.value = err instanceof Error ? err.message : '联网搜索开关保存失败'
+  }
+}
+
 function newChat() {
   activeConversationLoad++
   cancelPendingScroll()
@@ -2442,12 +2593,14 @@ function newChat() {
   userHasScrolledUp = false
   error.value = ''
   streaming.value = false
+  webSearchEnabled.value = false
 }
 
 async function loadConversations() {
   conversationsLoading.value = conversations.value.length === 0
   try {
     conversations.value = sortConversationsByUpdatedAt(await apiFetch<Conversation[]>('/conversations'))
+    if (currentId.value) syncWebSearchToggleFromConversation()
   } catch (err) {
     if (err instanceof ApiError && err.code === 'INVALID_CREDENTIALS') {
       await router.push('/login')
@@ -2561,6 +2714,7 @@ async function openConversation(id: string, focusMessageId?: string | null) {
       (await apiFetch<Message[]>(`/conversations/${id}/messages${params}`)).map(normalizeLoadedMessage)
     )
     if (loadId !== activeConversationLoad) return
+    syncWebSearchToggleFromConversation()
     messages.value = loadedMessages
     await loadConversationAttachments(id)
     if (loadId !== activeConversationLoad) return
@@ -2852,7 +3006,7 @@ async function send() {
     if (!targetConversationId && draftConversationAttachments.value.length) {
       const created = await apiFetch<Conversation>('/conversations', {
         method: 'POST',
-        body: JSON.stringify({ title: (userText.trim() || '新对话').slice(0, 30) })
+        body: JSON.stringify({ title: (userText.trim() || '新对话').slice(0, 30), webSearchEnabled: webSearchEnabled.value })
       })
       targetConversationId = created.id
       currentId.value = created.id
@@ -2867,6 +3021,7 @@ async function send() {
         model: selectedModel.value,
         attachmentIds,
         referencedAttachmentIds,
+        webSearchEnabled: webSearchEnabled.value,
         reasoningEffort: reasoningEffort.value
       })
     })
@@ -2898,6 +3053,7 @@ async function send() {
     syncConversationEvents()
     syncImagePolling()
     await loadConversations()
+    syncWebSearchToggleFromConversation()
     await loadContextStats()
     pendingAttachments.value = pendingAttachments.value.filter((item) => !selectedIds.includes(item.id))
   } catch (err) {
@@ -3081,7 +3237,7 @@ watch(searchQuery, () => {
 onMounted(async () => {
   loadAppearance()
   loadFileTreePinned()
-  await Promise.all([loadModels(), loadConversations()])
+  await Promise.all([loadModels(), loadConversations(), loadWebSearchStatus()])
   const storedConversationId = window.localStorage.getItem(CURRENT_CONVERSATION_STORAGE_KEY)
   if (storedConversationId && conversations.value.some((conversation) => conversation.id === storedConversationId)) {
     await openConversation(storedConversationId)
@@ -3542,6 +3698,18 @@ onUnmounted(() => {
                 <Paperclip :size="18" />
                 <input class="hidden" type="file" multiple @change="uploadFile" />
               </label>
+              <button
+                class="composer-icon-button web-search-toggle"
+                :class="{ active: webSearchEnabled }"
+                type="button"
+                :disabled="webSearchToggleDisabled"
+                :title="webSearchToggleLabel"
+                :aria-label="webSearchToggleLabel"
+                :aria-pressed="webSearchEnabled"
+                @click="toggleWebSearch"
+              >
+                <Globe :size="18" />
+              </button>
 
             </div>
 
@@ -3567,6 +3735,7 @@ onUnmounted(() => {
             </div>
             <button class="settings-tab-button" :class="{ active: settingsTab === 'appearance' }" @click="selectSettingsTab('appearance')">个性化</button>
             <button class="settings-tab-button" :class="{ active: settingsTab === 'image' }" @click="selectSettingsTab('image')">图像生成</button>
+            <button v-if="auth.user?.role === 'admin'" class="settings-tab-button" :class="{ active: settingsTab === 'web' }" @click="selectSettingsTab('web')">联网搜索</button>
             <button class="settings-tab-button" :class="{ active: settingsTab === 'api' }" @click="selectSettingsTab('api')">API 管理</button>
             <button v-if="auth.user?.role === 'admin'" class="settings-tab-button" :class="{ active: settingsTab === 'groups' }" @click="selectSettingsTab('groups')">分组管理</button>
             <button class="settings-tab-button" :class="{ active: settingsTab === 'account' }" @click="selectSettingsTab('account')">账号安全</button>
@@ -3742,6 +3911,79 @@ onUnmounted(() => {
                   <button class="settings-primary" type="submit" :disabled="imageSettingsLoading || imageSettingsSaving">
                     {{ imageSettingsSaving ? '保存中...' : '保存图像设置' }}
                   </button>
+                </form>
+              </section>
+
+              <section v-else-if="settingsTab === 'web' && auth.user?.role === 'admin'" key="web" class="settings-pane">
+                <div class="settings-pane-heading">
+                  <h2>联网搜索</h2>
+                  <p>配置 SearXNG 搜索源。用户在单个对话里开启后，模型可按需调用搜索和网页读取工具。</p>
+                </div>
+                <form class="settings-card" @submit.prevent="saveWebSearchSettings">
+                  <div v-if="webSearchSettingsLoading" class="settings-empty">正在加载联网搜索设置...</div>
+                  <div v-else class="settings-grid">
+                    <label class="settings-check settings-field-wide">
+                      <input v-model="webSearchSettings.enabled" type="checkbox" />
+                      启用联网搜索
+                    </label>
+                    <label class="settings-field settings-field-wide">
+                      <span>SearXNG URL</span>
+                      <input v-model="webSearchSettings.searxngBaseUrl" class="settings-input" placeholder="https://searxng.example.com/search" />
+                    </label>
+                    <label class="settings-field">
+                      <span>结果数</span>
+                      <input v-model.number="webSearchSettings.resultCount" class="settings-input" type="number" min="1" max="10" />
+                    </label>
+                    <label class="settings-field">
+                      <span>语言</span>
+                      <input v-model="webSearchSettings.language" class="settings-input" placeholder="all" />
+                    </label>
+                    <label class="settings-field">
+                      <span>安全搜索</span>
+                      <input v-model="webSearchSettings.safesearch" class="settings-input" placeholder="1" />
+                    </label>
+                    <label class="settings-field">
+                      <span>搜索超时秒</span>
+                      <input v-model.number="webSearchSettings.timeoutSeconds" class="settings-input" type="number" min="3" max="60" />
+                    </label>
+                    <label class="settings-field">
+                      <span>读取网页超时秒</span>
+                      <input v-model.number="webSearchSettings.fetchTimeoutSeconds" class="settings-input" type="number" min="3" max="60" />
+                    </label>
+                    <label class="settings-field">
+                      <span>最大工具调用次数</span>
+                      <input v-model.number="webSearchSettings.maxToolCalls" class="settings-input" type="number" min="1" max="10" />
+                    </label>
+                    <label class="settings-field">
+                      <span>网页最大字符数</span>
+                      <input v-model.number="webSearchSettings.fetchMaxChars" class="settings-input" type="number" min="1000" max="50000" />
+                    </label>
+                  </div>
+                  <div class="settings-api-card-footer">
+                    <button class="settings-primary" type="submit" :disabled="webSearchSettingsLoading || webSearchSettingsSaving">
+                      {{ webSearchSettingsSaving ? '保存中...' : '保存联网搜索设置' }}
+                    </button>
+                  </div>
+                </form>
+                <form class="settings-card" @submit.prevent="testWebSearchSettings">
+                  <div class="settings-card-header">
+                    <div>
+                      <h3>测试搜索</h3>
+                      <p>使用当前已保存配置测试 SearXNG 返回结果。</p>
+                    </div>
+                  </div>
+                  <div class="settings-inline-field">
+                    <input v-model="webSearchTestQuery" class="settings-input" placeholder="输入测试关键词" />
+                    <button class="settings-secondary" type="submit" :disabled="webSearchTesting">
+                      {{ webSearchTesting ? '测试中...' : '测试' }}
+                    </button>
+                  </div>
+                  <div v-if="webSearchTestResults.length" class="settings-web-results">
+                    <a v-for="item in webSearchTestResults" :key="item.url" :href="item.url" target="_blank" rel="noreferrer">
+                      <strong>{{ item.title || item.url }}</strong>
+                      <span>{{ item.snippet || item.url }}</span>
+                    </a>
+                  </div>
                 </form>
               </section>
 

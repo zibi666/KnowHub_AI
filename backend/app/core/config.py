@@ -87,6 +87,16 @@ class Settings(BaseSettings):
     local_cache_root: str = "./data/cache"
     alert_webhook_url: str | None = None
 
+    web_search_enabled: bool = False
+    web_search_searxng_base_url: str | None = None
+    web_search_result_count: int = 5
+    web_search_language: str = "all"
+    web_search_safesearch: str = "1"
+    web_search_timeout_seconds: int = 20
+    web_search_fetch_timeout_seconds: int = 20
+    web_search_max_tool_calls: int = 4
+    web_search_fetch_max_chars: int = 12000
+
     @field_validator("app_encryption_key")
     @classmethod
     def validate_encryption_key(cls, value: str) -> str:

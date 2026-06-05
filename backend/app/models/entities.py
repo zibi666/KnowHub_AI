@@ -139,6 +139,7 @@ class Conversation(Base, TimestampMixin):
     compaction_pending: Mapped[bool] = mapped_column(Boolean, default=False, nullable=False)
     compaction_pending_since: Mapped[datetime | None] = mapped_column(DateTime(timezone=False), nullable=True)
     auto_compaction_enabled: Mapped[bool] = mapped_column(Boolean, default=True, nullable=False)
+    web_search_enabled: Mapped[bool] = mapped_column(Boolean, default=False, nullable=False)
 
     messages: Mapped[list[Message]] = relationship(back_populates="conversation", cascade="all, delete-orphan")
 

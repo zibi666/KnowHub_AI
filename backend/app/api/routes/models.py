@@ -7,12 +7,13 @@ from app.core.db import get_session
 from app.core.deps import get_current_user
 from app.core.errors import api_error
 from app.models.entities import User, UserQuota
-from app.schemas.settings import ImageGenerationSettings, ModelsOut, UpdateCompactionRequest, UpdateModelRequest
+from app.schemas.settings import ImageGenerationSettings, ModelsOut, UpdateCompactionRequest, UpdateModelRequest, WebSearchStatus
 from app.services.api_keys import available_models_for_user, key_allowed_models, resolve_api_key_for_model
 from app.services.image_generation import (
     image_model_is_available,
     normalize_image_settings,
 )
+from app.services.web_search import effective_web_search_config
 
 router = APIRouter(tags=["models"])
 settings_router = APIRouter(prefix="/settings", tags=["settings"])
@@ -103,3 +104,9 @@ async def update_compaction_setting(
     quota.auto_compaction_enabled = payload.auto_compaction_enabled
     await db.commit()
     return {"ok": True, "autoCompactionEnabled": payload.auto_compaction_enabled}
+
+
+@settings_router.get("/web-search/status", response_model=WebSearchStatus)
+async def get_web_search_status(user: User = Depends(get_current_user)) -> WebSearchStatus:
+    config = effective_web_search_config()
+    return WebSearchStatus(enabled=config.enabled, configured=config.configured)

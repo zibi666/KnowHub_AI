@@ -282,7 +282,11 @@ async def create_conversation(
     user: User = Depends(get_current_user),
     db: AsyncSession = Depends(get_session),
 ):
-    conversation = Conversation(user_id=user.id, title=payload.title or "新对话")
+    conversation = Conversation(
+        user_id=user.id,
+        title=payload.title or "新对话",
+        web_search_enabled=payload.web_search_enabled,
+    )
     db.add(conversation)
     await db.commit()
     await db.refresh(conversation)
@@ -303,6 +307,8 @@ async def update_conversation(
         conversation.title = payload.title
     if payload.auto_compaction_enabled is not None:
         conversation.auto_compaction_enabled = payload.auto_compaction_enabled
+    if payload.web_search_enabled is not None:
+        conversation.web_search_enabled = payload.web_search_enabled
     await db.commit()
     await db.refresh(conversation)
     return conversation

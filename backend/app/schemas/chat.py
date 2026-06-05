@@ -11,17 +11,20 @@ class ConversationOut(ApiModel):
     id: str
     title: str
     auto_compaction_enabled: bool
+    web_search_enabled: bool = False
     created_at: datetime
     updated_at: datetime
 
 
 class CreateConversationRequest(ApiModel):
     title: str | None = None
+    web_search_enabled: bool = False
 
 
 class UpdateConversationRequest(ApiModel):
     title: str | None = None
     auto_compaction_enabled: bool | None = None
+    web_search_enabled: bool | None = None
 
 
 class MessageOut(ApiModel):
@@ -122,6 +125,7 @@ class SendMessageRequest(ApiModel):
     attachment_ids: list[str] = []
     referenced_attachment_ids: list[str] = []
     retry_of_message_id: str | None = None
+    web_search_enabled: bool | None = None
     # Per-request overrides. None means "use server default".
     reasoning_effort: str | None = None
     max_completion_tokens: int | None = None

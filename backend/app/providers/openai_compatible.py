@@ -29,6 +29,20 @@ class ModelProbeResult:
     base_url: str
 
 
+@dataclass
+class ToolCall:
+    id: str
+    name: str
+    arguments: dict[str, Any]
+
+
+@dataclass
+class ToolCallTurnResult:
+    tool_calls: list[ToolCall]
+    assistant_message: dict[str, Any] | None = None
+    usage: dict[str, int] | None = None
+
+
 class OpenAICompatibleProvider:
     def __init__(self, base_url: str | None = None) -> None:
         settings = get_settings()
@@ -219,6 +233,199 @@ class OpenAICompatibleProvider:
                 if model_id:
                     result.append(str(model_id))
         return result
+
+    def responses_tools(self, tools: list[dict[str, Any]]) -> list[dict[str, Any]]:
+        normalized: list[dict[str, Any]] = []
+        for tool in tools:
+            if tool.get("type") != "function":
+                continue
+            fn = tool.get("function") if isinstance(tool.get("function"), dict) else tool
+            name = fn.get("name")
+            if not name:
+                continue
+            normalized.append(
+                {
+                    "type": "function",
+                    "name": name,
+                    "description": fn.get("description") or "",
+                    "parameters": fn.get("parameters") or {"type": "object", "properties": {}},
+                }
+            )
+        return normalized
+
+    async def tool_call_turn(
+        self,
+        api_key: str,
+        model: str,
+        messages: list[dict[str, Any]],
+        tools: list[dict[str, Any]],
+        max_completion_tokens: int | None = None,
+        reasoning_effort: str | None = None,
+        timeout_seconds: float = 60.0,
+    ) -> ToolCallTurnResult:
+        settings = get_settings()
+        has_multimodal_content = any(isinstance(message.get("content"), list) for message in messages)
+        if settings.model_api_mode == "responses" and not has_multimodal_content:
+            try:
+                return await self.responses_tool_call_turn(
+                    api_key=api_key,
+                    model=model,
+                    messages=messages,
+                    tools=tools,
+                    max_output_tokens=max_completion_tokens,
+                    reasoning_effort=reasoning_effort,
+                    timeout_seconds=timeout_seconds,
+                )
+            except Exception as exc:
+                status = getattr(exc, "status_code", None)
+                if status not in {404, 405}:
+                    raise
+        return await self.chat_completions_tool_call_turn(
+            api_key=api_key,
+            model=model,
+            messages=messages,
+            tools=tools,
+            max_completion_tokens=max_completion_tokens,
+            reasoning_effort=reasoning_effort,
+            timeout_seconds=timeout_seconds,
+        )
+
+    async def chat_completions_tool_call_turn(
+        self,
+        api_key: str,
+        model: str,
+        messages: list[dict[str, Any]],
+        tools: list[dict[str, Any]],
+        max_completion_tokens: int | None = None,
+        reasoning_effort: str | None = None,
+        timeout_seconds: float = 60.0,
+    ) -> ToolCallTurnResult:
+        headers = {"Authorization": f"Bearer {api_key}", "Content-Type": "application/json"}
+        payload: dict[str, Any] = {
+            "model": model,
+            "messages": messages,
+            "stream": False,
+            "tools": tools,
+            "tool_choice": "auto",
+        }
+        if max_completion_tokens:
+            payload["max_completion_tokens"] = max_completion_tokens
+        if reasoning_effort:
+            payload["reasoning_effort"] = reasoning_effort
+        async with httpx.AsyncClient(timeout=timeout_seconds) as client:
+            resp = await client.post(f"{self.base_url}/chat/completions", headers=headers, json=payload)
+        if resp.status_code in {401, 403}:
+            raise api_error("API_KEY_INVALID", "上游拒绝了该 API Key")
+        if resp.status_code >= 400:
+            raise api_error("UPSTREAM_ERROR", resp.text[:500], status_code=resp.status_code)
+        data = resp.json()
+        usage = data.get("usage")
+        choice = (data.get("choices") or [{}])[0]
+        message = choice.get("message") or {}
+        tool_calls = self.parse_chat_tool_calls(message.get("tool_calls"))
+        if not tool_calls:
+            return ToolCallTurnResult(tool_calls=[], assistant_message=None, usage=self.normalize_chat_usage(usage))
+        assistant_message = {
+            "role": "assistant",
+            "content": message.get("content") or "",
+            "tool_calls": message.get("tool_calls") or [],
+        }
+        return ToolCallTurnResult(tool_calls=tool_calls, assistant_message=assistant_message, usage=self.normalize_chat_usage(usage))
+
+    async def responses_tool_call_turn(
+        self,
+        api_key: str,
+        model: str,
+        messages: list[dict[str, Any]],
+        tools: list[dict[str, Any]],
+        max_output_tokens: int | None = None,
+        reasoning_effort: str | None = None,
+        timeout_seconds: float = 60.0,
+    ) -> ToolCallTurnResult:
+        headers = {"Authorization": f"Bearer {api_key}", "Content-Type": "application/json"}
+        instructions, input_items = self.to_responses_input(messages)
+        effective_reasoning = (reasoning_effort or get_settings().model_reasoning_effort).strip().lower()
+        payload: dict[str, Any] = {
+            "model": model,
+            "input": input_items,
+            "stream": False,
+            "tools": self.responses_tools(tools),
+            "tool_choice": "auto",
+            "reasoning": {"effort": effective_reasoning},
+        }
+        if instructions:
+            payload["instructions"] = instructions
+        if max_output_tokens:
+            payload["max_output_tokens"] = max_output_tokens
+        async with httpx.AsyncClient(timeout=timeout_seconds) as client:
+            resp = await client.post(f"{self.base_url}/responses", headers=headers, json=payload)
+        if resp.status_code in {401, 403}:
+            raise api_error("API_KEY_INVALID", "上游拒绝了该 API Key")
+        if resp.status_code >= 400:
+            raise api_error("UPSTREAM_ERROR", resp.text[:500], status_code=resp.status_code)
+        data = resp.json()
+        output_items = [item for item in data.get("output") or [] if isinstance(item, dict)]
+        tool_calls = self.parse_responses_tool_calls(output_items)
+        usage = data.get("usage")
+        if not tool_calls:
+            return ToolCallTurnResult(tool_calls=[], assistant_message=None, usage=self.normalize_responses_usage(usage or {}))
+        assistant_message = {
+            "role": "assistant",
+            "content": "",
+            "tool_calls": [
+                {
+                    "id": call.id,
+                    "type": "function",
+                    "function": {"name": call.name, "arguments": json.dumps(call.arguments, ensure_ascii=False)},
+                }
+                for call in tool_calls
+            ],
+        }
+        return ToolCallTurnResult(tool_calls=tool_calls, assistant_message=assistant_message, usage=self.normalize_responses_usage(usage or {}))
+
+    def parse_chat_tool_calls(self, raw_tool_calls: Any) -> list[ToolCall]:
+        if not isinstance(raw_tool_calls, list):
+            return []
+        calls: list[ToolCall] = []
+        for index, item in enumerate(raw_tool_calls):
+            if not isinstance(item, dict):
+                continue
+            fn = item.get("function") if isinstance(item.get("function"), dict) else {}
+            name = fn.get("name")
+            if not name:
+                continue
+            args_raw = fn.get("arguments") or "{}"
+            try:
+                arguments = json.loads(args_raw) if isinstance(args_raw, str) else dict(args_raw)
+            except (TypeError, ValueError):
+                arguments = {}
+            calls.append(ToolCall(id=str(item.get("id") or f"tool-{index}"), name=str(name), arguments=arguments))
+        return calls
+
+    def parse_responses_tool_calls(self, output_items: list[dict[str, Any]]) -> list[ToolCall]:
+        calls: list[ToolCall] = []
+        for index, item in enumerate(output_items):
+            if item.get("type") not in {"function_call", "tool_call"}:
+                continue
+            name = item.get("name")
+            if not name:
+                continue
+            args_raw = item.get("arguments") or "{}"
+            try:
+                arguments = json.loads(args_raw) if isinstance(args_raw, str) else dict(args_raw)
+            except (TypeError, ValueError):
+                arguments = {}
+            call_id = item.get("call_id") or item.get("id") or f"call-{index}"
+            calls.append(ToolCall(id=str(call_id), name=str(name), arguments=arguments))
+        return calls
+
+    def normalize_chat_usage(self, usage: Any) -> dict[str, int] | None:
+        if not isinstance(usage, dict):
+            return None
+        prompt = int(usage.get("prompt_tokens") or 0)
+        completion = int(usage.get("completion_tokens") or 0)
+        total = int(usage.get("total_tokens") or prompt + completion)
+        return {"prompt_tokens": prompt, "completion_tokens": completion, "total_tokens": total}
 
     async def chat_stream(
         self,
@@ -538,6 +745,34 @@ class OpenAICompatibleProvider:
             content = message.get("content")
             if role == "system":
                 instructions.append(str(content or ""))
+                continue
+            if role == "tool":
+                call_id = message.get("tool_call_id") or message.get("call_id") or message.get("id")
+                if call_id:
+                    input_items.append({
+                        "type": "function_call_output",
+                        "call_id": str(call_id),
+                        "output": str(content or ""),
+                    })
+                continue
+            tool_calls = message.get("tool_calls")
+            if role == "assistant" and isinstance(tool_calls, list) and tool_calls:
+                assistant_text = str(content or "")
+                if assistant_text:
+                    input_items.append({"role": "assistant", "content": assistant_text})
+                for index, tool_call in enumerate(tool_calls):
+                    if not isinstance(tool_call, dict):
+                        continue
+                    fn = tool_call.get("function") if isinstance(tool_call.get("function"), dict) else {}
+                    name = fn.get("name")
+                    if not name:
+                        continue
+                    input_items.append({
+                        "type": "function_call",
+                        "call_id": str(tool_call.get("id") or f"call-{index}"),
+                        "name": str(name),
+                        "arguments": str(fn.get("arguments") or "{}"),
+                    })
                 continue
             input_items.append({
                 "role": "assistant" if role == "assistant" else "user",

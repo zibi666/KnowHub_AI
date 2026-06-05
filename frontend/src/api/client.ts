@@ -37,6 +37,7 @@ const ERROR_MESSAGES: Record<string, string> = {
   UPSTREAM_ERROR: '上游模型服务异常',
   PARSE_FAILED: '附件解析失败',
   COMPACTION_FAILED: '上下文压缩失败',
+  WEB_SEARCH_NOT_CONFIGURED: '联网搜索尚未配置',
   VALIDATION_ERROR: '请求内容格式不正确',
   HTTP_ERROR: '请求失败'
 }

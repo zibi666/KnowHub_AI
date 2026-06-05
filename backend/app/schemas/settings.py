@@ -24,3 +24,24 @@ class ImageGenerationSettings(ApiModel):
     output_format: str = "png"
     output_compression: int = 100
     moderation: str = "auto"
+
+
+class WebSearchSettings(ApiModel):
+    enabled: bool = False
+    searxng_base_url: str | None = None
+    result_count: int = 5
+    language: str = "all"
+    safesearch: str = "1"
+    timeout_seconds: int = 20
+    fetch_timeout_seconds: int = 20
+    max_tool_calls: int = 4
+    fetch_max_chars: int = 12000
+
+
+class WebSearchStatus(ApiModel):
+    enabled: bool
+    configured: bool
+
+
+class WebSearchTestRequest(ApiModel):
+    query: str

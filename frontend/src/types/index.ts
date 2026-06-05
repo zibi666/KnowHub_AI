@@ -12,6 +12,8 @@ export interface Conversation {
   id: string
   title: string
   autoCompactionEnabled: boolean
+  webSearchEnabled?: boolean
+  web_search_enabled?: boolean
   createdAt: string
   updatedAt: string
 }
@@ -45,6 +47,29 @@ export interface Message {
   progress_detail?: string
   progressPhase?: string
   progress_phase?: string
+}
+
+export interface WebSearchStatus {
+  enabled: boolean
+  configured: boolean
+}
+
+export interface WebSearchSettings {
+  enabled: boolean
+  searxngBaseUrl?: string | null
+  searxng_base_url?: string | null
+  resultCount: number
+  result_count?: number
+  language: string
+  safesearch: string
+  timeoutSeconds: number
+  timeout_seconds?: number
+  fetchTimeoutSeconds: number
+  fetch_timeout_seconds?: number
+  maxToolCalls: number
+  max_tool_calls?: number
+  fetchMaxChars: number
+  fetch_max_chars?: number
 }
 
 export interface SendMessageResponse {

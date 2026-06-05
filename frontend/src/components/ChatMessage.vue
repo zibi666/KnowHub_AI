@@ -35,6 +35,7 @@ const emptyAssistantFailureText = computed(() => {
   return ''
 })
 const showAssistantCopyAction = computed(() => props.message.role === 'assistant' && !isStreaming.value && props.message.content.trim())
+const thinkingStatusText = computed(() => props.message.progressDetail || props.message.progress_detail || '正在思考')
 const canCollapse = computed(() => isUserMessage.value && !isStreaming.value && userMessageOverflows.value)
 const isCollapsed = computed(() => canCollapse.value && !isExpanded.value)
 const collapseButtonLabel = computed(() => (isCollapsed.value ? '展开全文' : '收起'))
@@ -431,13 +432,13 @@ onUnmounted(() => {
           </div>
         </div>
         <div v-else-if="showThinkingPanel" class="thinking-panel">
-          <div class="thinking-label">正在思考</div>
+          <div class="thinking-label">{{ thinkingStatusText }}</div>
           <div class="thinking-bars" aria-hidden="true">
             <span />
             <span />
             <span />
           </div>
-          <div v-if="streamingElapsed" class="thinking-elapsed">思考中 {{ streamingElapsed }}</div>
+          <div v-if="streamingElapsed" class="thinking-elapsed">{{ thinkingStatusText }} {{ streamingElapsed }}</div>
         </div>
         <div v-else-if="emptyAssistantFailureText" class="message-status-text">
           {{ emptyAssistantFailureText }}

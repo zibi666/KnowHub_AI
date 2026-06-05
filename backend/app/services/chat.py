@@ -50,6 +50,14 @@ from app.services.image_generation import (
     official_available_models,
     save_generated_image_attachment,
 )
+from app.services.web_search import (
+    append_sources_markdown,
+    effective_web_search_config,
+    json_tool_output,
+    run_web_search_tool,
+    tool_result_sources,
+    web_search_tools,
+)
 from app.services.usage import record_usage
 
 DEFAULT_CHAT_MODEL = "gpt-5.5"
@@ -409,6 +417,114 @@ def generated_image_data_url(b64_json: str, output_format: str | None) -> str:
     return f"data:image/{image_format};base64,{b64_json}"
 
 
+def add_usage_totals(total: dict | None, usage: dict | None) -> dict | None:
+    if not usage:
+        return total
+    if total is None:
+        total = {"prompt_tokens": 0, "completion_tokens": 0, "total_tokens": 0}
+    total["prompt_tokens"] = int(total.get("prompt_tokens") or 0) + int(usage.get("prompt_tokens") or 0)
+    total["completion_tokens"] = int(total.get("completion_tokens") or 0) + int(usage.get("completion_tokens") or 0)
+    total["total_tokens"] = int(total.get("total_tokens") or 0) + int(usage.get("total_tokens") or 0)
+    return total
+
+
+async def run_web_search_tool_loop(
+    *,
+    provider: OpenAICompatibleProvider,
+    api_key: str,
+    model: str,
+    context: list[dict],
+    conversation_id: str,
+    assistant_message_id: str,
+    reasoning_effort: str | None,
+) -> tuple[list, dict | None]:
+    config = effective_web_search_config()
+    if not config.configured:
+        raise HTTPException(
+            status_code=400,
+            detail={"code": "WEB_SEARCH_NOT_CONFIGURED", "message": "联网搜索尚未配置 SearXNG，无法启用。"},
+        )
+    tools = web_search_tools()
+    sources: list = []
+    usage_total: dict | None = None
+    executed_calls = 0
+    had_tool_error = False
+    for _ in range(max(1, config.max_tool_calls)):
+        turn = await provider.tool_call_turn(
+            api_key=api_key,
+            model=model,
+            messages=context,
+            tools=tools,
+            max_completion_tokens=768,
+            reasoning_effort=reasoning_effort,
+            timeout_seconds=max(10, config.timeout_seconds + config.fetch_timeout_seconds),
+        )
+        usage_total = add_usage_totals(usage_total, turn.usage)
+        if not turn.tool_calls:
+            break
+        if turn.assistant_message:
+            context.append(turn.assistant_message)
+        for call in turn.tool_calls:
+            if executed_calls >= config.max_tool_calls:
+                payload = {"ok": False, "error": "Web search tool call limit reached"}
+            else:
+                executed_calls += 1
+                phase = "searching" if call.name == "search_web" else "reading"
+                detail = "正在联网搜索..." if call.name == "search_web" else "正在读取网页..."
+                await publish_conversation_event(
+                    conversation_id,
+                    "web_search_status",
+                    {
+                        "conversation_id": conversation_id,
+                        "message_id": assistant_message_id,
+                        "phase": phase,
+                        "detail": detail,
+                        "tool": call.name,
+                    },
+                )
+                payload = await run_web_search_tool(call.name, call.arguments, config)
+                if payload.get("ok"):
+                    sources.extend(tool_result_sources(payload))
+                else:
+                    had_tool_error = True
+                    await publish_conversation_event(
+                        conversation_id,
+                        "web_search_status",
+                        {
+                            "conversation_id": conversation_id,
+                            "message_id": assistant_message_id,
+                            "phase": "failed",
+                            "detail": "联网搜索失败，正在尝试继续回答。",
+                            "tool": call.name,
+                            "error": str(payload.get("error") or "")[:300],
+                        },
+                    )
+            context.append(
+                {
+                    "role": "tool",
+                    "tool_call_id": call.id,
+                    "name": call.name,
+                    "content": json_tool_output(payload),
+                }
+            )
+        if executed_calls >= config.max_tool_calls:
+            break
+    if executed_calls:
+        failed_without_sources = had_tool_error and not sources
+        await publish_conversation_event(
+            conversation_id,
+            "web_search_status",
+            {
+                "conversation_id": conversation_id,
+                "message_id": assistant_message_id,
+                "phase": "failed" if failed_without_sources else "completed",
+                "detail": "联网搜索失败，正在整理回答。" if failed_without_sources else "联网搜索已完成，正在整理回答。",
+                "source_count": len({getattr(source, "url", "") for source in sources}),
+            },
+        )
+    return sources, usage_total
+
+
 def model_supports_vision(model: str | None) -> bool:
     settings = get_settings()
     model_name = (model or "").lower()
@@ -596,7 +712,11 @@ async def prepare_chat_messages(user_id: str, payload: SendMessageRequest, conve
                 raise HTTPException(status_code=400, detail={"code": "KEY_REQUIRED", "message": "请先绑定模型 API Key"})
         if conversation_id is None:
             title = (payload.content.strip() or "新对话")[:30]
-            conversation = Conversation(user_id=user_id, title=title)
+            conversation = Conversation(
+                user_id=user_id,
+                title=title,
+                web_search_enabled=bool(payload.web_search_enabled),
+            )
             db.add(conversation)
             await db.flush()
             conversation_id = conversation.id
@@ -605,6 +725,8 @@ async def prepare_chat_messages(user_id: str, payload: SendMessageRequest, conve
             conversation = await db.get(Conversation, conversation_id)
             if not conversation or conversation.user_id != user_id or conversation.deleted_at is not None:
                 raise HTTPException(status_code=403, detail={"code": "FORBIDDEN", "message": "会话不存在"})
+            if payload.web_search_enabled is not None:
+                conversation.web_search_enabled = payload.web_search_enabled
 
         upload_attachments, referenced_attachments = await resolve_message_attachments(
             db,
@@ -792,7 +914,11 @@ async def stream_chat(user_id: str, payload: SendMessageRequest, conversation_id
                 return
         if conversation_id is None:
             title = (payload.content.strip() or "新对话")[:30]
-            conversation = Conversation(user_id=user_id, title=title)
+            conversation = Conversation(
+                user_id=user_id,
+                title=title,
+                web_search_enabled=bool(payload.web_search_enabled),
+            )
             db.add(conversation)
             await db.flush()
             conversation_id = conversation.id
@@ -802,6 +928,8 @@ async def stream_chat(user_id: str, payload: SendMessageRequest, conversation_id
             if not conversation or conversation.user_id != user_id or conversation.deleted_at is not None:
                 yield json_line("error", {"code": "FORBIDDEN", "message": "会话不存在", "retryable": False})
                 return
+            if payload.web_search_enabled is not None:
+                conversation.web_search_enabled = payload.web_search_enabled
 
         try:
             upload_attachments, referenced_attachments = await resolve_message_attachments(
@@ -1876,7 +2004,10 @@ async def run_chat_generation_job(
     request_started = time.perf_counter()
     buffer: list[str] = []
     usage: dict | None = None
+    tool_usage: dict | None = None
+    web_search_sources: list = []
     context_event: dict | None = None
+    web_search_enabled = False
     try:
         assistant_started_at: datetime | None = None
         async with SessionLocal() as db:
@@ -1934,6 +2065,8 @@ async def run_chat_generation_job(
         settings = get_settings()
         async with SessionLocal() as db:
             quota = await db.get(UserQuota, user_id)
+            conversation = await db.get(Conversation, conversation_id)
+            web_search_enabled = bool(conversation.web_search_enabled) if conversation else False
             referenced_ids = unique_ids(payload.referenced_attachment_ids)
             context_bundle = await build_context_bundle(
                 db,
@@ -2002,6 +2135,16 @@ async def run_chat_generation_job(
         request_reasoning_effort = requested_effort if requested_effort and requested_effort in allowed_reasoning else settings.model_reasoning_effort
 
         provider = OpenAICompatibleProvider(api_key_row.base_url)
+        if web_search_enabled:
+            web_search_sources, tool_usage = await run_web_search_tool_loop(
+                provider=provider,
+                api_key=api_key,
+                model=model,
+                context=context,
+                conversation_id=conversation_id,
+                assistant_message_id=assistant_message_id,
+                reasoning_effort=request_reasoning_effort,
+            )
         stream = provider.chat_stream(
             api_key=api_key,
             model=model,
@@ -2102,6 +2245,8 @@ async def run_chat_generation_job(
                     await pending_next
 
         content = "".join(buffer)
+        if web_search_sources:
+            content = append_sources_markdown(content, web_search_sources)
         if not content.strip():
             message = empty_chat_response_message(model, api_key_row.base_url)
             logger.warning(
@@ -2142,10 +2287,22 @@ async def run_chat_generation_job(
             return
 
         if usage:
-            prompt_tokens = int(usage.get("prompt_tokens") or 0)
-            completion_tokens = int(usage.get("completion_tokens") or 0)
-            total_tokens = int(usage.get("total_tokens") or prompt_tokens + completion_tokens)
+            combined_usage = add_usage_totals(tool_usage, usage)
             tokens_source = "actual"
+        elif tool_usage:
+            estimated_final_usage = {
+                "prompt_tokens": estimate_tokens_text(json.dumps(context, ensure_ascii=False)),
+                "completion_tokens": estimate_tokens_text(content),
+            }
+            estimated_final_usage["total_tokens"] = estimated_final_usage["prompt_tokens"] + estimated_final_usage["completion_tokens"]
+            combined_usage = add_usage_totals(tool_usage, estimated_final_usage)
+            tokens_source = "estimated"
+        else:
+            combined_usage = None
+        if combined_usage:
+            prompt_tokens = int(combined_usage.get("prompt_tokens") or 0)
+            completion_tokens = int(combined_usage.get("completion_tokens") or 0)
+            total_tokens = int(combined_usage.get("total_tokens") or prompt_tokens + completion_tokens)
         else:
             prompt_tokens = estimate_tokens_text(json.dumps(context, ensure_ascii=False))
             completion_tokens = estimate_tokens_text(content)
