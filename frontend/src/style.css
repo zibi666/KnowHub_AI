@@ -5107,6 +5107,11 @@ body,
   box-shadow: 0 12px 28px rgba(0, 0, 0, 0.22);
 }
 
+.composer-attachment-card.is-selected {
+  border-color: color-mix(in srgb, var(--bubble-bg) 46%, var(--input-border));
+  background: color-mix(in srgb, var(--bubble-bg) 10%, var(--control-bg));
+}
+
 .composer-attachment-card.is-image {
   width: 144px;
   height: 104px;
@@ -5189,8 +5194,15 @@ body,
   min-width: 0;
   align-items: center;
   gap: 0.65rem;
+  border: 0;
+  background: transparent;
   color: var(--muted);
+  cursor: pointer;
   text-align: left;
+}
+
+.composer-attachment-preview:hover {
+  color: var(--text);
 }
 
 .composer-attachment-preview img {

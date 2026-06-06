@@ -323,6 +323,9 @@ const webSearchToggleLabel = computed(() => {
 const activeFileTreeAttachments = computed(() => (currentId.value ? conversationAttachments.value : draftConversationAttachments.value))
 const selectedFileTreeAttachments = computed(() => activeFileTreeAttachments.value.filter((item) => item.selected))
 const selectedFileTreeAttachmentIds = computed(() => selectedFileTreeAttachments.value.map((item) => item.attachment.id))
+const composerAttachmentItems = computed(() => selectedFileTreeAttachments.value)
+const composerImageAttachments = computed(() => composerAttachmentItems.value.filter((item) => isImageAttachment(item.attachment)))
+const composerDocumentAttachments = computed(() => composerAttachmentItems.value.filter((item) => !isImageAttachment(item.attachment)))
 const fileTreeImages = computed(() => activeFileTreeAttachments.value.filter((item) => isImageAttachment(item.attachment)))
 const fileTreeDocuments = computed(() => activeFileTreeAttachments.value.filter((item) => !isImageAttachment(item.attachment)))
 const userQuestionNavItems = computed(() =>
@@ -358,7 +361,8 @@ const canUseCompactComposer = computed(
   () =>
     isEmptyChat.value &&
     !composerExpanded.value &&
-    uploadingAttachmentNames.value.length === 0
+    uploadingAttachmentNames.value.length === 0 &&
+    composerAttachmentItems.value.length === 0
 )
 const composerClasses = computed(() => ({
   'is-expanded': composerExpanded.value,
@@ -3664,7 +3668,7 @@ onUnmounted(() => {
           @dragleave="handleComposerDragLeave"
           @drop="handleComposerDrop"
         >
-          <div v-if="uploadingAttachmentNames.length" class="composer-attachments">
+          <div v-if="uploadingAttachmentNames.length || composerAttachmentItems.length" class="composer-attachments">
             <div v-for="name in uploadingAttachmentNames" :key="`uploading-${name}`" class="composer-attachment-card is-uploading">
               <div class="composer-attachment-loading" aria-hidden="true" />
               <div class="composer-attachment-meta">
@@ -3672,6 +3676,59 @@ onUnmounted(() => {
                 <span>上传中</span>
               </div>
             </div>
+            <article
+              v-for="item in composerImageAttachments"
+              :key="`composer-image-${item.attachment.id}`"
+              class="composer-attachment-card is-image is-selected"
+            >
+              <button
+                class="composer-attachment-preview"
+                type="button"
+                :title="`查看图片：${fileTreeDisplayName(item)}`"
+                :aria-label="`查看图片：${fileTreeDisplayName(item)}`"
+                @click="openAttachmentPreview(fileTreeAttachmentForPreview(item))"
+              >
+                <img :src="attachmentPreviewUrl(item.attachment.id)" :alt="fileTreeDisplayName(item)" />
+              </button>
+              <button
+                class="composer-attachment-remove"
+                type="button"
+                title="取消引用"
+                aria-label="取消引用"
+                @click.stop="setFileTreeAttachmentSelected(item, false)"
+              >
+                <X :size="13" />
+              </button>
+              <span class="composer-attachment-status">{{ parseStatusText[item.attachment.parseStatus] || item.attachment.parseStatus }}</span>
+            </article>
+            <article
+              v-for="item in composerDocumentAttachments"
+              :key="`composer-file-${item.attachment.id}`"
+              class="composer-attachment-card is-file is-selected"
+            >
+              <button
+                class="composer-attachment-preview"
+                type="button"
+                :title="`查看文件：${fileTreeDisplayName(item)}`"
+                :aria-label="`查看文件：${fileTreeDisplayName(item)}`"
+                @click="openAttachmentPreview(fileTreeAttachmentForPreview(item))"
+              >
+                <span class="composer-file-icon" :class="attachmentKindClass(item.attachment)"><FileText :size="20" /></span>
+                <span class="composer-attachment-meta">
+                  <strong>{{ fileTreeDisplayName(item) }}</strong>
+                  <em>{{ attachmentKindLabel(item.attachment) }} · {{ parseStatusText[item.attachment.parseStatus] || item.attachment.parseStatus }}</em>
+                </span>
+              </button>
+              <button
+                class="composer-attachment-remove"
+                type="button"
+                title="取消引用"
+                aria-label="取消引用"
+                @click.stop="setFileTreeAttachmentSelected(item, false)"
+              >
+                <X :size="13" />
+              </button>
+            </article>
           </div>
           <button
             class="composer-expand-button"
