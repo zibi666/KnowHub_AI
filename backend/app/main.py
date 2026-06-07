@@ -5,7 +5,7 @@ from fastapi.exceptions import RequestValidationError
 from fastapi.responses import JSONResponse
 from sqlalchemy import text
 
-from app.api.routes import admin, api_keys, attachments, auth, chat, models
+from app.api.routes import admin, api_keys, attachments, auth, chat, models, web_search
 from app.core.db import SessionLocal, create_all, engine
 from app.middlewares.csrf import CsrfMiddleware
 from app.middlewares.request_id import RequestIdMiddleware
@@ -62,5 +62,6 @@ app.include_router(models.router, prefix="/api")
 app.include_router(models.settings_router, prefix="/api")
 app.include_router(api_keys.router, prefix="/api")
 app.include_router(chat.router, prefix="/api")
+app.include_router(web_search.router, prefix="/api")
 app.include_router(attachments.router, prefix="/api")
 app.include_router(admin.router, prefix="/api")

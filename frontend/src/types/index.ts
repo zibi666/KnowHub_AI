@@ -35,6 +35,7 @@ export interface Message {
   firstTokenSeconds?: number | null
   first_token_seconds?: number | null
   createdAt: string
+  created_at?: string
   attachments?: Attachment[]
   generatedImageSize?: string
   imageProgress?: ImageProgress
@@ -47,6 +48,23 @@ export interface Message {
   progress_detail?: string
   progressPhase?: string
   progress_phase?: string
+  webSearchSources?: WebSearchSource[]
+  web_search_sources?: WebSearchSource[]
+}
+
+export interface WebSearchSource {
+  index: number
+  title: string
+  url: string
+  snippet?: string
+  siteName?: string | null
+  site_name?: string | null
+  publishedAt?: string | null
+  published_at?: string | null
+  faviconUrl?: string | null
+  favicon_url?: string | null
+  displayUrl?: string
+  display_url?: string
 }
 
 export interface WebSearchStatus {

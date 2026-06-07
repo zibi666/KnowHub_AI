@@ -5,6 +5,7 @@ import { useRouter } from 'vue-router'
 import { ApiError, apiFetch, localizeApiMessage, readCookie } from '../api/client'
 import AppSelect from '../components/AppSelect.vue'
 import ChatMessage from '../components/ChatMessage.vue'
+import SourceIcon from '../components/SourceIcon.vue'
 import { useAuthStore } from '../stores/auth'
 import type {
   ApiKeyEntry,
@@ -21,13 +22,21 @@ import type {
   SendMessageResponse,
   User,
   WebSearchSettings,
+  WebSearchSource,
   WebSearchStatus
 } from '../types'
 import { copyText } from '../utils/clipboard'
+import { sourceDisplayUrl, sourceOpenUrl, sourceSiteName } from '../utils/sources'
 
 type ThemeMode = 'dark' | 'light'
 type SettingsTab = 'appearance' | 'image' | 'web' | 'api' | 'groups' | 'account'
 type GroupPurpose = 'none' | 'chat' | 'image'
+type StreamProgressSnapshot = {
+  startedAt?: number
+  elapsedSeconds?: number
+  progressDetail?: string
+  progressPhase?: string
+}
 
 type ModelKeyChoice = {
   model: string
@@ -124,6 +133,7 @@ const conversations = ref<Conversation[]>([])
 const conversationsLoading = ref(true)
 const currentId = ref<string | null>(null)
 const messages = ref<Message[]>([])
+const streamProgressByMessageId = new Map<string, StreamProgressSnapshot>()
 const messagesLoading = ref(false)
 const input = ref('')
 const composerInput = ref<HTMLTextAreaElement | null>(null)
@@ -153,6 +163,7 @@ const uploadingAttachmentNames = ref<string[]>([])
 const composerDragActive = ref(false)
 const composerCompact = ref(true)
 const composerScrollable = ref(false)
+const composerAttachmentsScroller = ref<HTMLElement | null>(null)
 const attachmentPreviewOpen = ref(false)
 const attachmentPreview = ref<Attachment | null>(null)
 const attachmentPreviewText = ref('')
@@ -160,6 +171,9 @@ const attachmentPreviewChunks = ref<AttachmentChunkPreview[]>([])
 const attachmentPreviewLoading = ref(false)
 const attachmentPreviewError = ref('')
 const reindexingAttachment = ref(false)
+const sourceDrawerOpen = ref(false)
+const sourceDrawerMessageId = ref<string | null>(null)
+const sourceDrawerSources = ref<WebSearchSource[]>([])
 const error = ref('')
 const contextStats = ref({
   promptTokensEstimated: 0,
@@ -182,6 +196,7 @@ const showScrollToBottom = ref(false)
 const questionNavHasBefore = ref(false)
 const questionNavHasAfter = ref(false)
 const questionNavShortConversation = ref(false)
+const chatFooterHeight = ref(0)
 let userHasScrolledUp = false
 let programmaticScrollUntil = 0
 let questionNavLockUntil = 0
@@ -303,6 +318,7 @@ const webSearchSettings = ref<WebSearchSettings>({
 let scrollFrame: number | null = null
 let composerResizeFrame: number | null = null
 let composerMeasureElement: HTMLDivElement | null = null
+let chatFooterResizeObserver: ResizeObserver | null = null
 let activeConversationLoad = 0
 let imagePollingTimer: number | null = null
 let conversationEventSource: EventSource | null = null
@@ -375,6 +391,19 @@ function isImageAttachment(item: Attachment) {
   return item.mimeSniffed?.startsWith('image/')
 }
 
+function handleComposerAttachmentsWheel(event: WheelEvent) {
+  const scroller = composerAttachmentsScroller.value
+  if (!scroller) return
+  const overflow = scroller.scrollWidth - scroller.clientWidth
+  if (overflow <= 1) return
+  const delta = Math.abs(event.deltaY) >= Math.abs(event.deltaX) ? event.deltaY : event.deltaX
+  if (!delta) return
+  const nextLeft = Math.max(0, Math.min(overflow, scroller.scrollLeft + delta))
+  if (Math.abs(nextLeft - scroller.scrollLeft) < 1) return
+  event.preventDefault()
+  scroller.scrollLeft = nextLeft
+}
+
 function isReferenceDocument(item: Attachment) {
   return !isImageAttachment(item) && item.parseStatus === 'success'
 }
@@ -382,6 +411,40 @@ function isReferenceDocument(item: Attachment) {
 function truncateQuestionTitle(text: string) {
   const normalized = text.trim().replace(/\s+/g, ' ')
   return normalized.length > 28 ? `${normalized.slice(0, 28)}...` : normalized
+}
+
+function truncateProgressText(value: unknown, limit = 72) {
+  const normalized = String(value || '').trim().replace(/\s+/g, ' ')
+  return normalized.length > limit ? `${normalized.slice(0, limit)}...` : normalized
+}
+
+function webSearchProgressDetail(data: any) {
+  const query = truncateProgressText(data?.query)
+  const url = truncateProgressText(data?.url, 84)
+  const resultCount = Number(data?.result_count ?? data?.resultCount)
+  const sourceCount = Number(data?.source_count ?? data?.sourceCount)
+  if (data?.detail && data.detail !== '正在联网搜索...' && data.detail !== '正在读取网页...') return data.detail
+  if (data?.phase === 'searching' && query) return `正在搜索：${query}`
+  if (data?.phase === 'reading' && url) return `正在读取：${url}`
+  if (data?.phase === 'completed' && Number.isFinite(sourceCount)) return `联网搜索已完成，找到 ${sourceCount} 个来源。`
+  if (Number.isFinite(resultCount)) return `搜索返回 ${resultCount} 条结果`
+  return data?.detail || '正在联网搜索...'
+}
+
+function openWebSearchSources(message: Message, sources: WebSearchSource[]) {
+  sourceDrawerMessageId.value = message.id
+  sourceDrawerSources.value = sources
+  sourceDrawerOpen.value = true
+}
+
+function closeWebSearchSources() {
+  sourceDrawerOpen.value = false
+}
+
+function openSourceUrl(source: WebSearchSource) {
+  const url = sourceOpenUrl(source)
+  if (!url) return
+  window.open(url, '_blank', 'noopener,noreferrer')
 }
 
 function selectedModelSupportsVision() {
@@ -409,7 +472,7 @@ function parseApiDateMs(value: unknown) {
 }
 
 function messageCreatedAtMs(message: Message) {
-  const createdAt = parseApiDateMs(message.createdAt)
+  const createdAt = parseApiDateMs(message.createdAt ?? message.created_at)
   return createdAt !== undefined ? Math.min(createdAt, Date.now()) : Date.now()
 }
 
@@ -432,6 +495,94 @@ function normalizeProgressElapsed(value: unknown) {
   if (value === null || value === undefined) return undefined
   const elapsed = Number(value)
   return Number.isFinite(elapsed) && elapsed >= 0 ? Math.floor(elapsed) : undefined
+}
+
+function earliestProgressTimestamp(...values: unknown[]) {
+  const timestamps = values
+    .map((value) => normalizeProgressTimestamp(value))
+    .filter((value): value is number => value !== undefined)
+  if (!timestamps.length) return undefined
+  const now = Date.now()
+  return Math.min(...timestamps.map((timestamp) => Math.min(timestamp, now)))
+}
+
+function forgetStreamProgress(messageId?: string | null) {
+  if (!messageId) return
+  streamProgressByMessageId.delete(messageId)
+}
+
+function migrateStreamProgress(fromId?: string | null, toId?: string | null) {
+  if (!fromId || !toId || fromId === toId) return
+  const cached = streamProgressByMessageId.get(fromId)
+  if (!cached) return
+  const target = streamProgressByMessageId.get(toId)
+  streamProgressByMessageId.set(toId, {
+    startedAt: earliestProgressTimestamp(target?.startedAt, cached.startedAt),
+    elapsedSeconds: Math.max(target?.elapsedSeconds ?? 0, cached.elapsedSeconds ?? 0),
+    progressDetail: target?.progressDetail || cached.progressDetail,
+    progressPhase: target?.progressPhase || cached.progressPhase
+  })
+  streamProgressByMessageId.delete(fromId)
+}
+
+function rememberStreamProgress(message: Message, data: any = {}) {
+  if (!message.id || message.role !== 'assistant') return
+  const status = data.status || message.status
+  if (status !== 'streaming') {
+    forgetStreamProgress(message.id)
+    return
+  }
+  const cached = streamProgressByMessageId.get(message.id)
+  const startedAt =
+    earliestProgressTimestamp(message.startedAt ?? message.started_at, data.startedAt ?? data.started_at, cached?.startedAt) ??
+    messageCreatedAtMs(message)
+  const elapsedSeconds = Math.max(
+    currentRuntimeElapsed(message, true),
+    normalizeProgressElapsed(data.elapsedSeconds ?? data.elapsed_seconds) ?? 0,
+    cached?.elapsedSeconds ?? 0,
+    Math.floor((Date.now() - startedAt) / 1000),
+    0
+  )
+  streamProgressByMessageId.set(message.id, {
+    startedAt,
+    elapsedSeconds,
+    progressDetail: data.detail || data.progressDetail || data.progress_detail || message.progressDetail || message.progress_detail || cached?.progressDetail,
+    progressPhase: data.phase || data.progressPhase || data.progress_phase || message.progressPhase || message.progress_phase || cached?.progressPhase
+  })
+}
+
+function restoreCachedStreamProgress(message: Message) {
+  if (message.status !== 'streaming') {
+    forgetStreamProgress(message.id)
+    return
+  }
+  const cached = streamProgressByMessageId.get(message.id)
+  if (!cached) return
+  const startedAt = earliestProgressTimestamp(message.startedAt ?? message.started_at, cached.startedAt)
+  if (startedAt !== undefined) {
+    message.startedAt = startedAt
+    message.started_at = startedAt
+  }
+  const elapsedSeconds = Math.max(
+    normalizeProgressElapsed(message.elapsedSeconds ?? message.elapsed_seconds) ?? 0,
+    cached.elapsedSeconds ?? 0,
+    startedAt !== undefined ? Math.floor((Date.now() - startedAt) / 1000) : 0,
+    0
+  )
+  message.elapsedSeconds = elapsedSeconds
+  message.elapsed_seconds = elapsedSeconds
+  message.progressDetail = message.progressDetail || message.progress_detail || cached.progressDetail
+  message.progress_detail = message.progressDetail
+  message.progressPhase = message.progressPhase || message.progress_phase || cached.progressPhase
+  message.progress_phase = message.progressPhase
+}
+
+function rememberStreamingProgressForMessages(items: Message[]) {
+  for (const message of items) {
+    if (message.role === 'assistant' && message.status === 'streaming') {
+      rememberStreamProgress(message)
+    }
+  }
 }
 
 function userFacingSendError(err: unknown) {
@@ -480,19 +631,23 @@ function freezeFirstTokenSeconds(message: Message, data: any = {}) {
 }
 
 function applyRuntimeProgress(message: Message, data: any = {}) {
-  const existingStartedAt = normalizeProgressTimestamp(message.startedAt ?? message.started_at)
-  const incomingStartedAt = normalizeProgressTimestamp(data.startedAt ?? data.started_at)
   const targetStatus = data.status || message.status
   const isStreamingProgress = targetStatus === 'streaming'
+  if (isStreamingProgress) restoreCachedStreamProgress(message)
+  const cached = message.id ? streamProgressByMessageId.get(message.id) : undefined
+  const existingStartedAt = normalizeProgressTimestamp(message.startedAt ?? message.started_at)
+  const incomingStartedAt = normalizeProgressTimestamp(data.startedAt ?? data.started_at)
   const fallbackStartedAt = isStreamingProgress ? messageCreatedAtMs(message) : undefined
   const now = Date.now()
-  const startedAt = existingStartedAt ?? incomingStartedAt ?? fallbackStartedAt ?? (isStreamingProgress ? now : undefined)
+  const startedAt = isStreamingProgress
+    ? earliestProgressTimestamp(existingStartedAt, incomingStartedAt, cached?.startedAt, fallbackStartedAt) ?? now
+    : existingStartedAt ?? incomingStartedAt
   const firstTokenSeconds = incomingFirstTokenSeconds(data)
   const incomingElapsed = normalizeProgressElapsed(data.elapsedSeconds ?? data.elapsed_seconds)
   const existingElapsed = currentRuntimeElapsed(message, isStreamingProgress)
   const elapsedSeconds =
     isStreamingProgress
-      ? Math.max(existingElapsed, incomingElapsed ?? 0)
+      ? Math.max(existingElapsed, incomingElapsed ?? 0, cached?.elapsedSeconds ?? 0, startedAt ? Math.floor((now - startedAt) / 1000) : 0)
       : Math.max(existingElapsed, incomingElapsed ?? normalizeProgressElapsed(message.elapsedSeconds ?? message.elapsed_seconds) ?? 0)
   if (firstTokenSeconds !== undefined) {
     setMessageFirstTokenSeconds(message, firstTokenSeconds)
@@ -510,10 +665,14 @@ function applyRuntimeProgress(message: Message, data: any = {}) {
   message.progress_detail = message.progressDetail
   message.progressPhase = data.phase || data.progressPhase || data.progress_phase || message.progressPhase || message.progress_phase
   message.progress_phase = message.progressPhase
+  rememberStreamProgress(message, { ...data, status: targetStatus })
 }
 
 function normalizeLoadedMessage(message: Message): Message {
+  message.webSearchSources = message.webSearchSources || message.web_search_sources || []
+  message.web_search_sources = message.webSearchSources
   const progress = message.imageProgress || message.image_progress
+  restoreCachedStreamProgress(message)
   if (message.status === 'streaming') {
     applyRuntimeProgress(message)
   } else {
@@ -531,7 +690,7 @@ function normalizeLoadedMessage(message: Message): Message {
       outputFormat: progress.outputFormat || progress.output_format || 'png',
       detail: progress.detail,
       elapsedSeconds,
-      startedAt: normalizeProgressTimestamp(progress.startedAt ?? progress.started_at) || message.startedAt || messageCreatedAtMs(message),
+      startedAt: earliestProgressTimestamp(progress.startedAt ?? progress.started_at, message.startedAt ?? message.started_at) || messageCreatedAtMs(message),
       phase: progress.phase || message.progressPhase || message.progress_phase || 'submitted',
       size: progress.size || imageSettings.value.size
     }
@@ -545,7 +704,7 @@ function applyImageProgress(message: Message, data: any = {}) {
   message.status = data.status || 'streaming'
   applyRuntimeProgress(message, data)
   const existing = message.imageProgress || message.image_progress
-  const startedAt = normalizeProgressTimestamp(message.startedAt ?? message.started_at) || normalizeProgressTimestamp(existing?.startedAt ?? existing?.started_at) || Date.now()
+  const startedAt = earliestProgressTimestamp(message.startedAt ?? message.started_at, existing?.startedAt ?? existing?.started_at, data.startedAt ?? data.started_at) || Date.now()
   const elapsedSeconds = Math.max(
     currentRuntimeElapsed(message),
     normalizeProgressElapsed(existing?.elapsedSeconds ?? existing?.elapsed_seconds) ?? 0,
@@ -1010,7 +1169,8 @@ const shellStyle = computed(
       '--message-font-size': `${Math.max(16, textSize.value)}px`,
       '--user-message-font-size': `${Math.max(15.5, textSize.value - 0.25)}px`,
       '--code-font-size': `${codeSize.value}px`,
-      '--welcome-font-size': `${welcomeFontSize.value}px`
+      '--welcome-font-size': `${welcomeFontSize.value}px`,
+      '--chat-footer-height': `${chatFooterHeight.value}px`
     }) as CSSProperties
 )
 
@@ -1929,10 +2089,10 @@ function clearQuestionNavLock() {
 }
 
 function pauseAutoScrollFromUserScroll() {
+  cancelPendingScroll()
   if (!streaming.value) return
   userHasScrolledUp = true
   showScrollToBottom.value = messages.value.length > 0
-  cancelPendingScroll()
 }
 
 function handleScrollerWheel(event: WheelEvent) {
@@ -2145,8 +2305,18 @@ function findMessageForMerge(message: Message) {
 }
 
 function mergeMessageIntoExisting(existing: Message, incoming: Message, preserve: Partial<Message> = {}) {
+  const previousId = existing.id
+  if (existing.role === 'assistant' && existing.status === 'streaming') rememberStreamProgress(existing)
   const stableClientKey = existing.clientKey || preserve.clientKey || incoming.clientKey || existing.id
   Object.assign(existing, incoming, preserve, { clientKey: stableClientKey })
+  migrateStreamProgress(previousId, existing.id)
+  if (existing.role === 'assistant' && existing.status === 'streaming') {
+    restoreCachedStreamProgress(existing)
+    rememberStreamProgress(existing)
+  } else {
+    forgetStreamProgress(previousId)
+    forgetStreamProgress(existing.id)
+  }
   moveMessageToDisplayPosition(existing)
 }
 
@@ -2169,6 +2339,7 @@ function finishImageFinalization(messageId: string, data: any = {}) {
   imageFinalizationTimers.delete(messageId)
   const message = findMessage(messageId)
   if (!message) return
+  forgetStreamProgress(message.id)
   message.status = data.status || 'completed'
   if (typeof data.content === 'string') message.content = data.content
   message.imageProgress = undefined
@@ -2273,7 +2444,9 @@ function applyConversationEvent(event: string, data: any) {
     model: data.model,
     totalTokens: Number(data.total_tokens || data.totalTokens || 0),
     createdAt: data.created_at || data.createdAt || new Date().toISOString(),
-    parentMessageId: data.user_message_id || data.userMessageId || data.parent_message_id || data.parentMessageId
+    parentMessageId: data.user_message_id || data.userMessageId || data.parent_message_id || data.parentMessageId,
+    webSearchSources: data.web_search_sources || data.webSearchSources || [],
+    web_search_sources: data.web_search_sources || data.webSearchSources || []
   }
   const message = findMessage(messageId) || findMessageForMerge(eventMessage)
   if (event === 'message_delta') {
@@ -2300,6 +2473,10 @@ function applyConversationEvent(event: string, data: any) {
     }
     if (typeof data.content === 'string') message.content = data.content
     if (data.status) message.status = data.status
+    if (data.web_search_sources || data.webSearchSources) {
+      message.webSearchSources = data.web_search_sources || data.webSearchSources || []
+      message.web_search_sources = message.webSearchSources
+    }
     applyRuntimeProgress(message, data)
     syncActiveRequestState()
     return
@@ -2320,7 +2497,7 @@ function applyConversationEvent(event: string, data: any) {
       return
     }
     message.status = 'streaming'
-    message.progressDetail = data.detail || '正在联网搜索...'
+    message.progressDetail = webSearchProgressDetail(data)
     message.progress_detail = message.progressDetail
     message.progressPhase = data.phase || 'web_search'
     message.progress_phase = message.progressPhase
@@ -2400,15 +2577,22 @@ function applyConversationEvent(event: string, data: any) {
     if (message) {
       message.status = data.status || (event === 'message_completed' ? 'completed' : 'failed_no_output')
       if (typeof data.content === 'string') message.content = data.content
+      if (data.web_search_sources || data.webSearchSources) {
+        message.webSearchSources = data.web_search_sources || data.webSearchSources || []
+        message.web_search_sources = message.webSearchSources
+      }
       applyRuntimeProgress(message, { ...data, status: message.status })
       if (message.content.trim()) freezeFirstTokenSeconds(message, { ...data, status: message.status })
       if (event === 'message_failed' && !message.content.trim() && typeof data.message === 'string' && data.message.trim()) {
         message.content = data.message.trim()
       }
       if (message.status !== 'streaming') {
+        forgetStreamProgress(message.id)
         clearRuntimeProgress(message)
         message.imageProgress = undefined
       }
+    } else {
+      forgetStreamProgress(messageId)
     }
     syncActiveRequestState()
     if (!messages.value.some((item) => item.role === 'assistant' && item.status === 'streaming' && messageIsImageGeneration(item))) {
@@ -2434,6 +2618,7 @@ function stopConversationEvents() {
 async function reloadCurrentConversationMessages(conversationId: string) {
   const loadId = ++activeConversationLoad
   try {
+    rememberStreamingProgressForMessages(messages.value)
     const loadedMessages = sortMessagesForDisplay(
       (await apiFetch<Message[]>(`/conversations/${conversationId}/messages`)).map(normalizeLoadedMessage)
     )
@@ -2580,6 +2765,7 @@ async function toggleWebSearch() {
 
 function newChat() {
   activeConversationLoad++
+  rememberStreamingProgressForMessages(messages.value)
   cancelPendingScroll()
   cancelPendingStreamFlush()
   clearAllImageFinalizationTimers()
@@ -2702,6 +2888,7 @@ async function chooseModelKey(keyId: string) {
 async function openConversation(id: string, focusMessageId?: string | null) {
   if (deletingConversationId.value === id) return
   const loadId = ++activeConversationLoad
+  rememberStreamingProgressForMessages(messages.value)
   cancelPendingScroll()
   cancelPendingStreamFlush()
   clearAllImageFinalizationTimers()
@@ -3004,6 +3191,7 @@ async function send() {
   }
   insertMessageInDisplayOrder(userDraft)
   insertMessageInDisplayOrder(assistantDraft)
+  rememberStreamProgress(assistantDraft)
   syncActiveRequestState()
   await scrollMessagesToBottom('auto')
   try {
@@ -3066,6 +3254,7 @@ async function send() {
     const message = userFacingSendError(err)
     const assistant = findMessage(draftAssistantId)
     if (assistant) {
+      forgetStreamProgress(assistant.id)
       assistant.content = message
       assistant.status = 'failed_no_output'
     }
@@ -3127,6 +3316,32 @@ function updateEmptyFooterAnchorShift() {
   }
 }
 
+function updateChatFooterHeight() {
+  const footer = chatFooter.value
+  const scroller = messageScroller.value
+  const previousBottomDistance = scroller ? scrollBottomDistance(scroller) : 0
+  const nextHeight = footer ? Math.ceil(footer.getBoundingClientRect().height) : 0
+  if (Math.abs(chatFooterHeight.value - nextHeight) <= 1) return
+  const wasPinnedToBottom = previousBottomDistance <= 4 && !userHasScrolledUp
+  chatFooterHeight.value = nextHeight
+  if (wasPinnedToBottom && hasConversationFrame.value) scheduleScrollToBottom(true)
+}
+
+function observeChatFooter() {
+  chatFooterResizeObserver?.disconnect()
+  chatFooterResizeObserver = null
+  const footer = chatFooter.value
+  if (!footer || typeof ResizeObserver === 'undefined') {
+    updateChatFooterHeight()
+    return
+  }
+  chatFooterResizeObserver = new ResizeObserver(() => {
+    updateChatFooterHeight()
+  })
+  chatFooterResizeObserver.observe(footer)
+  updateChatFooterHeight()
+}
+
 function composerMaxInputHeight(textarea: HTMLTextAreaElement, cssMaxHeight: number | null) {
   let maxHeight = cssMaxHeight ?? Number.POSITIVE_INFINITY
   if (!isEmptyChat.value || composerCompact.value) return maxHeight
@@ -3169,6 +3384,7 @@ function resizeComposerInput() {
   textarea.style.height = `${nextHeight}px`
   composerScrollable.value = textarea.scrollHeight > nextHeight
   textarea.style.overflowY = composerScrollable.value ? 'auto' : 'hidden'
+  updateChatFooterHeight()
 }
 
 function scheduleComposerResize() {
@@ -3179,6 +3395,7 @@ function scheduleComposerResize() {
     composerResizeFrame = null
     resizeComposerInput()
     void waitForMessageLayout().then(() => {
+      updateChatFooterHeight()
       updateQuestionNavLayoutMode()
       refreshActiveQuestionFromScroll()
       updateQuestionNavOverflow()
@@ -3201,6 +3418,14 @@ watch(
   async () => {
     await nextTick()
     resizeComposerInput()
+  }
+)
+
+watch(
+  () => [composerAttachmentItems.value.length, uploadingAttachmentNames.value.length] as const,
+  async () => {
+    await nextTick()
+    scheduleComposerResize()
   }
 )
 
@@ -3250,6 +3475,7 @@ onMounted(async () => {
     if (fallbackConversation) await openConversation(fallbackConversation.id)
   }
   await nextTick()
+  observeChatFooter()
   resizeComposerInput()
   window.addEventListener('resize', scheduleComposerResize)
 })
@@ -3263,6 +3489,8 @@ onUnmounted(() => {
     window.cancelAnimationFrame(composerResizeFrame)
     composerResizeFrame = null
   }
+  chatFooterResizeObserver?.disconnect()
+  chatFooterResizeObserver = null
   composerMeasureElement?.remove()
   composerMeasureElement = null
   window.removeEventListener('resize', scheduleComposerResize)
@@ -3403,7 +3631,7 @@ onUnmounted(() => {
       class="chat-main flex flex-col min-w-0 min-h-0 overflow-hidden"
       :class="{ 'has-messages': hasConversationFrame, 'is-empty-chat': isEmptyChat, 'composer-open': composerExpanded }"
     >
-      <header class="chat-header">
+      <header class="chat-header" :class="{ 'sources-open': sourceDrawerOpen }">
         <div class="top-model-controls" @click.stop>
           <AppSelect
             v-model="selectedModel"
@@ -3434,21 +3662,6 @@ onUnmounted(() => {
 
           <button class="top-icon-button" type="button" title="新对话" aria-label="新对话" @click="newChat">
             <Plus :size="15" />
-          </button>
-        </div>
-        <div class="chat-header-info">
-          <span>{{ conversationUsage.tokens.toLocaleString() }} Tokens · {{ conversationUsage.requests }} requests</span>
-          <span>{{ currentConversation?.title || '新对话' }}</span>
-          <button
-            v-if="currentConversation"
-            class="chat-header-rename-button"
-            type="button"
-            title="修改对话名称"
-            aria-label="修改对话名称"
-            :disabled="currentConversationStreaming"
-            @click.stop="openRenameConversation(currentConversation)"
-          >
-            <Pencil :size="13" />
           </button>
         </div>
       </header>
@@ -3489,9 +3702,49 @@ onUnmounted(() => {
               :key="message.clientKey || message.id"
               :message="message"
               @preview-attachment="openAttachmentPreview"
+              @open-sources="openWebSearchSources"
             />
           </div>
         </section>
+
+        <div v-if="sourceDrawerOpen" class="source-drawer-backdrop" @click="closeWebSearchSources" />
+        <aside
+          class="source-drawer"
+          :class="{ open: sourceDrawerOpen }"
+          aria-label="联网搜索来源"
+          :aria-hidden="!sourceDrawerOpen"
+        >
+          <div class="source-drawer-header">
+            <div>
+              <span>搜索结果</span>
+              <strong>已阅读 {{ sourceDrawerSources.length }} 个网页</strong>
+            </div>
+            <button class="source-drawer-close" type="button" title="关闭" aria-label="关闭来源面板" @click="closeWebSearchSources">
+              <X :size="18" />
+            </button>
+          </div>
+          <div class="source-drawer-list">
+            <button
+              v-for="source in sourceDrawerSources"
+              :key="`${source.index}-${source.url}`"
+              class="source-result-card"
+              type="button"
+              @click="openSourceUrl(source)"
+            >
+              <span class="source-result-index">{{ source.index }}</span>
+              <span class="source-result-main">
+                <span class="source-result-meta">
+                  <SourceIcon :source="source" />
+                  <span>{{ sourceSiteName(source) }}</span>
+                  <span v-if="source.publishedAt || source.published_at">{{ source.publishedAt || source.published_at }}</span>
+                </span>
+                <strong>{{ source.title }}</strong>
+                <span class="source-result-url">{{ sourceDisplayUrl(source) }}</span>
+                <em v-if="source.snippet">{{ source.snippet }}</em>
+              </span>
+            </button>
+          </div>
+        </aside>
 
         <aside
           v-if="userQuestionNavItems.length > 0"
@@ -3668,7 +3921,12 @@ onUnmounted(() => {
           @dragleave="handleComposerDragLeave"
           @drop="handleComposerDrop"
         >
-          <div v-if="uploadingAttachmentNames.length || composerAttachmentItems.length" class="composer-attachments">
+          <div
+            v-if="uploadingAttachmentNames.length || composerAttachmentItems.length"
+            ref="composerAttachmentsScroller"
+            class="composer-attachments"
+            @wheel="handleComposerAttachmentsWheel"
+          >
             <div v-for="name in uploadingAttachmentNames" :key="`uploading-${name}`" class="composer-attachment-card is-uploading">
               <div class="composer-attachment-loading" aria-hidden="true" />
               <div class="composer-attachment-meta">

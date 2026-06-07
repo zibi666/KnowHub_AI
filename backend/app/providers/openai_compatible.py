@@ -3,6 +3,7 @@ from __future__ import annotations
 import json
 import logging
 import time
+import asyncio
 from collections.abc import AsyncIterator
 from dataclasses import dataclass
 from typing import Any
@@ -15,6 +16,8 @@ from app.core.errors import api_error
 
 logger = logging.getLogger("app.providers.openai")
 perf_logger = logging.getLogger("uvicorn.error")
+
+EMBEDDING_RETRYABLE_STATUS_CODES = {408, 409, 425, 429, 500, 502, 503, 504}
 
 
 @dataclass
@@ -188,13 +191,25 @@ class OpenAICompatibleProvider:
         model: str,
         input_texts: list[str],
         timeout_seconds: float = 60.0,
+        max_retries: int = 0,
+        retry_initial_delay_seconds: float = 0.5,
     ) -> list[list[float]]:
         if not input_texts:
             return []
         headers = {"Authorization": f"Bearer {api_key}", "Content-Type": "application/json"}
         payload = {"model": model, "input": input_texts}
+        max_retries = max(0, min(int(max_retries or 0), 5))
+        retry_initial_delay_seconds = max(0.0, float(retry_initial_delay_seconds or 0.0))
+        response: httpx.Response | None = None
         async with httpx.AsyncClient(timeout=timeout_seconds) as client:
-            response = await client.post(f"{self.base_url}/embeddings", headers=headers, json=payload)
+            for attempt in range(max_retries + 1):
+                response = await client.post(f"{self.base_url}/embeddings", headers=headers, json=payload)
+                if response.status_code not in EMBEDDING_RETRYABLE_STATUS_CODES or attempt >= max_retries:
+                    break
+                if retry_initial_delay_seconds > 0:
+                    await asyncio.sleep(retry_initial_delay_seconds * (2**attempt))
+        if response is None:
+            raise api_error("UPSTREAM_ERROR", "embedding response missing")
         if response.status_code in {401, 403}:
             raise api_error("API_KEY_INVALID", "涓婃父鎷掔粷浜嗚 API Key")
         if response.status_code >= 400:

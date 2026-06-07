@@ -4,6 +4,7 @@ import asyncio
 import contextlib
 import json
 import logging
+import re
 import time
 from collections.abc import AsyncIterator
 from dataclasses import dataclass
@@ -51,10 +52,11 @@ from app.services.image_generation import (
     save_generated_image_attachment,
 )
 from app.services.web_search import (
-    append_sources_markdown,
     effective_web_search_config,
+    format_search_results_for_context,
     json_tool_output,
     run_web_search_tool,
+    structured_web_search_sources,
     tool_result_sources,
     web_search_tools,
 )
@@ -62,7 +64,39 @@ from app.services.usage import record_usage
 
 DEFAULT_CHAT_MODEL = "gpt-5.5"
 IMAGE_GENERATION_MAX_WAIT_SECONDS = 14 * 60
-
+WEB_SEARCH_FORCE_TERMS = (
+    "news",
+    "latest",
+    "today",
+    "current",
+    "recent",
+    "breaking",
+    "official",
+    "新闻",
+    "最新",
+    "今天",
+    "今日",
+    "现在",
+    "近期",
+    "最近",
+    "官方",
+    "消息",
+    "报道",
+    "去世",
+    "逝世",
+    "死亡",
+    "死了吗",
+    "是否属实",
+    "是真的吗",
+)
+WEB_SEARCH_TOOL_POLICY = (
+    "KnowHub web search policy: When web search is enabled, use search_web first for current events, news, "
+    "recent facts, public external facts, or claims that may have changed. Use fetch_url only when search snippets "
+    "are not enough or a result needs closer reading. Do not invent sources; if search results are weak, missing, "
+    "or unrelated, say so clearly in the final answer. When sources are provided in the final-answer context, add "
+    "inline markers like [[1]] and [[2]] only next to claims directly supported by those exact sources. Do not add "
+    "a markdown source list."
+)
 _STREAM_END = object()
 EMPTY_CHAT_RESPONSE_MESSAGE = (
     "模型返回了空回复：上游接口请求已完成，但没有返回任何可显示的文本。"
@@ -428,6 +462,129 @@ def add_usage_totals(total: dict | None, usage: dict | None) -> dict | None:
     return total
 
 
+def should_force_web_search(context: list[dict]) -> bool:
+    user_text = ""
+    for message in reversed(context):
+        if message.get("role") == "user":
+            content = message.get("content")
+            if isinstance(content, list):
+                parts = [str(part.get("text") or "") for part in content if isinstance(part, dict)]
+                user_text = " ".join(parts)
+            else:
+                user_text = str(content or "")
+            break
+    lowered = user_text.lower()
+    return any(term in lowered for term in WEB_SEARCH_FORCE_TERMS)
+
+
+def latest_user_text(context: list[dict]) -> str:
+    for message in reversed(context):
+        if message.get("role") != "user":
+            continue
+        content = message.get("content")
+        if isinstance(content, list):
+            return " ".join(str(part.get("text") or "") for part in content if isinstance(part, dict)).strip()
+        return str(content or "").strip()
+    return ""
+
+
+def web_search_fallback_query(context: list[dict]) -> str:
+    text = latest_user_text(context)
+    return re.sub(r"\s+", " ", text).strip()[:180]
+
+
+def inject_web_search_policy(context: list[dict]) -> None:
+    if any(str(message.get("content") or "").startswith("KnowHub web search policy:") for message in context):
+        return
+    insert_at = 0
+    while insert_at < len(context) and context[insert_at].get("role") == "system":
+        insert_at += 1
+    context.insert(insert_at, {"role": "system", "content": WEB_SEARCH_TOOL_POLICY})
+
+
+def inject_web_search_final_answer_context(context: list[dict], sources: list[dict]) -> None:
+    if not sources:
+        return
+    lines = [
+        "Web search sources for the final answer:",
+        "Use the exact source numbers below for inline citations, for example [[1]] or [[2]].",
+        "Place each marker immediately after the specific claim that is directly supported by that source.",
+        "Do not cite a sentence unless the matching source actually supports it.",
+        "If sources are weak, unrelated, or do not support a claim, say so instead of adding a citation.",
+        "Never add a citation marker just to satisfy formatting.",
+        "Do not append a separate markdown source list.",
+    ]
+    for source in sources[:10]:
+        index = int(source.get("index") or 0)
+        title = str(source.get("title") or source.get("url") or "").strip()
+        url = str(source.get("url") or "").strip()
+        snippet = str(source.get("snippet") or "").strip()
+        if not index or not url:
+            continue
+        lines.append(f"[[{index}]] {title}")
+        lines.append(f"URL: {url}")
+        if snippet:
+            lines.append(f"Snippet: {snippet[:700]}")
+    context.append({"role": "system", "content": "\n".join(lines)})
+
+
+def web_search_cache_key(tool_name: str, arguments: dict) -> tuple[str, str] | None:
+    if tool_name == "search_web":
+        query = re.sub(r"\s+", " ", str(arguments.get("query") or "")).strip().lower()
+        return ("search_web", query) if query else None
+    if tool_name == "fetch_url":
+        url = str(arguments.get("url") or "").strip()
+        return ("fetch_url", url) if url else None
+    return None
+
+
+def web_search_status_payload(
+    *,
+    conversation_id: str,
+    assistant_message_id: str,
+    phase: str,
+    tool: str | None = None,
+    arguments: dict | None = None,
+    payload: dict | None = None,
+    detail: str | None = None,
+    error: str | None = None,
+    source_count: int | None = None,
+) -> dict:
+    arguments = arguments or {}
+    data = {
+        "conversation_id": conversation_id,
+        "message_id": assistant_message_id,
+        "phase": phase,
+    }
+    if tool:
+        data["tool"] = tool
+    query = str(arguments.get("query") or "").strip()
+    url = str(arguments.get("url") or "").strip()
+    if query:
+        data["query"] = query
+    if url:
+        data["url"] = url
+    if payload and isinstance(payload.get("results"), list):
+        data["result_count"] = len(payload["results"])
+    if source_count is not None:
+        data["source_count"] = source_count
+    if error:
+        data["error"] = error[:300]
+    if detail:
+        data["detail"] = detail
+    elif phase == "searching" and query:
+        data["detail"] = f"正在搜索：{query}"
+    elif phase == "reading" and url:
+        data["detail"] = f"正在读取：{url}"
+    elif phase == "failed":
+        data["detail"] = "联网搜索失败，正在尝试继续回答。"
+    elif phase == "completed":
+        data["detail"] = "联网搜索已完成，正在整理回答。"
+    else:
+        data["detail"] = "正在联网搜索..."
+    return data
+
+
 async def run_web_search_tool_loop(
     *,
     provider: OpenAICompatibleProvider,
@@ -448,7 +605,11 @@ async def run_web_search_tool_loop(
     sources: list = []
     usage_total: dict | None = None
     executed_calls = 0
+    saw_tool_calls = False
     had_tool_error = False
+    tool_cache: dict[tuple[str, str], dict] = {}
+    inject_web_search_policy(context)
+    should_force_search = should_force_web_search(context)
     for _ in range(max(1, config.max_tool_calls)):
         turn = await provider.tool_call_turn(
             api_key=api_key,
@@ -462,42 +623,63 @@ async def run_web_search_tool_loop(
         usage_total = add_usage_totals(usage_total, turn.usage)
         if not turn.tool_calls:
             break
+        saw_tool_calls = True
         if turn.assistant_message:
             context.append(turn.assistant_message)
         for call in turn.tool_calls:
-            if executed_calls >= config.max_tool_calls:
+            cache_key = web_search_cache_key(call.name, call.arguments)
+            if cache_key and cache_key in tool_cache:
+                payload = tool_cache[cache_key]
+            elif executed_calls >= config.max_tool_calls:
                 payload = {"ok": False, "error": "Web search tool call limit reached"}
             else:
                 executed_calls += 1
                 phase = "searching" if call.name == "search_web" else "reading"
-                detail = "正在联网搜索..." if call.name == "search_web" else "正在读取网页..."
                 await publish_conversation_event(
                     conversation_id,
                     "web_search_status",
-                    {
-                        "conversation_id": conversation_id,
-                        "message_id": assistant_message_id,
-                        "phase": phase,
-                        "detail": detail,
-                        "tool": call.name,
-                    },
+                    web_search_status_payload(
+                        conversation_id=conversation_id,
+                        assistant_message_id=assistant_message_id,
+                        phase=phase,
+                        tool=call.name,
+                        arguments=call.arguments,
+                    ),
                 )
                 payload = await run_web_search_tool(call.name, call.arguments, config)
+                if cache_key:
+                    tool_cache[cache_key] = payload
                 if payload.get("ok"):
                     sources.extend(tool_result_sources(payload))
+                    if call.name == "search_web" and isinstance(payload.get("results"), list):
+                        result_count = len(payload["results"])
+                        await publish_conversation_event(
+                            conversation_id,
+                            "web_search_status",
+                            web_search_status_payload(
+                                conversation_id=conversation_id,
+                                assistant_message_id=assistant_message_id,
+                                phase=phase,
+                                tool=call.name,
+                                arguments=call.arguments,
+                                payload=payload,
+                                detail=f"搜索返回 {result_count} 条结果",
+                            ),
+                        )
                 else:
                     had_tool_error = True
                     await publish_conversation_event(
                         conversation_id,
                         "web_search_status",
-                        {
-                            "conversation_id": conversation_id,
-                            "message_id": assistant_message_id,
-                            "phase": "failed",
-                            "detail": "联网搜索失败，正在尝试继续回答。",
-                            "tool": call.name,
-                            "error": str(payload.get("error") or "")[:300],
-                        },
+                        web_search_status_payload(
+                            conversation_id=conversation_id,
+                            assistant_message_id=assistant_message_id,
+                            phase="failed",
+                            tool=call.name,
+                            arguments=call.arguments,
+                            payload=payload,
+                            error=str(payload.get("error") or ""),
+                        ),
                     )
             context.append(
                 {
@@ -509,18 +691,65 @@ async def run_web_search_tool_loop(
             )
         if executed_calls >= config.max_tool_calls:
             break
+    if not saw_tool_calls and should_force_search:
+        query = web_search_fallback_query(context)
+        if query:
+            arguments = {"query": query}
+            executed_calls += 1
+            await publish_conversation_event(
+                conversation_id,
+                "web_search_status",
+                web_search_status_payload(
+                    conversation_id=conversation_id,
+                    assistant_message_id=assistant_message_id,
+                    phase="searching",
+                    tool="search_web",
+                    arguments=arguments,
+                ),
+            )
+            payload = await run_web_search_tool("search_web", arguments, config)
+            if payload.get("ok"):
+                sources.extend(tool_result_sources(payload))
+                if isinstance(payload.get("results"), list):
+                    result_count = len(payload["results"])
+                    await publish_conversation_event(
+                        conversation_id,
+                        "web_search_status",
+                        web_search_status_payload(
+                            conversation_id=conversation_id,
+                            assistant_message_id=assistant_message_id,
+                            phase="searching",
+                            tool="search_web",
+                            arguments=arguments,
+                            payload=payload,
+                            detail=f"搜索返回 {result_count} 条结果",
+                        ),
+                    )
+            else:
+                had_tool_error = True
+            context.append(
+                {
+                    "role": "user",
+                    "content": (
+                        "Web search was enabled and the model did not call tools, so the backend ran search_web automatically. "
+                        "Use the formatted results below only if relevant; if they are weak or unrelated, say so.\n\n"
+                        f"{format_search_results_for_context(query, payload)}"
+                    ),
+                }
+            )
     if executed_calls:
         failed_without_sources = had_tool_error and not sources
+        source_count = len({getattr(source, "url", "") for source in sources})
         await publish_conversation_event(
             conversation_id,
             "web_search_status",
-            {
-                "conversation_id": conversation_id,
-                "message_id": assistant_message_id,
-                "phase": "failed" if failed_without_sources else "completed",
-                "detail": "联网搜索失败，正在整理回答。" if failed_without_sources else "联网搜索已完成，正在整理回答。",
-                "source_count": len({getattr(source, "url", "") for source in sources}),
-            },
+            web_search_status_payload(
+                conversation_id=conversation_id,
+                assistant_message_id=assistant_message_id,
+                phase="failed" if failed_without_sources else "completed",
+                source_count=source_count,
+                detail="联网搜索失败，正在整理回答。" if failed_without_sources else "联网搜索已完成，正在整理回答。",
+            ),
         )
     return sources, usage_total
 
@@ -870,6 +1099,7 @@ async def stream_chat(user_id: str, payload: SendMessageRequest, conversation_id
     buffer: list[str] = []
     usage: dict | None = None
     model = payload.model
+    structured_sources: list[dict] = []
 
     async with SessionLocal() as db:
         quota = await db.get(UserQuota, user_id)
@@ -1320,6 +1550,7 @@ async def stream_chat(user_id: str, payload: SendMessageRequest, conversation_id
                 assistant.total_tokens = total_tokens
                 assistant.tokens_source = tokens_source
                 assistant.first_token_seconds = first_token_seconds
+                assistant.web_search_sources_json = structured_sources or None
                 await db.commit()
         except Exception as exc:
             logger.exception(
@@ -1376,7 +1607,10 @@ async def stream_chat(user_id: str, payload: SendMessageRequest, conversation_id
             {
                 "message_id": assistant_message_id,
                 "conversation_id": conversation_id,
+                "content": content,
                 "status": "completed",
+                "web_search_sources": structured_sources,
+                "webSearchSources": structured_sources,
                 "finished_at": datetime.utcnow().isoformat(),
             },
         )
@@ -2135,6 +2369,7 @@ async def run_chat_generation_job(
         request_reasoning_effort = requested_effort if requested_effort and requested_effort in allowed_reasoning else settings.model_reasoning_effort
 
         provider = OpenAICompatibleProvider(api_key_row.base_url)
+        structured_sources: list[dict] = []
         if web_search_enabled:
             web_search_sources, tool_usage = await run_web_search_tool_loop(
                 provider=provider,
@@ -2145,6 +2380,8 @@ async def run_chat_generation_job(
                 assistant_message_id=assistant_message_id,
                 reasoning_effort=request_reasoning_effort,
             )
+            structured_sources = structured_web_search_sources(web_search_sources)
+            inject_web_search_final_answer_context(context, structured_sources)
         stream = provider.chat_stream(
             api_key=api_key,
             model=model,
@@ -2172,6 +2409,8 @@ async def run_chat_generation_job(
                             "message_id": assistant_message_id,
                             "content": content,
                             "status": "streaming",
+                            "web_search_sources": structured_sources,
+                            "webSearchSources": structured_sources,
                             **message_progress_event_data(assistant),
                         },
                     )
@@ -2245,8 +2484,6 @@ async def run_chat_generation_job(
                     await pending_next
 
         content = "".join(buffer)
-        if web_search_sources:
-            content = append_sources_markdown(content, web_search_sources)
         if not content.strip():
             message = empty_chat_response_message(model, api_key_row.base_url)
             logger.warning(
@@ -2320,6 +2557,7 @@ async def run_chat_generation_job(
             assistant.total_tokens = total_tokens
             assistant.tokens_source = tokens_source
             assistant.first_token_seconds = first_token_seconds
+            assistant.web_search_sources_json = structured_sources or None
             await db.commit()
             progress = first_token_progress_event_data(assistant)
 
@@ -2370,6 +2608,8 @@ async def run_chat_generation_job(
                 "message_id": assistant_message_id,
                 "content": content,
                 "status": "completed",
+                "web_search_sources": structured_sources,
+                "webSearchSources": structured_sources,
                 "finished_at": datetime.utcnow().isoformat(),
                 **progress,
             },

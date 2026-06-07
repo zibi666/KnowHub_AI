@@ -523,6 +523,8 @@ async def conversation_events(
             "content": message.content,
             "status": message.status,
             "model": message.model,
+            "web_search_sources": message.web_search_sources_json or [],
+            "webSearchSources": message.web_search_sources_json or [],
             **message_progress_event_data(message),
         }
         for message in streaming_rows

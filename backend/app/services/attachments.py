@@ -6,10 +6,12 @@ import io
 import os
 import shutil
 import math
+import json
 import re
 from pathlib import Path
 
 import chardet
+from fastapi import HTTPException
 from PIL import Image
 from pypdf import PdfReader
 from sqlalchemy import delete
@@ -61,6 +63,8 @@ CODE_EXTENSIONS = {
     ".c",
     ".h",
 }
+
+DEFAULT_EMBEDDING_BATCH_SIZE = 8
 
 
 def pending_path(user_id: str, upload_id: str) -> Path:
@@ -216,6 +220,94 @@ async def active_plain_api_key(db: AsyncSession, user_id: str) -> str | None:
     return decrypt_api_key(api_key.ciphertext)
 
 
+def _embedding_batch_size() -> int:
+    settings = get_settings()
+    return max(1, min(int(settings.embedding_batch_size or DEFAULT_EMBEDDING_BATCH_SIZE), 64))
+
+
+def _embedding_retry_attempts() -> int:
+    return max(0, min(int(get_settings().embedding_retry_attempts or 0), 5))
+
+
+def _embedding_retry_delay() -> float:
+    return max(0.0, float(get_settings().embedding_retry_initial_delay_seconds or 0.0))
+
+
+def _extract_upstream_error_message(raw: object) -> str:
+    if raw is None:
+        return ""
+    text = str(raw).strip()
+    if not text:
+        return ""
+    for _ in range(2):
+        try:
+            parsed = json.loads(text)
+        except Exception:
+            break
+        if isinstance(parsed, dict):
+            error = parsed.get("error")
+            if isinstance(error, dict) and error.get("message"):
+                text = str(error.get("message"))
+                continue
+            message = parsed.get("message")
+            if message:
+                text = str(message)
+                continue
+        break
+    return " ".join(text.split())[:220]
+
+
+def embedding_error_message(exc: Exception, *, base_url: str | None, model: str) -> str:
+    status: int | None = None
+    detail_message: object = None
+    if isinstance(exc, HTTPException):
+        status = exc.status_code
+        if isinstance(exc.detail, dict):
+            detail_message = exc.detail.get("message")
+        else:
+            detail_message = exc.detail
+    raw_message = _extract_upstream_error_message(detail_message or str(exc))
+    location = f"{(base_url or get_settings().model_base_url).rstrip('/')}/embeddings"
+    if status in {408, 409, 425, 429, 500, 502, 503, 504}:
+        reason = f"upstream returned {status}"
+        if raw_message:
+            reason += f": {raw_message}"
+        return (
+            "embedding vector service is temporarily unavailable; parsed text and chunks were kept. "
+            f"{location} with model {model} {reason}. "
+            "Please confirm the current BaseURL supports /embeddings and this embedding model, or retry later."
+        )
+    if status in {400, 404}:
+        reason = f"upstream returned {status}"
+        if raw_message:
+            reason += f": {raw_message}"
+        return (
+            "embedding model or endpoint is unavailable; parsed text and chunks were kept. "
+            f"{location} with model {model} {reason}. "
+            "Please switch to a BaseURL/model that supports embeddings."
+        )
+    if raw_message:
+        return f"embedding vectorization failed; parsed text and chunks were kept. {raw_message}"
+    return "embedding vectorization failed; parsed text and chunks were kept."
+
+
+async def _embed_chunks_in_batches(provider: OpenAICompatibleProvider, api_key: str, model: str, chunks: list[str]) -> list[list[float]]:
+    vectors: list[list[float]] = []
+    batch_size = _embedding_batch_size()
+    for start in range(0, len(chunks), batch_size):
+        batch = chunks[start : start + batch_size]
+        vectors.extend(
+            await provider.embeddings(
+                api_key,
+                model,
+                batch,
+                max_retries=_embedding_retry_attempts(),
+                retry_initial_delay_seconds=_embedding_retry_delay(),
+            )
+        )
+    return vectors
+
+
 async def rebuild_attachment_chunks(db: AsyncSession, attachment: Attachment, api_key: str | None = None) -> None:
     await db.execute(delete(AttachmentChunk).where(AttachmentChunk.attachment_id == attachment.id))
     if not attachment.parsed_text or is_image_attachment(attachment):
@@ -241,7 +333,7 @@ async def rebuild_attachment_chunks(db: AsyncSession, attachment: Attachment, ap
             plain_api_key = api_key
         else:
             api_key_row = await chat_api_key(db, attachment.user_id)
-            plain_api_key = decrypt_api_key(api_key_row.ciphertext) if api_key_row else None
+            plain_api_key = settings.embedding_api_key or (decrypt_api_key(api_key_row.ciphertext) if api_key_row else None)
             api_key_base_url = api_key_row.base_url if api_key_row else None
     except Exception as exc:
         plain_api_key = None
@@ -249,15 +341,19 @@ async def rebuild_attachment_chunks(db: AsyncSession, attachment: Attachment, ap
         error = str(exc)[:500]
     if plain_api_key:
         try:
-            provider = OpenAICompatibleProvider(api_key_base_url)
-            vectors = await provider.embeddings(plain_api_key, settings.embedding_model, chunks)
+            provider = OpenAICompatibleProvider(settings.embedding_base_url or api_key_base_url)
+            vectors = await _embed_chunks_in_batches(provider, plain_api_key, settings.embedding_model, chunks)
         except Exception as exc:
             status = "failed"
-            error = str(exc)[:500]
+            error = embedding_error_message(
+                exc,
+                base_url=settings.embedding_base_url or api_key_base_url,
+                model=settings.embedding_model,
+            )[:500]
             vectors = []
     else:
         status = "failed"
-        error = error or "embedding api key not configured"
+        error = error or "embedding API key is not configured; parsed text and chunks were kept."
 
     for index, chunk in enumerate(chunks):
         vector = vectors[index] if index < len(vectors) else None

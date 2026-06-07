@@ -68,6 +68,11 @@ class Settings(BaseSettings):
     vision_image_jpeg_quality: int = 82
     vision_image_max_count: int = 8
     embedding_model: str = "text-embedding-3-small"
+    embedding_base_url: str | None = None
+    embedding_api_key: str | None = None
+    embedding_batch_size: int = 8
+    embedding_retry_attempts: int = 3
+    embedding_retry_initial_delay_seconds: float = 0.6
     embedding_max_chars_per_chunk: int = 1800
     embedding_chunk_overlap_chars: int = 200
     rag_top_k_per_attachment: int = 5
