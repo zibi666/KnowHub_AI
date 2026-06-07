@@ -5682,27 +5682,13 @@ body,
   overflow-y: hidden;
   overscroll-behavior-x: contain;
   padding: 0.55rem 2.8rem 0.2rem 0.65rem;
-  scrollbar-width: thin;
-  scrollbar-color: color-mix(in srgb, var(--text) 18%, transparent) transparent;
+  scrollbar-width: none;
   scroll-snap-type: x proximity;
   -webkit-overflow-scrolling: touch;
 }
 
 .composer-attachments::-webkit-scrollbar {
-  height: 0.32rem;
-}
-
-.composer-attachments::-webkit-scrollbar-track {
-  background: transparent;
-}
-
-.composer-attachments::-webkit-scrollbar-thumb {
-  border-radius: 999px;
-  background: color-mix(in srgb, var(--text) 16%, transparent);
-}
-
-.composer-attachments::-webkit-scrollbar-thumb:hover {
-  background: color-mix(in srgb, var(--text) 24%, transparent);
+  display: none;
 }
 
 .composer-attachment-card {
@@ -5757,7 +5743,7 @@ body,
 }
 
 .chat-shell.theme-light .composer-attachments {
-  scrollbar-color: rgba(148, 163, 184, 0.45) transparent;
+  scrollbar-width: none;
 }
 
 .chat-shell.theme-light .composer-attachment-card {
