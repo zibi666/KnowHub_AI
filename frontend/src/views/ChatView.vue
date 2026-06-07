@@ -326,6 +326,10 @@ let conversationEventSourceId: string | null = null
 const imageFinalizationTimers = new Map<string, number>()
 const QUESTION_NAV_EDGE_THRESHOLD = 2
 const QUESTION_NAV_SHORT_SCROLL_RANGE = 220
+const QUESTION_NAV_BOTTOM_THRESHOLD_MAX = 180
+const QUESTION_NAV_BOTTOM_THRESHOLD_RATIO = 0.18
+const QUESTION_NAV_LAST_VISIBLE_INSET_MAX = 96
+const QUESTION_NAV_LAST_VISIBLE_INSET_RATIO = 0.18
 
 const currentConversation = computed(() => conversations.value.find((item) => item.id === currentId.value))
 const currentConversationStreaming = computed(() => messages.value.some((message) => message.status === 'streaming'))
@@ -2094,8 +2098,19 @@ function isAtScrollTop(scroller: HTMLElement) {
   return scroller.scrollTop <= QUESTION_NAV_EDGE_THRESHOLD
 }
 
-function isAtScrollBottom(scroller: HTMLElement) {
-  return scrollBottomDistance(scroller) <= QUESTION_NAV_EDGE_THRESHOLD
+function isAtScrollBottom(scroller: HTMLElement, threshold = QUESTION_NAV_EDGE_THRESHOLD) {
+  return scrollBottomDistance(scroller) <= threshold
+}
+
+function questionNavBottomThreshold(scroller: HTMLElement) {
+  return Math.max(
+    QUESTION_NAV_EDGE_THRESHOLD,
+    Math.min(QUESTION_NAV_BOTTOM_THRESHOLD_MAX, scroller.clientHeight * QUESTION_NAV_BOTTOM_THRESHOLD_RATIO)
+  )
+}
+
+function isNearQuestionNavBottom(scroller: HTMLElement) {
+  return isAtScrollBottom(scroller, questionNavBottomThreshold(scroller))
 }
 
 function isProgrammaticScroll() {
@@ -2204,6 +2219,19 @@ function messageTopInScroller(node: HTMLElement, scroller: HTMLElement) {
   return node.getBoundingClientRect().top - scroller.getBoundingClientRect().top + scroller.scrollTop
 }
 
+function lastQuestionIsVisible(scroller: HTMLElement, items: Array<{ id: string }>) {
+  const lastQuestion = items[items.length - 1]
+  if (!lastQuestion) return false
+  const node = scroller.querySelector<HTMLElement>(`[data-message-id="${CSS.escape(lastQuestion.id)}"]`)
+  if (!node) return false
+  const messageTop = messageTopInScroller(node, scroller)
+  const messageBottom = messageTop + node.offsetHeight
+  const viewTop = scroller.scrollTop
+  const viewBottom = viewTop + scroller.clientHeight
+  const activationInset = Math.min(QUESTION_NAV_LAST_VISIBLE_INSET_MAX, scroller.clientHeight * QUESTION_NAV_LAST_VISIBLE_INSET_RATIO)
+  return messageBottom >= viewTop + QUESTION_NAV_EDGE_THRESHOLD && messageTop <= viewBottom - activationInset
+}
+
 async function syncActiveQuestionNavRow() {
   await nextTick()
   const scroller = questionNavScroll.value
@@ -2244,7 +2272,7 @@ function refreshActiveQuestionFromScroll() {
     void syncActiveQuestionNavRow()
     return
   }
-  if (isAtScrollBottom(scroller)) {
+  if (isAtScrollBottom(scroller) || isNearQuestionNavBottom(scroller) || lastQuestionIsVisible(scroller, items)) {
     setActiveQuestionToLast()
     return
   }
@@ -2263,11 +2291,13 @@ function refreshActiveQuestionFromScroll() {
 }
 
 function handleScrollerScroll() {
+  const programmatic = isProgrammaticScroll()
+  if (!programmatic) clearQuestionNavLock()
   const nearBottom = isNearBottom(80)
   refreshActiveQuestionFromScroll()
   const awayFromBottom = !nearBottom
   showScrollToBottom.value = messages.value.length > 0 && awayFromBottom
-  if (!streaming.value || isProgrammaticScroll()) return
+  if (!streaming.value || programmatic) return
   if (nearBottom) {
     userHasScrolledUp = false
   } else if (awayFromBottom) {
