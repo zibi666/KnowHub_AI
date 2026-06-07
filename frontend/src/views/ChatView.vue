@@ -199,6 +199,7 @@ const questionNavShortConversation = ref(false)
 const chatFooterHeight = ref(0)
 let userHasScrolledUp = false
 let programmaticScrollUntil = 0
+let userScrollSettlingUntil = 0
 let questionNavLockUntil = 0
 let questionNavLockedMessageId: string | null = null
 
@@ -330,6 +331,7 @@ const QUESTION_NAV_BOTTOM_THRESHOLD_MAX = 180
 const QUESTION_NAV_BOTTOM_THRESHOLD_RATIO = 0.18
 const QUESTION_NAV_LAST_VISIBLE_INSET_MAX = 96
 const QUESTION_NAV_LAST_VISIBLE_INSET_RATIO = 0.18
+const USER_SCROLL_SETTLE_MS = 240
 
 const currentConversation = computed(() => conversations.value.find((item) => item.id === currentId.value))
 const currentConversationStreaming = computed(() => messages.value.some((message) => message.status === 'streaming'))
@@ -2121,6 +2123,14 @@ function markProgrammaticScroll(duration = 250) {
   programmaticScrollUntil = Date.now() + duration
 }
 
+function isUserScrollSettling() {
+  return Date.now() < userScrollSettlingUntil
+}
+
+function markUserScrollSettling(duration = USER_SCROLL_SETTLE_MS) {
+  userScrollSettlingUntil = Date.now() + duration
+}
+
 function waitForAnimationFrame(): Promise<void> {
   return new Promise((resolve) => {
     window.requestAnimationFrame(() => resolve())
@@ -2140,6 +2150,7 @@ function clearQuestionNavLock() {
 
 function pauseAutoScrollFromUserScroll() {
   cancelPendingScroll()
+  markUserScrollSettling()
   if (!streaming.value) return
   userHasScrolledUp = true
   showScrollToBottom.value = messages.value.length > 0
@@ -2292,7 +2303,11 @@ function refreshActiveQuestionFromScroll() {
 
 function handleScrollerScroll() {
   const programmatic = isProgrammaticScroll()
-  if (!programmatic) clearQuestionNavLock()
+  if (!programmatic) {
+    cancelPendingScroll()
+    markUserScrollSettling()
+    clearQuestionNavLock()
+  }
   const nearBottom = isNearBottom(80)
   refreshActiveQuestionFromScroll()
   const awayFromBottom = !nearBottom
@@ -2323,6 +2338,7 @@ async function scrollLoadedConversationToBottom(loadId: number) {
 
 async function returnToBottom() {
   userHasScrolledUp = false
+  userScrollSettlingUntil = 0
   await scrollMessagesToBottom('smooth')
 }
 
@@ -2335,6 +2351,7 @@ async function jumpToQuestion(messageId: string) {
 function scheduleScrollToBottom(force = false) {
   // Skip auto-scroll when the user has intentionally scrolled up.
   if (userHasScrolledUp) return
+  if (isUserScrollSettling()) return
   if (!force && !isNearBottom(40)) return
   if (scrollFrame !== null) return
   scrollFrame = window.requestAnimationFrame(() => {
