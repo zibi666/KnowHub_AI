@@ -3473,6 +3473,10 @@ body,
     transform 280ms var(--ease-out-soft);
 }
 
+.question-nav-panel.expanded {
+  z-index: 12;
+}
+
 .source-drawer-backdrop {
   position: absolute;
   inset: 0;
@@ -3762,9 +3766,9 @@ body,
 }
 
 .question-nav-panel.short-conversation {
-  top: 5.35rem;
-  bottom: 7.2rem;
-  transform: none;
+  top: 50%;
+  bottom: auto;
+  transform: translateY(-50%);
 }
 
 .question-nav-card {
@@ -3809,8 +3813,7 @@ body,
 }
 
 .question-nav-panel.short-conversation .question-nav-card {
-  height: 100%;
-  max-height: none;
+  max-height: min(24rem, calc(100vh - 13rem));
 }
 
 .question-nav-panel.short-conversation.expanded .question-nav-card {
@@ -3849,7 +3852,7 @@ body,
   display: flex;
   max-height: min(24rem, calc(100vh - 13rem));
   flex-direction: column;
-  gap: 0.72rem;
+  gap: 0.42rem;
   overflow-y: auto;
   overflow-x: visible;
   padding: 0.34rem 0.08rem 0.34rem 0;
@@ -3857,22 +3860,21 @@ body,
 }
 
 .question-nav-panel.expanded .question-nav-scroll {
-  gap: 0.28rem;
+  gap: 0.42rem;
   padding: 0.52rem;
 }
 
 .question-nav-panel.compact-corner .question-nav-scroll {
-  gap: 0.56rem;
+  gap: 0.38rem;
 }
 
 .question-nav-panel.short-conversation .question-nav-scroll {
-  height: 100%;
-  max-height: none;
-  justify-content: space-between;
+  max-height: min(24rem, calc(100vh - 13rem));
+  justify-content: flex-start;
 }
 
 .question-nav-panel.short-conversation.expanded .question-nav-scroll {
-  padding: 0.64rem 0.56rem;
+  padding: 0.52rem;
 }
 
 .question-nav-scroll::-webkit-scrollbar {
@@ -3881,29 +3883,39 @@ body,
 
 .question-nav-row {
   display: grid;
-  grid-template-columns: minmax(0, 1fr) 2.05rem;
+  grid-template-columns: 0 2.05rem;
   align-items: center;
-  gap: 0.55rem;
-  min-height: 1.58rem;
+  gap: 0;
+  height: 2rem;
+  min-height: 2rem;
   overflow: visible;
 }
 
 .question-nav-panel.expanded .question-nav-row {
+  grid-template-columns: minmax(0, 1fr) 2.05rem;
   gap: 0.42rem;
 }
 
 .question-nav-panel.compact-corner .question-nav-row {
+  grid-template-columns: 0 1.9rem;
+  gap: 0;
+  height: 1.72rem;
+  min-height: 1.72rem;
+}
+
+.question-nav-panel.compact-corner.expanded .question-nav-row {
   grid-template-columns: minmax(0, 1fr) 1.9rem;
   gap: 0.38rem;
-  min-height: 1.42rem;
 }
 
 .question-nav-rail {
   display: flex;
   width: 2.05rem;
-  min-height: 1.58rem;
+  height: 2rem;
+  min-height: 2rem;
   align-items: center;
   justify-content: center;
+  justify-self: end;
   padding: 0;
   pointer-events: auto;
   background: transparent;
@@ -3914,52 +3926,57 @@ body,
 }
 
 .question-nav-panel.expanded .question-nav-rail:hover {
-  background: color-mix(in srgb, var(--text) 6%, transparent);
+  background: transparent;
 }
 
 .question-nav-panel.compact-corner .question-nav-rail {
   width: 1.9rem;
-  min-height: 1.42rem;
+  height: 1.72rem;
+  min-height: 1.72rem;
 }
 
 .question-nav-mark {
   display: block;
-  width: 0.72rem;
-  height: 0.15rem;
+  width: 1.3rem;
+  height: 0.16rem;
   flex: 0 0 auto;
   border-radius: 999px;
   background: color-mix(in srgb, var(--muted) 50%, transparent);
   opacity: 0.74;
+  transform: scaleX(0.55);
+  transform-origin: center;
   transition:
-    width 190ms ease,
     height 190ms ease,
+    transform 210ms var(--ease-out-soft),
     background 190ms ease,
     box-shadow 220ms ease,
     opacity 190ms ease;
 }
 
 .question-nav-mark.active {
-  width: 1.48rem;
-  height: 0.24rem;
+  height: 0.22rem;
   background: color-mix(in srgb, var(--bubble-bg) 88%, #7cc7ff 12%);
   box-shadow: 0 0 14px color-mix(in srgb, var(--bubble-bg) 46%, transparent);
   opacity: 1;
+  transform: scaleX(1);
 }
 
 .question-nav-panel.compact-corner .question-nav-mark {
-  width: 0.6rem;
+  width: 1.2rem;
+  transform: scaleX(0.5);
 }
 
 .question-nav-panel.compact-corner .question-nav-mark.active {
-  width: 1.34rem;
-  height: 0.22rem;
+  height: 0.2rem;
+  transform: scaleX(1);
 }
 
 .question-nav-item {
   display: grid;
   align-items: center;
   width: 100%;
-  min-height: 1.9rem;
+  height: 2rem;
+  min-height: 2rem;
   border-radius: 6px;
   color: var(--muted);
   padding: 0.36rem 0.62rem;
@@ -3978,7 +3995,8 @@ body,
 }
 
 .question-nav-panel.compact-corner .question-nav-item {
-  min-height: 1.68rem;
+  height: 1.72rem;
+  min-height: 1.72rem;
   padding: 0.28rem 0.48rem;
 }
 

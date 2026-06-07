@@ -3853,7 +3853,7 @@ onUnmounted(() => {
                   class="question-nav-item"
                   :class="{ active: item.id === activeQuestionMessageId }"
                   type="button"
-                  :title="item.title"
+                  :aria-label="`跳转到问题：${item.title}`"
                   @click="jumpToQuestion(item.id)"
                 >
                   <span>{{ item.index }}. {{ item.summary }}</span>
@@ -3862,7 +3862,6 @@ onUnmounted(() => {
                   class="question-nav-rail"
                   :class="{ active: item.id === activeQuestionMessageId }"
                   type="button"
-                  :title="item.title"
                   aria-label="跳转到该问题"
                   @click="jumpToQuestion(item.id)"
                 >
