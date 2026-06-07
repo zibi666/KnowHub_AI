@@ -26,7 +26,7 @@ import type {
   WebSearchStatus
 } from '../types'
 import { copyText } from '../utils/clipboard'
-import { sourceDisplayUrl, sourceOpenUrl, sourceSiteName } from '../utils/sources'
+import { sourceOpenUrl, sourceSiteName } from '../utils/sources'
 
 type ThemeMode = 'dark' | 'light'
 type SettingsTab = 'appearance' | 'image' | 'web' | 'api' | 'groups' | 'account'
@@ -445,6 +445,41 @@ function openSourceUrl(source: WebSearchSource) {
   const url = sourceOpenUrl(source)
   if (!url) return
   window.open(url, '_blank', 'noopener,noreferrer')
+}
+
+function truncateSourceText(value: string, limit = 170) {
+  const chars = Array.from(value)
+  if (chars.length <= limit) return value
+  return `${chars.slice(0, limit).join('').replace(/[，。、；：,.:\s]+$/u, '')}...`
+}
+
+function cleanSourceText(value: unknown) {
+  return String(value || '')
+    .replace(/https?:\/\/\S+/gi, ' ')
+    .replace(/\b(?:[a-z0-9-]+\.)+[a-z]{2,}(?:\/[^\s，。；、]*)?/gi, ' ')
+    .replace(/\s+/g, ' ')
+    .trim()
+}
+
+function sourcePublishedLabel(source: WebSearchSource) {
+  const raw = String(source.publishedAt || source.published_at || '').trim()
+  if (!raw) return ''
+  const timestamp = new Date(raw).getTime()
+  if (Number.isFinite(timestamp)) {
+    return new Intl.DateTimeFormat('zh-CN', { year: 'numeric', month: '2-digit', day: '2-digit' }).format(timestamp)
+  }
+  return raw.replace(/T.*$/u, '').replace(/\s+\d{1,2}:\d{2}.*$/u, '')
+}
+
+function sourceSummaryText(source: WebSearchSource) {
+  const title = cleanSourceText(source.title)
+  let summary = cleanSourceText(source.snippet)
+  if (!summary) return ''
+  if (title && summary.toLowerCase().startsWith(title.toLowerCase())) {
+    summary = summary.slice(title.length).replace(/^[\s:：,，。.-]+/u, '').trim()
+  }
+  if (!summary || summary === title) return ''
+  return truncateSourceText(summary)
 }
 
 function selectedModelSupportsVision() {
@@ -3735,12 +3770,11 @@ onUnmounted(() => {
               <span class="source-result-main">
                 <span class="source-result-meta">
                   <SourceIcon :source="source" />
-                  <span>{{ sourceSiteName(source) }}</span>
-                  <span v-if="source.publishedAt || source.published_at">{{ source.publishedAt || source.published_at }}</span>
+                  <span class="source-result-site">{{ sourceSiteName(source) }}</span>
+                  <span v-if="sourcePublishedLabel(source)" class="source-result-date">{{ sourcePublishedLabel(source) }}</span>
                 </span>
-                <strong>{{ source.title }}</strong>
-                <span class="source-result-url">{{ sourceDisplayUrl(source) }}</span>
-                <em v-if="source.snippet">{{ source.snippet }}</em>
+                <strong class="source-result-title">{{ source.title }}</strong>
+                <em v-if="sourceSummaryText(source)" class="source-result-summary">{{ sourceSummaryText(source) }}</em>
               </span>
             </button>
           </div>
