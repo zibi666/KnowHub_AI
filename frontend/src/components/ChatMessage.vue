@@ -461,7 +461,7 @@ onUnmounted(() => {
             <span />
             <span />
           </div>
-          <div v-if="streamingElapsed" class="thinking-elapsed">{{ thinkingStatusText }} {{ streamingElapsed }}</div>
+          <div v-if="streamingElapsed" class="thinking-elapsed">已用时 {{ streamingElapsed }}</div>
         </div>
         <div v-else-if="emptyAssistantFailureText" class="message-status-text">
           {{ emptyAssistantFailureText }}
