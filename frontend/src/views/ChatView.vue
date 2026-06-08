@@ -4312,7 +4312,7 @@ onUnmounted(() => {
               <section v-else-if="settingsTab === 'web' && auth.user?.role === 'admin'" key="web" class="settings-pane">
                 <div class="settings-pane-heading">
                   <h2>联网搜索</h2>
-                  <p>配置 SearXNG 搜索源。用户在单个对话里开启后，模型可按需调用搜索和网页读取工具。</p>
+                  <p>启用内置直连搜索源。用户在单个对话里开启后，模型可按需调用搜索和网页读取工具。</p>
                 </div>
                 <form class="settings-card" @submit.prevent="saveWebSearchSettings">
                   <div v-if="webSearchSettingsLoading" class="settings-empty">正在加载联网搜索设置...</div>
@@ -4320,10 +4320,6 @@ onUnmounted(() => {
                     <label class="settings-check settings-field-wide">
                       <input v-model="webSearchSettings.enabled" type="checkbox" />
                       启用联网搜索
-                    </label>
-                    <label class="settings-field settings-field-wide">
-                      <span>SearXNG URL</span>
-                      <input v-model="webSearchSettings.searxngBaseUrl" class="settings-input" placeholder="https://searxng.example.com/search" />
                     </label>
                     <label class="settings-field">
                       <span>结果数</span>
@@ -4364,7 +4360,7 @@ onUnmounted(() => {
                   <div class="settings-card-header">
                     <div>
                       <h3>测试搜索</h3>
-                      <p>使用当前已保存配置测试 SearXNG 返回结果。</p>
+                      <p>使用当前已保存配置测试 Bing、搜狗、360 搜索和头条搜索返回结果。</p>
                     </div>
                   </div>
                   <div class="settings-inline-field">

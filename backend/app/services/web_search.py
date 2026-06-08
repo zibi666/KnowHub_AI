@@ -12,7 +12,7 @@ from dataclasses import asdict, dataclass
 from datetime import timedelta
 from pathlib import Path
 from typing import Any
-from urllib.parse import urljoin, urlsplit, urlunsplit
+from urllib.parse import parse_qs, urljoin, urlsplit, urlunsplit
 
 import httpx
 
@@ -42,7 +42,7 @@ class WebSearchConfig:
 
     @property
     def configured(self) -> bool:
-        return self.enabled and bool(self.searxng_base_url)
+        return self.enabled
 
 
 @dataclass
@@ -75,14 +75,25 @@ _HEADERS = {
     "Accept": "text/html,application/xhtml+xml,application/json,text/plain;q=0.9,*/*;q=0.2",
     "Accept-Language": "zh-CN,zh;q=0.9,en;q=0.7",
 }
-_BING_FALLBACK_SEARCH_URL = "https://www.bing.com/search"
-_BING_FALLBACK_HEADERS = {
+_DIRECT_SEARCH_HEADERS = {
     "User-Agent": (
         "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
         "AppleWebKit/537.36 (KHTML, like Gecko) Chrome/125 Safari/537.36"
     ),
     "Accept": "text/html,application/xhtml+xml,text/plain;q=0.9,*/*;q=0.2",
     "Accept-Language": "zh-CN,zh;q=0.9,en;q=0.7",
+}
+_DIRECT_SEARCH_SOURCES = (
+    ("bing", "https://www.bing.com/search", "q"),
+    ("sogou", "https://www.sogou.com/web", "query"),
+    ("so360", "https://www.so.com/s", "q"),
+    ("toutiao", "https://so.toutiao.com/search", "keyword"),
+)
+_DIRECT_SEARCH_INTERNAL_HOSTS = {
+    "bing": {"bing.com", "www.bing.com", "cn.bing.com"},
+    "sogou": {"sogou.com", "www.sogou.com"},
+    "so360": {"so.com", "www.so.com"},
+    "toutiao": {"so.toutiao.com", "toutiao.com", "www.toutiao.com"},
 }
 
 _FAVICON_HEADERS = {
@@ -185,12 +196,7 @@ _TERM_ALIASES = {
 }
 
 _TIME_RANGE_VALUES = {"day", "week", "month", "year"}
-_SEARCH_ENGINE_PRIORITY = ("bing", "baidu", "google")
-_SEARCH_ENGINE_TIMEOUT_SECONDS = 5.0
-_SEARCH_ENGINE_TIMEOUT_COOLDOWN_SECONDS = 120.0
-_SEARCH_ENGINE_CAPTCHA_COOLDOWN_SECONDS = 3600.0
-_SEARCH_ENGINE_ERROR_COOLDOWN_SECONDS = 60.0
-_search_engine_cooldown_until: dict[str, float] = {}
+_DIRECT_SEARCH_TIMEOUT_SECONDS = 8.0
 
 
 def _runtime_web_search_settings() -> dict[str, Any]:
@@ -254,7 +260,7 @@ def normalize_searxng_url(url: str | None) -> str | None:
         value = value.split("?", 1)[0]
     parsed = urlsplit(value)
     if parsed.scheme not in {"http", "https"} or not parsed.netloc:
-        raise WebSearchError("SearXNG URL must be an absolute http(s) URL")
+        raise WebSearchError("Search URL must be an absolute http(s) URL")
     path = parsed.path or "/search"
     if path == "/":
         path = "/search"
@@ -345,36 +351,11 @@ def _normalize_fetch_max_chars(value: Any, config: WebSearchConfig) -> int:
 
 
 def _search_request_timeout(config: WebSearchConfig) -> float:
-    return float(max(1, min(config.timeout_seconds, _SEARCH_ENGINE_TIMEOUT_SECONDS)))
+    return float(max(1, min(config.timeout_seconds, _DIRECT_SEARCH_TIMEOUT_SECONDS)))
 
 
 def reset_search_engine_cooldowns() -> None:
-    _search_engine_cooldown_until.clear()
-
-
-def _search_engine_available(engine: str, now: float | None = None) -> bool:
-    return _search_engine_cooldown_until.get(engine, 0) <= (time.monotonic() if now is None else now)
-
-
-def _record_unresponsive_engines(payload: dict[str, Any], now: float | None = None) -> None:
-    entries = payload.get("unresponsive_engines")
-    if not isinstance(entries, list):
-        return
-    current = time.monotonic() if now is None else now
-    for entry in entries:
-        if not isinstance(entry, (list, tuple)) or not entry:
-            continue
-        engine = str(entry[0] or "").strip().lower()
-        if engine not in _SEARCH_ENGINE_PRIORITY:
-            continue
-        reason = str(entry[1] if len(entry) > 1 else "").lower()
-        if "captcha" in reason or "suspended" in reason:
-            cooldown = _SEARCH_ENGINE_CAPTCHA_COOLDOWN_SECONDS
-        elif "timeout" in reason:
-            cooldown = _SEARCH_ENGINE_TIMEOUT_COOLDOWN_SECONDS
-        else:
-            cooldown = _SEARCH_ENGINE_ERROR_COOLDOWN_SECONDS
-        _search_engine_cooldown_until[engine] = max(_search_engine_cooldown_until.get(engine, 0), current + cooldown)
+    return None
 
 
 def argument_value(arguments: dict[str, Any], *names: str) -> Any:
@@ -469,7 +450,53 @@ def _parse_bing_html_results(body: str) -> list[dict[str, str]]:
     return rows
 
 
-async def _search_bing_direct(
+def _search_href_target(href: str, source_url: str) -> str | None:
+    value = html.unescape(str(href or "").strip())
+    if not value or value.startswith(("#", "javascript:", "mailto:")):
+        return None
+    absolute = urljoin(source_url, value)
+    parsed = urlsplit(absolute)
+    if parsed.scheme not in {"http", "https"} or not parsed.netloc:
+        return None
+    query = parse_qs(parsed.query)
+    for name in ("url", "u", "target"):
+        for candidate in query.get(name, []):
+            normalized = normalize_result_url(candidate)
+            if normalized:
+                return normalized
+    return normalize_result_url(absolute)
+
+
+def _is_internal_direct_search_url(source_name: str, url: str) -> bool:
+    parsed = urlsplit(url)
+    host = (parsed.hostname or "").lower()
+    if source_name == "so360" and host in _DIRECT_SEARCH_INTERNAL_HOSTS[source_name] and parsed.path.startswith("/link"):
+        return False
+    return host in _DIRECT_SEARCH_INTERNAL_HOSTS.get(source_name, set())
+
+
+def _parse_generic_direct_search_results(source_name: str, source_url: str, body: str) -> list[dict[str, str]]:
+    rows: list[dict[str, str]] = []
+    for match in re.finditer(r'(?is)<a\b[^>]*href=["\']([^"\']+)["\'][^>]*>(.*?)</a>', body):
+        title = _strip_inline_html(match.group(2))
+        if len(title) < 2:
+            continue
+        url = _search_href_target(match.group(1), source_url)
+        if not url or _is_internal_direct_search_url(source_name, url):
+            continue
+        rows.append({"title": title, "url": url, "content": ""})
+        if len(rows) >= 60:
+            break
+    return rows
+
+
+def _parse_direct_search_results(source_name: str, source_url: str, body: str) -> list[dict[str, str]]:
+    if source_name == "bing":
+        return _parse_bing_html_results(body)
+    return _parse_generic_direct_search_results(source_name, source_url, body)
+
+
+async def _search_direct_sources(
     client: httpx.AsyncClient,
     query: str,
     *,
@@ -478,19 +505,29 @@ async def _search_bing_direct(
     seen: set[str],
     result_limit: int,
 ) -> list[WebSearchResult]:
-    try:
-        response = await client.get(
-            _BING_FALLBACK_SEARCH_URL,
-            headers=_BING_FALLBACK_HEADERS,
-            params={"q": query},
-            follow_redirects=True,
+    results: list[WebSearchResult] = []
+    for source_name, source_url, query_param in _DIRECT_SEARCH_SOURCES:
+        try:
+            response = await client.get(
+                source_url,
+                headers=_DIRECT_SEARCH_HEADERS,
+                params={query_param: query},
+                follow_redirects=True,
+            )
+            response.raise_for_status()
+        except httpx.HTTPError:
+            continue
+        rows = _parse_direct_search_results(source_name, str(response.url), response.text)
+        _, filtered = _parse_search_rows(
+            rows,
+            query_terms=query_terms,
+            high_signal_query=high_signal_query,
+            seen=seen,
         )
-        response.raise_for_status()
-    except httpx.HTTPError:
-        return []
-    rows = _parse_bing_html_results(response.text)
-    _, filtered = _parse_search_rows(rows, query_terms=query_terms, high_signal_query=high_signal_query, seen=seen)
-    return filtered[:result_limit]
+        results.extend(filtered)
+        if len(results) >= result_limit:
+            return results[:result_limit]
+    return results[:result_limit]
 
 
 def _parse_search_rows(
@@ -531,77 +568,24 @@ async def search_web(
     time_range: Any = None,
 ) -> list[WebSearchResult]:
     config = config or effective_web_search_config()
-    if not config.configured or not config.searxng_base_url:
+    if not config.configured:
         raise WebSearchNotConfigured("Web search is not configured")
     clean_query = _compact_text(query, 300)
     if not clean_query:
         return []
     result_limit = _normalize_search_result_count(result_count, config)
-    params = {
-        "q": clean_query,
-        "format": "json",
-        "pageno": 1,
-        "safesearch": config.safesearch,
-        "language": _normalize_search_language(language, config),
-        "categories": "general",
-    }
-    normalized_time_range = _normalize_time_range(time_range)
-    if normalized_time_range:
-        params["time_range"] = normalized_time_range
     query_terms = _query_relevance_terms(clean_query)
     high_signal_query = _is_high_signal_query(query_terms, clean_query)
     seen: set[str] = set()
-    candidates: list[WebSearchResult] = []
-    filtered: list[WebSearchResult] = []
-    last_error: httpx.HTTPError | None = None
-    successful_response = False
     async with httpx.AsyncClient(timeout=_search_request_timeout(config)) as client:
-        engines = [engine for engine in _SEARCH_ENGINE_PRIORITY if _search_engine_available(engine)] or [next(iter(_SEARCH_ENGINE_PRIORITY))]
-        for engine in engines:
-            engine_params = {**params, "engines": engine}
-            try:
-                response = await client.get(config.searxng_base_url, headers=_HEADERS, params=engine_params)
-                response.raise_for_status()
-            except httpx.HTTPError as exc:
-                last_error = exc
-                continue
-            successful_response = True
-            payload = response.json()
-            if isinstance(payload, dict):
-                _record_unresponsive_engines(payload)
-            rows = payload.get("results") if isinstance(payload, dict) else []
-            engine_candidates, engine_filtered = _parse_search_rows(
-                rows,
-                query_terms=query_terms,
-                high_signal_query=high_signal_query,
-                seen=seen,
-            )
-            candidates.extend(engine_candidates)
-            filtered.extend(engine_filtered)
-            if len(filtered) >= result_limit:
-                return filtered[:result_limit]
-            if not filtered and _allow_unfiltered_fallback(query_terms, clean_query) and len(candidates) >= result_limit:
-                return candidates[:result_limit]
-        if len(filtered) >= result_limit:
-            return filtered[:result_limit]
-        if not candidates:
-            direct_results = await _search_bing_direct(
-                client,
-                clean_query,
-                query_terms=query_terms,
-                high_signal_query=high_signal_query,
-                seen=seen,
-                result_limit=result_limit,
-            )
-            if direct_results:
-                return direct_results
-    if not successful_response and last_error is not None:
-        raise last_error
-    if filtered:
-        return filtered[:result_limit]
-    if _allow_unfiltered_fallback(query_terms, clean_query):
-        return candidates[:result_limit]
-    return []
+        return await _search_direct_sources(
+            client,
+            clean_query,
+            query_terms=query_terms,
+            high_signal_query=high_signal_query,
+            seen=seen,
+            result_limit=result_limit,
+        )
 
 
 def _hostname_is_blocked(hostname: str) -> bool:
@@ -730,7 +714,7 @@ def web_search_tools() -> list[dict[str, Any]]:
                         },
                         "language": {
                             "type": "string",
-                            "description": "Optional SearXNG language code, such as all, auto, en, or zh-CN.",
+                            "description": "Optional language hint, such as all, auto, en, or zh-CN.",
                         },
                         "time_range": {
                             "type": "string",

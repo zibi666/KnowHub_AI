@@ -63,7 +63,7 @@ const versions: VersionEntry[] = [
       '新增联网搜索工具策略，要求强时效、新闻和外部事实优先搜索，snippet 不足时再读取网页。',
       '强时效问题如果模型没有主动调用工具，后端自动执行一次 search_web，并把格式化结果注入上下文。',
       '同一轮内重复搜索 query 或重复读取 URL 会复用缓存结果，不重复消耗工具调用次数。',
-      'SearXNG 搜索链路按国内服务器环境优化，优先尝试 Bing，再尝试百度和 Google，并对不可用引擎做短期冷却。',
+      '联网搜索链路按国内服务器环境优化，直连 Bing、搜狗、360 搜索和头条搜索，去除旧聚合搜索源依赖。',
       'web_search_status 事件增加 query、url、result_count、source_count，让前端进度文案更具体。'
     ]
   },

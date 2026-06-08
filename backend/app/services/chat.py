@@ -599,7 +599,7 @@ async def run_web_search_tool_loop(
     if not config.configured:
         raise HTTPException(
             status_code=400,
-            detail={"code": "WEB_SEARCH_NOT_CONFIGURED", "message": "联网搜索尚未配置 SearXNG，无法启用。"},
+            detail={"code": "WEB_SEARCH_NOT_CONFIGURED", "message": "联网搜索尚未启用，无法使用。"},
         )
     tools = web_search_tools()
     sources: list = []
