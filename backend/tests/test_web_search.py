@@ -320,7 +320,7 @@ def test_search_web_parses_limits_and_dedupes_results(monkeypatch):
     asyncio.run(run())
 
 
-def test_search_web_uses_direct_sources_in_order_until_enough(monkeypatch):
+def test_search_web_uses_every_direct_source_and_dedupes_results(monkeypatch):
     captured_urls = []
 
     class FakeClient:
@@ -349,13 +349,18 @@ def test_search_web_uses_direct_sources_in_order_until_enough(monkeypatch):
         monkeypatch.setattr(web_search.httpx, "AsyncClient", FakeClient)
         results = await search_web("test", _search_config(result_count=2))
 
-        assert captured_urls == ["https://www.bing.com/search", "https://www.sogou.com/web"]
+        assert captured_urls == [
+            "https://www.bing.com/search",
+            "https://www.sogou.com/web",
+            "https://www.so.com/s",
+            "https://so.toutiao.com/search",
+        ]
         assert [item.title for item in results] == ["Test Bing One", "Test Sogou Two"]
 
     asyncio.run(run())
 
 
-def test_search_web_stops_after_bing_when_results_are_enough(monkeypatch):
+def test_search_web_searches_all_sources_even_when_bing_has_enough(monkeypatch):
     captured_urls = []
 
     class FakeClient:
@@ -384,7 +389,12 @@ def test_search_web_stops_after_bing_when_results_are_enough(monkeypatch):
         monkeypatch.setattr(web_search.httpx, "AsyncClient", FakeClient)
         results = await search_web("test", _search_config(result_count=2))
 
-        assert captured_urls == ["https://www.bing.com/search"]
+        assert captured_urls == [
+            "https://www.bing.com/search",
+            "https://www.sogou.com/web",
+            "https://www.so.com/s",
+            "https://so.toutiao.com/search",
+        ]
         assert [item.title for item in results] == ["Test Bing One", "Test Bing Two"]
 
     asyncio.run(run())
@@ -416,7 +426,12 @@ def test_search_web_continues_after_direct_source_failure(monkeypatch):
         monkeypatch.setattr(web_search.httpx, "AsyncClient", FakeClient)
         results = await search_web("test", _search_config(result_count=1))
 
-        assert captured_urls == ["https://www.bing.com/search", "https://www.sogou.com/web"]
+        assert captured_urls == [
+            "https://www.bing.com/search",
+            "https://www.sogou.com/web",
+            "https://www.so.com/s",
+            "https://so.toutiao.com/search",
+        ]
         assert [item.title for item in results] == ["Test Sogou Result"]
 
     asyncio.run(run())
@@ -499,6 +514,66 @@ def test_search_web_direct_sources_reject_unrelated_rows(monkeypatch):
     asyncio.run(run())
 
 
+def test_search_web_high_signal_queries_continue_across_sources_and_rank_obituaries(monkeypatch):
+    captured_urls = []
+
+    class FakeClient:
+        def __init__(self, *args, **kwargs):
+            pass
+
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, *args):
+            return None
+
+        async def get(self, url, **kwargs):
+            captured_urls.append(url)
+            if url == "https://www.bing.com/search":
+                return DirectSearchResponse(
+                    _bing_html(
+                        [
+                            (
+                                "张雪峰去世2个月后，高考前其账号突然更新",
+                                "https://www.bilibili.com/video/BV14vEs6cEye/",
+                                "网传张雪峰离世，账号发布高考祝福视频。",
+                            ),
+                            (
+                                "张雪峰离世细节曝光",
+                                "https://zhuanlan.zhihu.com/p/2020255751449366857",
+                                "网友整理的张雪峰离世时间线。",
+                            ),
+                        ]
+                    ),
+                    url=f"{url}?q=zhang",
+                )
+            if url == "https://www.sogou.com/web":
+                return DirectSearchResponse(
+                    _generic_html(
+                        [
+                            ("帮助", "http://help.sogou.com/?w=01091500&v=1"),
+                            ("举报", "https://fankui.sogou.com/index.php/web/web/index/type/5"),
+                            (
+                                "张雪峰因心源性猝死抢救无效去世",
+                                "https://www.chinanews.com.cn/sh/2026/03-24/10592189.shtml",
+                            ),
+                        ]
+                    ),
+                    url=f"{url}?query=zhang",
+                )
+            return DirectSearchResponse("<html><body></body></html>", url=url)
+
+    async def run():
+        monkeypatch.setattr(web_search.httpx, "AsyncClient", FakeClient)
+        results = await search_web("张雪峰死了吗", _search_config(result_count=2))
+
+        assert captured_urls[:2] == ["https://www.bing.com/search", "https://www.sogou.com/web"]
+        assert results[0].url == "https://www.chinanews.com.cn/sh/2026/03-24/10592189.shtml"
+        assert all(item.title not in {"帮助", "举报"} for item in results)
+
+    asyncio.run(run())
+
+
 def test_web_search_tools_include_agentic_parameters():
     tools = {tool["function"]["name"]: tool["function"]["parameters"] for tool in web_search_tools()}
 
@@ -573,7 +648,7 @@ def test_sqlite_lightweight_migration_adds_web_search_sources_column(monkeypatch
 
 
 def test_search_web_clamps_count_and_sends_direct_query_params(monkeypatch):
-    captured = {}
+    captured_requests = []
 
     class FakeClient:
         def __init__(self, *args, **kwargs):
@@ -586,8 +661,7 @@ def test_search_web_clamps_count_and_sends_direct_query_params(monkeypatch):
             return None
 
         async def get(self, url, **kwargs):
-            captured["url"] = url
-            captured["params"] = kwargs.get("params")
+            captured_requests.append((url, kwargs.get("params")))
             return DirectSearchResponse(
                 _bing_html(
                     [
@@ -605,8 +679,12 @@ def test_search_web_clamps_count_and_sends_direct_query_params(monkeypatch):
         results = await search_web("example", config, result_count=99, language="zh-CN", time_range="week")
 
         assert len(results) == 2
-        assert captured["url"] == "https://www.bing.com/search"
-        assert captured["params"] == {"q": "example"}
+        assert captured_requests == [
+            ("https://www.bing.com/search", {"q": "example"}),
+            ("https://www.sogou.com/web", {"query": "example"}),
+            ("https://www.so.com/s", {"q": "example"}),
+            ("https://so.toutiao.com/search", {"keyword": "example"}),
+        ]
 
     asyncio.run(run())
 

@@ -514,7 +514,7 @@ def inject_web_search_final_answer_context(context: list[dict], sources: list[di
         "Never add a citation marker just to satisfy formatting.",
         "Do not append a separate markdown source list.",
     ]
-    for source in sources[:10]:
+    for source in sources[:30]:
         index = int(source.get("index") or 0)
         title = str(source.get("title") or source.get("url") or "").strip()
         url = str(source.get("url") or "").strip()

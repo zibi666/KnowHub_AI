@@ -307,12 +307,12 @@ const webSearchTestResults = ref<Array<{ title: string; url: string; snippet?: s
 const webSearchSettings = ref<WebSearchSettings>({
   enabled: false,
   searxngBaseUrl: '',
-  resultCount: 5,
+  resultCount: 30,
   language: 'all',
   safesearch: '1',
   timeoutSeconds: 20,
   fetchTimeoutSeconds: 20,
-  maxToolCalls: 4,
+  maxToolCalls: 20,
   fetchMaxChars: 12000
 })
 
@@ -785,12 +785,12 @@ function normalizeWebSearchSettings(data: any): WebSearchSettings {
   return {
     enabled: Boolean(data?.enabled),
     searxngBaseUrl: data?.searxngBaseUrl ?? data?.searxng_base_url ?? '',
-    resultCount: Number(data?.resultCount ?? data?.result_count ?? 5),
+    resultCount: Number(data?.resultCount ?? data?.result_count ?? 30),
     language: data?.language || 'all',
     safesearch: data?.safesearch || '1',
     timeoutSeconds: Number(data?.timeoutSeconds ?? data?.timeout_seconds ?? 20),
     fetchTimeoutSeconds: Number(data?.fetchTimeoutSeconds ?? data?.fetch_timeout_seconds ?? 20),
-    maxToolCalls: Number(data?.maxToolCalls ?? data?.max_tool_calls ?? 4),
+    maxToolCalls: Number(data?.maxToolCalls ?? data?.max_tool_calls ?? 20),
     fetchMaxChars: Number(data?.fetchMaxChars ?? data?.fetch_max_chars ?? 12000)
   }
 }
@@ -4323,7 +4323,7 @@ onUnmounted(() => {
                     </label>
                     <label class="settings-field">
                       <span>结果数</span>
-                      <input v-model.number="webSearchSettings.resultCount" class="settings-input" type="number" min="1" max="10" />
+                      <input v-model.number="webSearchSettings.resultCount" class="settings-input" type="number" min="1" max="30" />
                     </label>
                     <label class="settings-field">
                       <span>语言</span>
@@ -4343,7 +4343,7 @@ onUnmounted(() => {
                     </label>
                     <label class="settings-field">
                       <span>最大工具调用次数</span>
-                      <input v-model.number="webSearchSettings.maxToolCalls" class="settings-input" type="number" min="1" max="10" />
+                      <input v-model.number="webSearchSettings.maxToolCalls" class="settings-input" type="number" min="1" max="20" />
                     </label>
                     <label class="settings-field">
                       <span>网页最大字符数</span>

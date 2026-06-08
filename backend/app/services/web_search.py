@@ -95,6 +95,11 @@ _DIRECT_SEARCH_INTERNAL_HOSTS = {
     "so360": {"so.com", "www.so.com"},
     "toutiao": {"so.toutiao.com", "toutiao.com", "www.toutiao.com"},
 }
+_WEB_SEARCH_RESULT_COUNT_DEFAULT = 30
+_WEB_SEARCH_RESULT_COUNT_MAX = 30
+_WEB_SEARCH_CONTEXT_SOURCE_LIMIT = 30
+_WEB_SEARCH_TOOL_CALLS_DEFAULT = 20
+_WEB_SEARCH_TOOL_CALLS_MAX = 20
 
 _FAVICON_HEADERS = {
     "User-Agent": "KnowHub Favicon Cache",
@@ -163,6 +168,90 @@ _LOW_VALUE_SOURCE_HOSTS = {
     "wikipedia.org",
 }
 
+_AUTHORITY_SOURCE_HOSTS = {
+    "chinanews.com.cn",
+    "cna.com.tw",
+    "cntv.cn",
+    "cctv.com",
+    "news.cn",
+    "people.com.cn",
+    "xinhuanet.com",
+    "thepaper.cn",
+    "sina.cn",
+    "sina.com.cn",
+    "qq.com",
+    "yicai.com",
+    "nbd.com.cn",
+    "bjnews.com.cn",
+    "jfdaily.com",
+    "stdaily.com",
+    "guancha.cn",
+    "gmw.cn",
+    "ce.cn",
+}
+
+_COMMUNITY_OR_VIDEO_HOSTS = {
+    "zhihu.com",
+    "bilibili.com",
+    "baidu.com",
+    "toutiao.com",
+    "ixigua.com",
+    "douyin.com",
+}
+
+_DIRECT_SEARCH_NAVIGATION_TITLES = {
+    "帮助",
+    "举报",
+    "图片",
+    "视频",
+    "微信",
+    "知乎",
+    "汉语",
+    "翻译",
+    "问问",
+    "应用",
+    "意见反馈",
+    "登录",
+    "注册",
+    "百度搜索",
+    "必应搜索",
+    "ai问答",
+}
+
+_OBITUARY_SIGNAL_TERMS = (
+    "讣告",
+    "去世",
+    "逝世",
+    "离世",
+    "死亡",
+    "抢救无效",
+    "心源性猝死",
+    "猝死",
+    "不幸去世",
+    "因病去世",
+)
+
+_OFFICIAL_SIGNAL_TERMS = (
+    "官方",
+    "公司发布",
+    "发布讣告",
+    "央视",
+    "中新网",
+    "新华社",
+    "人民日报",
+    "中国新闻社",
+    "江苏人大发布",
+)
+
+_ACCOUNT_UPDATE_TERMS = (
+    "账号突然更新",
+    "账号更新",
+    "本人出镜",
+    "高考祝福",
+    "发布新视频",
+    "最新动态",
+)
+
 _LOW_VALUE_TITLE_TERMS = (
     "的更多内容",
     "百科",
@@ -217,12 +306,12 @@ def normalize_web_search_settings(raw: dict[str, Any]) -> dict[str, Any]:
     return {
         "enabled": bool(raw.get("enabled", False)),
         "searxng_base_url": normalize_searxng_url(base_url) if base_url else None,
-        "result_count": _coerce_int(raw.get("result_count"), 5, minimum=1, maximum=10),
+        "result_count": _coerce_int(raw.get("result_count"), _WEB_SEARCH_RESULT_COUNT_DEFAULT, minimum=1, maximum=_WEB_SEARCH_RESULT_COUNT_MAX),
         "language": (str(raw.get("language") or "all").strip() or "all")[:32],
         "safesearch": (str(raw.get("safesearch") or "1").strip() or "1")[:16],
         "timeout_seconds": _coerce_int(raw.get("timeout_seconds"), 20, minimum=3, maximum=60),
         "fetch_timeout_seconds": _coerce_int(raw.get("fetch_timeout_seconds"), 20, minimum=3, maximum=60),
-        "max_tool_calls": _coerce_int(raw.get("max_tool_calls"), 4, minimum=1, maximum=10),
+        "max_tool_calls": _coerce_int(raw.get("max_tool_calls"), _WEB_SEARCH_TOOL_CALLS_DEFAULT, minimum=1, maximum=_WEB_SEARCH_TOOL_CALLS_MAX),
         "fetch_max_chars": _coerce_int(raw.get("fetch_max_chars"), 12000, minimum=1000, maximum=50000),
     }
 
@@ -426,6 +515,30 @@ def _is_low_value_result(title: str, url: str) -> bool:
     return any(term in lowered_title for term in _LOW_VALUE_TITLE_TERMS)
 
 
+def _host_matches(host: str, candidates: set[str]) -> bool:
+    return any(host == candidate or host.endswith(f".{candidate}") for candidate in candidates)
+
+
+def _result_rank_score(result: WebSearchResult) -> int:
+    parsed = urlsplit(result.url)
+    host = (parsed.hostname or "").lower()
+    haystack = f"{result.title} {result.snippet}".lower()
+    score = 0
+    if _host_matches(host, _AUTHORITY_SOURCE_HOSTS):
+        score += 30
+    if _host_matches(host, _COMMUNITY_OR_VIDEO_HOSTS):
+        score -= 12
+    score += sum(14 for term in _OBITUARY_SIGNAL_TERMS if term in haystack)
+    score += sum(8 for term in _OFFICIAL_SIGNAL_TERMS if term in haystack)
+    score -= sum(10 for term in _ACCOUNT_UPDATE_TERMS if term in haystack)
+    return score
+
+
+def _rank_search_results(results: list[WebSearchResult]) -> list[WebSearchResult]:
+    ranked = sorted(enumerate(results), key=lambda item: (-_result_rank_score(item[1]), item[0]))
+    return [result for _, result in ranked]
+
+
 def _strip_inline_html(value: str) -> str:
     text = re.sub(r"(?is)<(script|style|noscript).*?>.*?</\1>", " ", value)
     text = re.sub(r"(?is)<[^>]+>", " ", text)
@@ -467,11 +580,18 @@ def _search_href_target(href: str, source_url: str) -> str | None:
     return normalize_result_url(absolute)
 
 
-def _is_internal_direct_search_url(source_name: str, url: str) -> bool:
+def _is_search_navigation_result(source_name: str, title: str, url: str) -> bool:
+    normalized_title = _compact_text(title, 30).lower()
+    if normalized_title in _DIRECT_SEARCH_NAVIGATION_TITLES:
+        return True
     parsed = urlsplit(url)
     host = (parsed.hostname or "").lower()
     if source_name == "so360" and host in _DIRECT_SEARCH_INTERNAL_HOSTS[source_name] and parsed.path.startswith("/link"):
         return False
+    if source_name in {"bing", "sogou"}:
+        return _host_matches(host, _DIRECT_SEARCH_INTERNAL_HOSTS.get(source_name, set()))
+    if source_name == "so360":
+        return _host_matches(host, _DIRECT_SEARCH_INTERNAL_HOSTS.get(source_name, set())) or host.endswith(".360.cn")
     return host in _DIRECT_SEARCH_INTERNAL_HOSTS.get(source_name, set())
 
 
@@ -482,7 +602,7 @@ def _parse_generic_direct_search_results(source_name: str, source_url: str, body
         if len(title) < 2:
             continue
         url = _search_href_target(match.group(1), source_url)
-        if not url or _is_internal_direct_search_url(source_name, url):
+        if not url or _is_search_navigation_result(source_name, title, url):
             continue
         rows.append({"title": title, "url": url, "content": ""})
         if len(rows) >= 60:
@@ -525,9 +645,7 @@ async def _search_direct_sources(
             seen=seen,
         )
         results.extend(filtered)
-        if len(results) >= result_limit:
-            return results[:result_limit]
-    return results[:result_limit]
+    return _rank_search_results(results)[:result_limit]
 
 
 def _parse_search_rows(
@@ -903,7 +1021,7 @@ async def cached_favicon(url: str) -> tuple[Path, str, str]:
     raise WebSearchError("Too many favicon redirects")
 
 
-def structured_web_search_sources(sources: list[WebSearchResult], *, limit: int = 10) -> list[dict[str, Any]]:
+def structured_web_search_sources(sources: list[WebSearchResult], *, limit: int = _WEB_SEARCH_CONTEXT_SOURCE_LIMIT) -> list[dict[str, Any]]:
     deduped: list[WebSearchSource] = []
     seen: set[str] = set()
     for source in sources:
@@ -938,7 +1056,7 @@ def append_sources_markdown(content: str, sources: list[WebSearchResult]) -> str
     if not deduped:
         return content
     lines = ["", "", "### 来源"]
-    for index, source in enumerate(deduped[:10], start=1):
+    for index, source in enumerate(deduped[:_WEB_SEARCH_CONTEXT_SOURCE_LIMIT], start=1):
         title = source.title.replace("[", "").replace("]", "").strip() or source.url
         lines.append(f"{index}. [{title}]({source.url})")
     return content.rstrip() + "\n".join(lines)
@@ -960,7 +1078,7 @@ def format_search_results_for_context(query: str, payload: dict[str, Any]) -> st
         lines.append("No relevant results were found. Say that clearly if this weakens the answer.")
         return "\n".join(lines)
 
-    for index, item in enumerate(results[:10], start=1):
+    for index, item in enumerate(results[:_WEB_SEARCH_CONTEXT_SOURCE_LIMIT], start=1):
         if not isinstance(item, dict):
             continue
         title = _compact_text(item.get("title"), 180) or _compact_text(item.get("url"), 180)

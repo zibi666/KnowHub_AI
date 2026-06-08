@@ -29,12 +29,12 @@ class ImageGenerationSettings(ApiModel):
 class WebSearchSettings(ApiModel):
     enabled: bool = False
     searxng_base_url: str | None = None
-    result_count: int = 5
+    result_count: int = 30
     language: str = "all"
     safesearch: str = "1"
     timeout_seconds: int = 20
     fetch_timeout_seconds: int = 20
-    max_tool_calls: int = 4
+    max_tool_calls: int = 20
     fetch_max_chars: int = 12000
 
 
