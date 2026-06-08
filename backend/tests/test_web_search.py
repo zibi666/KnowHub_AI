@@ -360,6 +360,48 @@ def test_search_web_uses_every_direct_source_and_dedupes_results(monkeypatch):
     asyncio.run(run())
 
 
+def test_search_web_queries_direct_sources_concurrently(monkeypatch):
+    started_urls = []
+    all_sources_started = asyncio.Event()
+    source_count = len(web_search._DIRECT_SEARCH_SOURCES)
+
+    class FakeClient:
+        def __init__(self, *args, **kwargs):
+            pass
+
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, *args):
+            return None
+
+        async def get(self, url, **kwargs):
+            started_urls.append(url)
+            if len(started_urls) == source_count:
+                all_sources_started.set()
+            await all_sources_started.wait()
+            if url == "https://www.bing.com/search":
+                return DirectSearchResponse(
+                    _bing_html([("Test Bing One", "https://bing.example.com/one", "test first")]),
+                    url=f"{url}?q=test",
+                )
+            return DirectSearchResponse("<html><body></body></html>", url=url)
+
+    async def run():
+        monkeypatch.setattr(web_search.httpx, "AsyncClient", FakeClient)
+        results = await asyncio.wait_for(search_web("test", _search_config(result_count=2)), timeout=0.2)
+
+        assert started_urls == [
+            "https://www.bing.com/search",
+            "https://www.sogou.com/web",
+            "https://www.so.com/s",
+            "https://so.toutiao.com/search",
+        ]
+        assert [item.title for item in results] == ["Test Bing One"]
+
+    asyncio.run(run())
+
+
 def test_search_web_searches_all_sources_even_when_bing_has_enough(monkeypatch):
     captured_urls = []
 

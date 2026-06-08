@@ -616,6 +616,26 @@ def _parse_direct_search_results(source_name: str, source_url: str, body: str) -
     return _parse_generic_direct_search_results(source_name, source_url, body)
 
 
+async def _fetch_direct_search_source(
+    client: httpx.AsyncClient,
+    source_name: str,
+    source_url: str,
+    query_param: str,
+    query: str,
+) -> tuple[str, list[dict[str, str]]]:
+    try:
+        response = await client.get(
+            source_url,
+            headers=_DIRECT_SEARCH_HEADERS,
+            params={query_param: query},
+            follow_redirects=True,
+        )
+        response.raise_for_status()
+    except httpx.HTTPError:
+        return source_name, []
+    return source_name, _parse_direct_search_results(source_name, str(response.url), response.text)
+
+
 async def _search_direct_sources(
     client: httpx.AsyncClient,
     query: str,
@@ -626,18 +646,13 @@ async def _search_direct_sources(
     result_limit: int,
 ) -> list[WebSearchResult]:
     results: list[WebSearchResult] = []
-    for source_name, source_url, query_param in _DIRECT_SEARCH_SOURCES:
-        try:
-            response = await client.get(
-                source_url,
-                headers=_DIRECT_SEARCH_HEADERS,
-                params={query_param: query},
-                follow_redirects=True,
-            )
-            response.raise_for_status()
-        except httpx.HTTPError:
-            continue
-        rows = _parse_direct_search_results(source_name, str(response.url), response.text)
+    source_rows = await asyncio.gather(
+        *(
+            _fetch_direct_search_source(client, source_name, source_url, query_param, query)
+            for source_name, source_url, query_param in _DIRECT_SEARCH_SOURCES
+        )
+    )
+    for _source_name, rows in source_rows:
         _, filtered = _parse_search_rows(
             rows,
             query_terms=query_terms,
