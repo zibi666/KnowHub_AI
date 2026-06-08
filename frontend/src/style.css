@@ -2984,14 +2984,29 @@ body,
 }
 
 .confirm-danger-button {
-  background: color-mix(in srgb, #dc2626 18%, transparent);
-  color: #fca5a5;
+  border: 1px solid #fca5a5;
+  background: #fee2e2;
+  color: #991b1b;
+  font-weight: 650;
 }
 
 .confirm-danger-button:hover:not(:disabled) {
-  background: color-mix(in srgb, #dc2626 28%, transparent);
-  color: #fecaca;
+  border-color: #b91c1c;
+  background: #dc2626;
+  color: #fff;
   transform: translateY(-1px);
+}
+
+.confirm-danger-button:focus-visible {
+  outline: 2px solid #b91c1c;
+  outline-offset: 2px;
+}
+
+.confirm-danger-button:active:not(:disabled) {
+  border-color: #7f1d1d;
+  background: #991b1b;
+  color: #fff;
+  transform: translateY(0);
 }
 
 .rename-secondary-button:disabled,
