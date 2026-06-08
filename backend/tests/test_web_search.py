@@ -461,6 +461,74 @@ def test_search_web_cools_down_unresponsive_engine(monkeypatch):
     asyncio.run(run())
 
 
+def test_search_web_uses_direct_bing_fallback_when_searxng_has_no_rows(monkeypatch):
+    captured_requests = []
+
+    class FakeResponse:
+        def __init__(self, url, params):
+            self.url = url
+            self.params = params
+            self.text = """
+                <html>
+                  <body>
+                    <ol>
+                      <li class="b_algo">
+                        <h2>
+                          <a href="https://example.com/chatgpt-models">Models - ChatGPT</a>
+                        </h2>
+                        <div class="b_caption">
+                          <p>ChatGPT latest model information and available model names.</p>
+                        </div>
+                      </li>
+                    </ol>
+                  </body>
+                </html>
+            """
+
+        def raise_for_status(self):
+            return None
+
+        def json(self):
+            return {"results": [], "unresponsive_engines": [["baidu", "CAPTCHA"]]}
+
+    class FakeClient:
+        def __init__(self, *args, **kwargs):
+            pass
+
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, *args):
+            return None
+
+        async def get(self, url, **kwargs):
+            params = kwargs.get("params") or {}
+            captured_requests.append((url, params))
+            return FakeResponse(url, params)
+
+    async def run():
+        monkeypatch.setattr(web_search.httpx, "AsyncClient", FakeClient)
+        config = WebSearchConfig(
+            enabled=True,
+            searxng_base_url="https://search.example.com/search",
+            result_count=5,
+            language="all",
+            safesearch="1",
+            timeout_seconds=20,
+            fetch_timeout_seconds=5,
+            max_tool_calls=2,
+            fetch_max_chars=4000,
+        )
+
+        results = await search_web("chatGPT最新版本模型的代号", config)
+
+        assert [item.url for item in results] == ["https://example.com/chatgpt-models"]
+        assert [params.get("engines") for _, params in captured_requests if params.get("engines")] == ["bing", "baidu", "google"]
+        assert any(url == "https://www.bing.com/search" for url, _ in captured_requests)
+
+    asyncio.run(run())
+
+
 def test_web_search_tools_include_agentic_parameters():
     tools = {tool["function"]["name"]: tool["function"]["parameters"] for tool in web_search_tools()}
 

@@ -75,6 +75,15 @@ _HEADERS = {
     "Accept": "text/html,application/xhtml+xml,application/json,text/plain;q=0.9,*/*;q=0.2",
     "Accept-Language": "zh-CN,zh;q=0.9,en;q=0.7",
 }
+_BING_FALLBACK_SEARCH_URL = "https://www.bing.com/search"
+_BING_FALLBACK_HEADERS = {
+    "User-Agent": (
+        "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
+        "AppleWebKit/537.36 (KHTML, like Gecko) Chrome/125 Safari/537.36"
+    ),
+    "Accept": "text/html,application/xhtml+xml,text/plain;q=0.9,*/*;q=0.2",
+    "Accept-Language": "zh-CN,zh;q=0.9,en;q=0.7",
+}
 
 _FAVICON_HEADERS = {
     "User-Agent": "KnowHub Favicon Cache",
@@ -436,6 +445,58 @@ def _is_low_value_result(title: str, url: str) -> bool:
     return any(term in lowered_title for term in _LOW_VALUE_TITLE_TERMS)
 
 
+def _strip_inline_html(value: str) -> str:
+    text = re.sub(r"(?is)<(script|style|noscript).*?>.*?</\1>", " ", value)
+    text = re.sub(r"(?is)<[^>]+>", " ", text)
+    return _compact_text(html.unescape(text), 700)
+
+
+def _parse_bing_html_results(body: str) -> list[dict[str, str]]:
+    rows: list[dict[str, str]] = []
+    for block in re.findall(r'(?is)<li\b[^>]*class="[^"]*\bb_algo\b[^"]*"[^>]*>.*?</li>', body):
+        link_match = re.search(r'(?is)<h2[^>]*>.*?<a\b[^>]*href="([^"]+)"[^>]*>(.*?)</a>.*?</h2>', block)
+        if not link_match:
+            continue
+        url = html.unescape(link_match.group(1))
+        title = _strip_inline_html(link_match.group(2))
+        snippet = ""
+        snippet_match = re.search(r'(?is)<div\b[^>]*class="[^"]*\bb_caption\b[^"]*"[^>]*>.*?<p[^>]*>(.*?)</p>', block)
+        if snippet_match:
+            snippet = _strip_inline_html(snippet_match.group(1))
+        elif fallback_match := re.search(r"(?is)<p[^>]*>(.*?)</p>", block):
+            snippet = _strip_inline_html(fallback_match.group(1))
+        rows.append({"title": title, "url": url, "content": snippet})
+    return rows
+
+
+async def _search_bing_direct(
+    client: httpx.AsyncClient,
+    query: str,
+    *,
+    query_terms: list[str],
+    high_signal_query: bool,
+    seen: set[str],
+    result_limit: int,
+) -> list[WebSearchResult]:
+    try:
+        response = await client.get(
+            _BING_FALLBACK_SEARCH_URL,
+            headers=_BING_FALLBACK_HEADERS,
+            params={"q": query},
+            follow_redirects=True,
+        )
+        response.raise_for_status()
+    except httpx.HTTPError:
+        return []
+    rows = _parse_bing_html_results(response.text)
+    candidates, filtered = _parse_search_rows(rows, query_terms=query_terms, high_signal_query=high_signal_query, seen=seen)
+    if filtered:
+        return filtered[:result_limit]
+    if _allow_unfiltered_fallback(query_terms, query):
+        return candidates[:result_limit]
+    return []
+
+
 def _parse_search_rows(
     rows: Any,
     *,
@@ -527,6 +588,17 @@ async def search_web(
                 return candidates[:result_limit]
         if len(filtered) >= result_limit:
             return filtered[:result_limit]
+        if not candidates:
+            direct_results = await _search_bing_direct(
+                client,
+                clean_query,
+                query_terms=query_terms,
+                high_signal_query=high_signal_query,
+                seen=seen,
+                result_limit=result_limit,
+            )
+            if direct_results:
+                return direct_results
     if not successful_response and last_error is not None:
         raise last_error
     if filtered:
