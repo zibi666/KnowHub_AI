@@ -529,6 +529,57 @@ def test_search_web_uses_direct_bing_fallback_when_searxng_has_no_rows(monkeypat
     asyncio.run(run())
 
 
+def test_search_web_direct_bing_fallback_rejects_unrelated_rows(monkeypatch):
+    class FakeResponse:
+        text = """
+            <html>
+              <body>
+                <li class="b_algo">
+                  <h2><a href="https://example.com/byk-349">BYK-349 surface additive</a></h2>
+                  <div class="b_caption"><p>Industrial coating additive details.</p></div>
+                </li>
+              </body>
+            </html>
+        """
+
+        def raise_for_status(self):
+            return None
+
+        def json(self):
+            return {"results": []}
+
+    class FakeClient:
+        def __init__(self, *args, **kwargs):
+            pass
+
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, *args):
+            return None
+
+        async def get(self, *args, **kwargs):
+            return FakeResponse()
+
+    async def run():
+        monkeypatch.setattr(web_search.httpx, "AsyncClient", FakeClient)
+        config = WebSearchConfig(
+            enabled=True,
+            searxng_base_url="https://search.example.com/search",
+            result_count=5,
+            language="all",
+            safesearch="1",
+            timeout_seconds=20,
+            fetch_timeout_seconds=5,
+            max_tool_calls=2,
+            fetch_max_chars=4000,
+        )
+
+        assert await search_web("ChatGPT", config) == []
+
+    asyncio.run(run())
+
+
 def test_web_search_tools_include_agentic_parameters():
     tools = {tool["function"]["name"]: tool["function"]["parameters"] for tool in web_search_tools()}
 

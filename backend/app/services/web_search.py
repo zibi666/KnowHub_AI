@@ -489,12 +489,8 @@ async def _search_bing_direct(
     except httpx.HTTPError:
         return []
     rows = _parse_bing_html_results(response.text)
-    candidates, filtered = _parse_search_rows(rows, query_terms=query_terms, high_signal_query=high_signal_query, seen=seen)
-    if filtered:
-        return filtered[:result_limit]
-    if _allow_unfiltered_fallback(query_terms, query):
-        return candidates[:result_limit]
-    return []
+    _, filtered = _parse_search_rows(rows, query_terms=query_terms, high_signal_query=high_signal_query, seen=seen)
+    return filtered[:result_limit]
 
 
 def _parse_search_rows(
