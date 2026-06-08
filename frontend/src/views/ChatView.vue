@@ -1,10 +1,11 @@
 <script setup lang="ts">
 import { computed, nextTick, onMounted, onUnmounted, ref, watch, type CSSProperties } from 'vue'
-import { ArrowDown, Download, FileText, GitBranch, Image as ImageIcon, KeyRound, LogOut, Maximize2, MessageCircle, Minimize2, PanelLeftClose, PanelLeftOpen, Paperclip, Pencil, Plus, RefreshCw, Search, Send, Settings, ShieldCheck, X } from 'lucide-vue-next'
+import { ArrowDown, Download, FileText, GitBranch, Globe, Image as ImageIcon, KeyRound, LogOut, Maximize2, MessageCircle, Minimize2, PanelLeftClose, PanelLeftOpen, Paperclip, Pencil, Pin, PinOff, Plus, RefreshCw, Search, Send, Settings, ShieldCheck, Trash2, X } from 'lucide-vue-next'
 import { useRouter } from 'vue-router'
 import { ApiError, apiFetch, localizeApiMessage, readCookie } from '../api/client'
 import AppSelect from '../components/AppSelect.vue'
 import ChatMessage from '../components/ChatMessage.vue'
+import SourceIcon from '../components/SourceIcon.vue'
 import { useAuthStore } from '../stores/auth'
 import type {
   ApiKeyEntry,
@@ -12,19 +13,30 @@ import type {
   Attachment,
   AttachmentChunkPreview,
   Conversation,
+  ConversationAttachment,
   ConversationSearchResult,
   ImageGenerationSettings,
   ImageProgress,
   Message,
   ModelEndpoint,
   SendMessageResponse,
-  User
+  User,
+  WebSearchSettings,
+  WebSearchSource,
+  WebSearchStatus
 } from '../types'
 import { copyText } from '../utils/clipboard'
+import { sourceOpenUrl, sourceSiteName } from '../utils/sources'
 
 type ThemeMode = 'dark' | 'light'
-type SettingsTab = 'appearance' | 'image' | 'api' | 'groups' | 'account'
+type SettingsTab = 'appearance' | 'image' | 'web' | 'api' | 'groups' | 'account'
 type GroupPurpose = 'none' | 'chat' | 'image'
+type StreamProgressSnapshot = {
+  startedAt?: number
+  elapsedSeconds?: number
+  progressDetail?: string
+  progressPhase?: string
+}
 
 type ModelKeyChoice = {
   model: string
@@ -61,12 +73,14 @@ const SIDEBAR_STORAGE_KEY = 'private-gpt-sidebar-collapsed'
 const WELCOME_STORAGE_KEY = 'private-gpt-welcome-message'
 const WELCOME_SIZE_STORAGE_KEY = 'private-gpt-welcome-font-size'
 const CURRENT_CONVERSATION_STORAGE_KEY = 'private-gpt-current-conversation'
+const FILE_TREE_PIN_STORAGE_KEY = 'private-gpt-file-tree-pinned'
 const IMAGE_FINALIZATION_MIN_MS = 800
 const ATTACHMENT_IMAGE_MAX_EDGE = 1920
 const ATTACHMENT_IMAGE_QUALITY = 0.82
 const ATTACHMENT_IMAGE_MIN_COMPRESS_BYTES = 450 * 1024
 
 type ReasoningEffort = 'low' | 'medium' | 'high' | 'xhigh'
+type FileTreeGroup = 'images' | 'documents'
 const reasoningOptions: Array<{ value: ReasoningEffort; label: string; hint: string }> = [
   { value: 'low', label: '低', hint: '最快，适合闲聊 / 简短答疑' },
   { value: 'medium', label: '中', hint: '默认。日常使用平衡速度与质量' },
@@ -119,6 +133,7 @@ const conversations = ref<Conversation[]>([])
 const conversationsLoading = ref(true)
 const currentId = ref<string | null>(null)
 const messages = ref<Message[]>([])
+const streamProgressByMessageId = new Map<string, StreamProgressSnapshot>()
 const messagesLoading = ref(false)
 const input = ref('')
 const composerInput = ref<HTMLTextAreaElement | null>(null)
@@ -128,10 +143,27 @@ const selectedModel = ref('')
 const reasoningEffort = ref<ReasoningEffort>('medium')
 const streaming = ref(false)
 const pendingAttachments = ref<Attachment[]>([])
+const conversationAttachments = ref<ConversationAttachment[]>([])
+const draftConversationAttachments = ref<ConversationAttachment[]>([])
+const fileTreeLoading = ref(false)
+const fileTreePinned = ref(true)
+const fileTreeGroupOpen = ref<Record<FileTreeGroup, boolean>>({ images: true, documents: true })
+const questionNavExpanded = ref(false)
+const activeQuestionMessageId = ref<string | null>(null)
+const attachmentRenameOpen = ref(false)
+const attachmentRenameSaving = ref(false)
+const attachmentRenameDraft = ref('')
+const attachmentRenameError = ref('')
+const attachmentRenameTarget = ref<ConversationAttachment | null>(null)
+const attachmentRenameInput = ref<HTMLInputElement | null>(null)
+const attachmentDeleteOpen = ref(false)
+const attachmentDeleting = ref(false)
+const attachmentDeleteTarget = ref<ConversationAttachment | null>(null)
 const uploadingAttachmentNames = ref<string[]>([])
 const composerDragActive = ref(false)
 const composerCompact = ref(true)
 const composerScrollable = ref(false)
+const composerAttachmentsScroller = ref<HTMLElement | null>(null)
 const attachmentPreviewOpen = ref(false)
 const attachmentPreview = ref<Attachment | null>(null)
 const attachmentPreviewText = ref('')
@@ -139,6 +171,9 @@ const attachmentPreviewChunks = ref<AttachmentChunkPreview[]>([])
 const attachmentPreviewLoading = ref(false)
 const attachmentPreviewError = ref('')
 const reindexingAttachment = ref(false)
+const sourceDrawerOpen = ref(false)
+const sourceDrawerMessageId = ref<string | null>(null)
+const sourceDrawerSources = ref<WebSearchSource[]>([])
 const error = ref('')
 const contextStats = ref({
   promptTokensEstimated: 0,
@@ -156,9 +191,17 @@ const contextStats = ref({
 })
 const messageScroller = ref<HTMLElement | null>(null)
 const chatFooter = ref<HTMLElement | null>(null)
+const questionNavScroll = ref<HTMLElement | null>(null)
 const showScrollToBottom = ref(false)
+const questionNavHasBefore = ref(false)
+const questionNavHasAfter = ref(false)
+const questionNavShortConversation = ref(false)
+const chatFooterHeight = ref(0)
 let userHasScrolledUp = false
 let programmaticScrollUntil = 0
+let userScrollSettlingUntil = 0
+let questionNavLockUntil = 0
+let questionNavLockedMessageId: string | null = null
 
 const themeMode = ref<ThemeMode>('dark')
 const bubbleColor = ref<BubbleColor>('blue')
@@ -254,18 +297,73 @@ const imageSettings = ref<ImageGenerationSettings>({
   outputCompression: 100,
   moderation: 'auto'
 })
+const webSearchEnabled = ref(false)
+const webSearchStatus = ref<WebSearchStatus>({ enabled: false, configured: false })
+const webSearchSettingsLoading = ref(false)
+const webSearchSettingsSaving = ref(false)
+const webSearchTesting = ref(false)
+const webSearchTestQuery = ref('')
+const webSearchTestResults = ref<Array<{ title: string; url: string; snippet?: string }>>([])
+const webSearchSettings = ref<WebSearchSettings>({
+  enabled: false,
+  searxngBaseUrl: '',
+  resultCount: 5,
+  language: 'all',
+  safesearch: '1',
+  timeoutSeconds: 20,
+  fetchTimeoutSeconds: 20,
+  maxToolCalls: 4,
+  fetchMaxChars: 12000
+})
 
 let scrollFrame: number | null = null
 let composerResizeFrame: number | null = null
 let composerMeasureElement: HTMLDivElement | null = null
+let chatFooterResizeObserver: ResizeObserver | null = null
 let activeConversationLoad = 0
 let imagePollingTimer: number | null = null
 let conversationEventSource: EventSource | null = null
 let conversationEventSourceId: string | null = null
 const imageFinalizationTimers = new Map<string, number>()
+const QUESTION_NAV_EDGE_THRESHOLD = 2
+const QUESTION_NAV_SHORT_SCROLL_RANGE = 220
+const QUESTION_NAV_BOTTOM_THRESHOLD_MAX = 180
+const QUESTION_NAV_BOTTOM_THRESHOLD_RATIO = 0.18
+const QUESTION_NAV_LAST_VISIBLE_INSET_MAX = 96
+const QUESTION_NAV_LAST_VISIBLE_INSET_RATIO = 0.18
+const USER_SCROLL_SETTLE_MS = 240
 
 const currentConversation = computed(() => conversations.value.find((item) => item.id === currentId.value))
 const currentConversationStreaming = computed(() => messages.value.some((message) => message.status === 'streaming'))
+const webSearchAvailable = computed(() => webSearchStatus.value.enabled && webSearchStatus.value.configured && !selectedModelIsImageGeneration())
+const webSearchToggleDisabled = computed(() => currentConversationStreaming.value || (!webSearchEnabled.value && !webSearchAvailable.value))
+const webSearchToggleLabel = computed(() => {
+  if (currentConversationStreaming.value) return '生成中无法切换联网搜索'
+  if (webSearchEnabled.value) return webSearchAvailable.value ? '关闭联网搜索' : '关闭联网搜索（当前全局不可用）'
+  return webSearchAvailable.value ? '开启联网搜索' : '联网搜索未配置'
+})
+const activeFileTreeAttachments = computed(() => (currentId.value ? conversationAttachments.value : draftConversationAttachments.value))
+const selectedFileTreeAttachments = computed(() => activeFileTreeAttachments.value.filter((item) => item.selected))
+const selectedFileTreeAttachmentIds = computed(() => selectedFileTreeAttachments.value.map((item) => item.attachment.id))
+const composerAttachmentItems = computed(() => selectedFileTreeAttachments.value)
+const composerImageAttachments = computed(() => composerAttachmentItems.value.filter((item) => isImageAttachment(item.attachment)))
+const composerDocumentAttachments = computed(() => composerAttachmentItems.value.filter((item) => !isImageAttachment(item.attachment)))
+const fileTreeImages = computed(() => activeFileTreeAttachments.value.filter((item) => isImageAttachment(item.attachment)))
+const fileTreeDocuments = computed(() => activeFileTreeAttachments.value.filter((item) => !isImageAttachment(item.attachment)))
+const userQuestionNavItems = computed(() =>
+  messages.value
+    .filter((message) => message.role === 'user')
+    .map((message, index) => {
+      const text = message.content.trim().replace(/\s+/g, ' ')
+      const fallback = message.attachments?.length ? '附件消息' : '空消息'
+      return {
+        id: message.id,
+        index: index + 1,
+        title: text || fallback,
+        summary: text ? truncateQuestionTitle(text) : fallback
+      }
+    })
+)
 const recentSearchConversations = computed(() => conversations.value.slice(0, 10))
 const conversationUsage = computed(() => {
   const assistantMessages = messages.value.filter((message) => message.role === 'assistant')
@@ -285,8 +383,8 @@ const canUseCompactComposer = computed(
   () =>
     isEmptyChat.value &&
     !composerExpanded.value &&
-    pendingAttachments.value.length === 0 &&
-    uploadingAttachmentNames.value.length === 0
+    uploadingAttachmentNames.value.length === 0 &&
+    composerAttachmentItems.value.length === 0
 )
 const composerClasses = computed(() => ({
   'is-expanded': composerExpanded.value,
@@ -297,6 +395,97 @@ const composerClasses = computed(() => ({
 
 function isImageAttachment(item: Attachment) {
   return item.mimeSniffed?.startsWith('image/')
+}
+
+function handleComposerAttachmentsWheel(event: WheelEvent) {
+  const scroller = composerAttachmentsScroller.value
+  if (!scroller) return
+  const overflow = scroller.scrollWidth - scroller.clientWidth
+  if (overflow <= 1) return
+  const delta = Math.abs(event.deltaY) >= Math.abs(event.deltaX) ? event.deltaY : event.deltaX
+  if (!delta) return
+  const nextLeft = Math.max(0, Math.min(overflow, scroller.scrollLeft + delta))
+  if (Math.abs(nextLeft - scroller.scrollLeft) < 1) return
+  event.preventDefault()
+  scroller.scrollLeft = nextLeft
+}
+
+function isReferenceDocument(item: Attachment) {
+  return !isImageAttachment(item) && item.parseStatus === 'success'
+}
+
+function truncateQuestionTitle(text: string) {
+  const normalized = text.trim().replace(/\s+/g, ' ')
+  return normalized.length > 28 ? `${normalized.slice(0, 28)}...` : normalized
+}
+
+function truncateProgressText(value: unknown, limit = 72) {
+  const normalized = String(value || '').trim().replace(/\s+/g, ' ')
+  return normalized.length > limit ? `${normalized.slice(0, limit)}...` : normalized
+}
+
+function webSearchProgressDetail(data: any) {
+  const query = truncateProgressText(data?.query)
+  const url = truncateProgressText(data?.url, 84)
+  const resultCount = Number(data?.result_count ?? data?.resultCount)
+  const sourceCount = Number(data?.source_count ?? data?.sourceCount)
+  if (data?.detail && data.detail !== '正在联网搜索...' && data.detail !== '正在读取网页...') return data.detail
+  if (data?.phase === 'searching' && query) return `正在搜索：${query}`
+  if (data?.phase === 'reading' && url) return `正在读取：${url}`
+  if (data?.phase === 'completed' && Number.isFinite(sourceCount)) return `联网搜索已完成，找到 ${sourceCount} 个来源。`
+  if (Number.isFinite(resultCount)) return `搜索返回 ${resultCount} 条结果`
+  return data?.detail || '正在联网搜索...'
+}
+
+function openWebSearchSources(message: Message, sources: WebSearchSource[]) {
+  sourceDrawerMessageId.value = message.id
+  sourceDrawerSources.value = sources
+  sourceDrawerOpen.value = true
+}
+
+function closeWebSearchSources() {
+  sourceDrawerOpen.value = false
+}
+
+function openSourceUrl(source: WebSearchSource) {
+  const url = sourceOpenUrl(source)
+  if (!url) return
+  window.open(url, '_blank', 'noopener,noreferrer')
+}
+
+function truncateSourceText(value: string, limit = 170) {
+  const chars = Array.from(value)
+  if (chars.length <= limit) return value
+  return `${chars.slice(0, limit).join('').replace(/[，。、；：,.:\s]+$/u, '')}...`
+}
+
+function cleanSourceText(value: unknown) {
+  return String(value || '')
+    .replace(/https?:\/\/\S+/gi, ' ')
+    .replace(/\b(?:[a-z0-9-]+\.)+[a-z]{2,}(?:\/[^\s，。；、]*)?/gi, ' ')
+    .replace(/\s+/g, ' ')
+    .trim()
+}
+
+function sourcePublishedLabel(source: WebSearchSource) {
+  const raw = String(source.publishedAt || source.published_at || '').trim()
+  if (!raw) return ''
+  const timestamp = new Date(raw).getTime()
+  if (Number.isFinite(timestamp)) {
+    return new Intl.DateTimeFormat('zh-CN', { year: 'numeric', month: '2-digit', day: '2-digit' }).format(timestamp)
+  }
+  return raw.replace(/T.*$/u, '').replace(/\s+\d{1,2}:\d{2}.*$/u, '')
+}
+
+function sourceSummaryText(source: WebSearchSource) {
+  const title = cleanSourceText(source.title)
+  let summary = cleanSourceText(source.snippet)
+  if (!summary) return ''
+  if (title && summary.toLowerCase().startsWith(title.toLowerCase())) {
+    summary = summary.slice(title.length).replace(/^[\s:：,，。.-]+/u, '').trim()
+  }
+  if (!summary || summary === title) return ''
+  return truncateSourceText(summary)
 }
 
 function selectedModelSupportsVision() {
@@ -324,14 +513,14 @@ function parseApiDateMs(value: unknown) {
 }
 
 function messageCreatedAtMs(message: Message) {
-  const createdAt = parseApiDateMs(message.createdAt)
+  const createdAt = parseApiDateMs(message.createdAt ?? message.created_at)
   return createdAt !== undefined ? Math.min(createdAt, Date.now()) : Date.now()
 }
 
-function currentRuntimeElapsed(message: Message) {
+function currentRuntimeElapsed(message: Message, live = message.status === 'streaming') {
   const startedAt = normalizeProgressTimestamp(message.startedAt ?? message.started_at)
   const baseElapsed = normalizeProgressElapsed(message.elapsedSeconds ?? message.elapsed_seconds) ?? 0
-  if (!startedAt) return baseElapsed
+  if (!live || !startedAt) return baseElapsed
   return Math.max(baseElapsed, Math.floor((Date.now() - startedAt) / 1000), 0)
 }
 
@@ -347,6 +536,94 @@ function normalizeProgressElapsed(value: unknown) {
   if (value === null || value === undefined) return undefined
   const elapsed = Number(value)
   return Number.isFinite(elapsed) && elapsed >= 0 ? Math.floor(elapsed) : undefined
+}
+
+function earliestProgressTimestamp(...values: unknown[]) {
+  const timestamps = values
+    .map((value) => normalizeProgressTimestamp(value))
+    .filter((value): value is number => value !== undefined)
+  if (!timestamps.length) return undefined
+  const now = Date.now()
+  return Math.min(...timestamps.map((timestamp) => Math.min(timestamp, now)))
+}
+
+function forgetStreamProgress(messageId?: string | null) {
+  if (!messageId) return
+  streamProgressByMessageId.delete(messageId)
+}
+
+function migrateStreamProgress(fromId?: string | null, toId?: string | null) {
+  if (!fromId || !toId || fromId === toId) return
+  const cached = streamProgressByMessageId.get(fromId)
+  if (!cached) return
+  const target = streamProgressByMessageId.get(toId)
+  streamProgressByMessageId.set(toId, {
+    startedAt: earliestProgressTimestamp(target?.startedAt, cached.startedAt),
+    elapsedSeconds: Math.max(target?.elapsedSeconds ?? 0, cached.elapsedSeconds ?? 0),
+    progressDetail: target?.progressDetail || cached.progressDetail,
+    progressPhase: target?.progressPhase || cached.progressPhase
+  })
+  streamProgressByMessageId.delete(fromId)
+}
+
+function rememberStreamProgress(message: Message, data: any = {}) {
+  if (!message.id || message.role !== 'assistant') return
+  const status = data.status || message.status
+  if (status !== 'streaming') {
+    forgetStreamProgress(message.id)
+    return
+  }
+  const cached = streamProgressByMessageId.get(message.id)
+  const startedAt =
+    earliestProgressTimestamp(message.startedAt ?? message.started_at, data.startedAt ?? data.started_at, cached?.startedAt) ??
+    messageCreatedAtMs(message)
+  const elapsedSeconds = Math.max(
+    currentRuntimeElapsed(message, true),
+    normalizeProgressElapsed(data.elapsedSeconds ?? data.elapsed_seconds) ?? 0,
+    cached?.elapsedSeconds ?? 0,
+    Math.floor((Date.now() - startedAt) / 1000),
+    0
+  )
+  streamProgressByMessageId.set(message.id, {
+    startedAt,
+    elapsedSeconds,
+    progressDetail: data.detail || data.progressDetail || data.progress_detail || message.progressDetail || message.progress_detail || cached?.progressDetail,
+    progressPhase: data.phase || data.progressPhase || data.progress_phase || message.progressPhase || message.progress_phase || cached?.progressPhase
+  })
+}
+
+function restoreCachedStreamProgress(message: Message) {
+  if (message.status !== 'streaming') {
+    forgetStreamProgress(message.id)
+    return
+  }
+  const cached = streamProgressByMessageId.get(message.id)
+  if (!cached) return
+  const startedAt = earliestProgressTimestamp(message.startedAt ?? message.started_at, cached.startedAt)
+  if (startedAt !== undefined) {
+    message.startedAt = startedAt
+    message.started_at = startedAt
+  }
+  const elapsedSeconds = Math.max(
+    normalizeProgressElapsed(message.elapsedSeconds ?? message.elapsed_seconds) ?? 0,
+    cached.elapsedSeconds ?? 0,
+    startedAt !== undefined ? Math.floor((Date.now() - startedAt) / 1000) : 0,
+    0
+  )
+  message.elapsedSeconds = elapsedSeconds
+  message.elapsed_seconds = elapsedSeconds
+  message.progressDetail = message.progressDetail || message.progress_detail || cached.progressDetail
+  message.progress_detail = message.progressDetail
+  message.progressPhase = message.progressPhase || message.progress_phase || cached.progressPhase
+  message.progress_phase = message.progressPhase
+}
+
+function rememberStreamingProgressForMessages(items: Message[]) {
+  for (const message of items) {
+    if (message.role === 'assistant' && message.status === 'streaming') {
+      rememberStreamProgress(message)
+    }
+  }
 }
 
 function userFacingSendError(err: unknown) {
@@ -375,30 +652,43 @@ function setMessageFirstTokenSeconds(message: Message, seconds: number | undefin
   message.first_token_seconds = seconds
 }
 
+function clearRuntimeProgress(message: Message) {
+  message.elapsedSeconds = undefined
+  message.elapsed_seconds = undefined
+  message.startedAt = undefined
+  message.started_at = undefined
+}
+
 function freezeFirstTokenSeconds(message: Message, data: any = {}) {
   const incomingFirstToken = incomingFirstTokenSeconds(data)
   if (incomingFirstToken !== undefined) {
     setMessageFirstTokenSeconds(message, incomingFirstToken)
-    message.elapsedSeconds = incomingFirstToken
-    message.elapsed_seconds = incomingFirstToken
+    if (message.status !== 'streaming' && data.status !== 'streaming') clearRuntimeProgress(message)
     return
   }
   if (messageFirstTokenSeconds(message) !== undefined) return
   setMessageFirstTokenSeconds(message, currentRuntimeElapsed(message))
+  if (message.status !== 'streaming' && data.status !== 'streaming') clearRuntimeProgress(message)
 }
 
 function applyRuntimeProgress(message: Message, data: any = {}) {
+  const targetStatus = data.status || message.status
+  const isStreamingProgress = targetStatus === 'streaming'
+  if (isStreamingProgress) restoreCachedStreamProgress(message)
+  const cached = message.id ? streamProgressByMessageId.get(message.id) : undefined
   const existingStartedAt = normalizeProgressTimestamp(message.startedAt ?? message.started_at)
   const incomingStartedAt = normalizeProgressTimestamp(data.startedAt ?? data.started_at)
-  const fallbackStartedAt = message.status === 'streaming' ? messageCreatedAtMs(message) : undefined
+  const fallbackStartedAt = isStreamingProgress ? messageCreatedAtMs(message) : undefined
   const now = Date.now()
-  const startedAt = existingStartedAt ?? incomingStartedAt ?? fallbackStartedAt ?? (message.status === 'streaming' ? now : undefined)
+  const startedAt = isStreamingProgress
+    ? earliestProgressTimestamp(existingStartedAt, incomingStartedAt, cached?.startedAt, fallbackStartedAt) ?? now
+    : existingStartedAt ?? incomingStartedAt
   const firstTokenSeconds = incomingFirstTokenSeconds(data)
   const incomingElapsed = normalizeProgressElapsed(data.elapsedSeconds ?? data.elapsed_seconds)
-  const existingElapsed = currentRuntimeElapsed(message)
+  const existingElapsed = currentRuntimeElapsed(message, isStreamingProgress)
   const elapsedSeconds =
-    message.status === 'streaming' || data.status === 'streaming'
-      ? Math.max(existingElapsed, incomingElapsed ?? 0)
+    isStreamingProgress
+      ? Math.max(existingElapsed, incomingElapsed ?? 0, cached?.elapsedSeconds ?? 0, startedAt ? Math.floor((now - startedAt) / 1000) : 0)
       : Math.max(existingElapsed, incomingElapsed ?? normalizeProgressElapsed(message.elapsedSeconds ?? message.elapsed_seconds) ?? 0)
   if (firstTokenSeconds !== undefined) {
     setMessageFirstTokenSeconds(message, firstTokenSeconds)
@@ -416,18 +706,18 @@ function applyRuntimeProgress(message: Message, data: any = {}) {
   message.progress_detail = message.progressDetail
   message.progressPhase = data.phase || data.progressPhase || data.progress_phase || message.progressPhase || message.progress_phase
   message.progress_phase = message.progressPhase
+  rememberStreamProgress(message, { ...data, status: targetStatus })
 }
 
 function normalizeLoadedMessage(message: Message): Message {
+  message.webSearchSources = message.webSearchSources || message.web_search_sources || []
+  message.web_search_sources = message.webSearchSources
   const progress = message.imageProgress || message.image_progress
-  if (
-    message.status === 'streaming' ||
-    message.elapsedSeconds !== undefined ||
-    message.elapsed_seconds !== undefined ||
-    message.startedAt !== undefined ||
-    message.started_at !== undefined
-  ) {
+  restoreCachedStreamProgress(message)
+  if (message.status === 'streaming') {
     applyRuntimeProgress(message)
+  } else {
+    clearRuntimeProgress(message)
   }
   if (progress && message.status === 'streaming') {
     const elapsedSeconds = Math.max(
@@ -441,7 +731,7 @@ function normalizeLoadedMessage(message: Message): Message {
       outputFormat: progress.outputFormat || progress.output_format || 'png',
       detail: progress.detail,
       elapsedSeconds,
-      startedAt: normalizeProgressTimestamp(progress.startedAt ?? progress.started_at) || message.startedAt || messageCreatedAtMs(message),
+      startedAt: earliestProgressTimestamp(progress.startedAt ?? progress.started_at, message.startedAt ?? message.started_at) || messageCreatedAtMs(message),
       phase: progress.phase || message.progressPhase || message.progress_phase || 'submitted',
       size: progress.size || imageSettings.value.size
     }
@@ -455,7 +745,7 @@ function applyImageProgress(message: Message, data: any = {}) {
   message.status = data.status || 'streaming'
   applyRuntimeProgress(message, data)
   const existing = message.imageProgress || message.image_progress
-  const startedAt = normalizeProgressTimestamp(message.startedAt ?? message.started_at) || normalizeProgressTimestamp(existing?.startedAt ?? existing?.started_at) || Date.now()
+  const startedAt = earliestProgressTimestamp(message.startedAt ?? message.started_at, existing?.startedAt ?? existing?.started_at, data.startedAt ?? data.started_at) || Date.now()
   const elapsedSeconds = Math.max(
     currentRuntimeElapsed(message),
     normalizeProgressElapsed(existing?.elapsedSeconds ?? existing?.elapsed_seconds) ?? 0,
@@ -491,12 +781,75 @@ function normalizeImageSettings(data: any): ImageGenerationSettings {
   }
 }
 
+function normalizeWebSearchSettings(data: any): WebSearchSettings {
+  return {
+    enabled: Boolean(data?.enabled),
+    searxngBaseUrl: data?.searxngBaseUrl ?? data?.searxng_base_url ?? '',
+    resultCount: Number(data?.resultCount ?? data?.result_count ?? 5),
+    language: data?.language || 'all',
+    safesearch: data?.safesearch || '1',
+    timeoutSeconds: Number(data?.timeoutSeconds ?? data?.timeout_seconds ?? 20),
+    fetchTimeoutSeconds: Number(data?.fetchTimeoutSeconds ?? data?.fetch_timeout_seconds ?? 20),
+    maxToolCalls: Number(data?.maxToolCalls ?? data?.max_tool_calls ?? 4),
+    fetchMaxChars: Number(data?.fetchMaxChars ?? data?.fetch_max_chars ?? 12000)
+  }
+}
+
 function attachmentPreviewUrl(id: string) {
   return `/api/attachments/${id}/preview`
 }
 
 function attachmentImageSrc(attachment: Attachment) {
   return attachment.previewDataUrl || attachmentPreviewUrl(attachment.id)
+}
+
+function normalizeAttachment(item: Attachment): Attachment {
+  return {
+    ...item,
+    mimeSniffed: item.mimeSniffed || (item as any).mime_sniffed || '',
+    sizeBytes: Number(item.sizeBytes ?? (item as any).size_bytes ?? 0),
+    parseStatus: item.parseStatus || (item as any).parse_status || 'success',
+    parseError: item.parseError ?? (item as any).parse_error ?? undefined,
+    contextTextTokens: Number(item.contextTextTokens ?? (item as any).context_text_tokens ?? 0),
+    chunkCount: Number(item.chunkCount ?? (item as any).chunk_count ?? 0),
+    embeddingStatus: item.embeddingStatus ?? (item as any).embedding_status ?? null,
+    previewText: item.previewText ?? (item as any).preview_text ?? null,
+    createdAt: item.createdAt || (item as any).created_at
+  }
+}
+
+function normalizeConversationAttachment(item: ConversationAttachment): ConversationAttachment {
+  const attachment = normalizeAttachment(item.attachment)
+  return {
+    ...item,
+    conversationId: item.conversationId || item.conversation_id || currentId.value || 'new',
+    attachment,
+    selected: item.selected !== false,
+    displayName: item.displayName ?? item.display_name ?? null,
+    createdAt: item.createdAt || item.created_at || attachment.createdAt || new Date().toISOString(),
+    updatedAt: item.updatedAt || item.updated_at || item.createdAt || item.created_at || new Date().toISOString()
+  }
+}
+
+function fileTreeDisplayName(item: ConversationAttachment) {
+  return item.displayName?.trim() || item.attachment.filename
+}
+
+function fileTreeAttachmentForPreview(item: ConversationAttachment): Attachment {
+  return { ...item.attachment, filename: fileTreeDisplayName(item) }
+}
+
+function draftConversationAttachmentFromAttachment(attachment: Attachment): ConversationAttachment {
+  const now = new Date().toISOString()
+  return {
+    id: `draft-${attachment.id}`,
+    conversationId: 'new',
+    attachment: normalizeAttachment(attachment),
+    selected: true,
+    displayName: null,
+    createdAt: now,
+    updatedAt: now
+  }
 }
 
 function attachmentKindLabel(item: Attachment | { filename: string; mimeSniffed?: string }) {
@@ -593,10 +946,6 @@ function renamePastedImage(file: File) {
   })
 }
 
-function removePendingAttachment(id: string) {
-  pendingAttachments.value = pendingAttachments.value.filter((item) => item.id !== id)
-}
-
 function closeAttachmentPreview() {
   attachmentPreviewOpen.value = false
   attachmentPreview.value = null
@@ -640,6 +989,216 @@ async function reindexPreviewAttachment() {
     reindexingAttachment.value = false
   }
 }
+
+function loadFileTreePinned() {
+  fileTreePinned.value = window.localStorage.getItem(FILE_TREE_PIN_STORAGE_KEY) !== 'false'
+}
+
+function saveFileTreePinned() {
+  window.localStorage.setItem(FILE_TREE_PIN_STORAGE_KEY, String(fileTreePinned.value))
+}
+
+function toggleFileTreePinned() {
+  fileTreePinned.value = !fileTreePinned.value
+  saveFileTreePinned()
+}
+
+function toggleFileTreeGroup(group: FileTreeGroup) {
+  fileTreeGroupOpen.value = {
+    ...fileTreeGroupOpen.value,
+    [group]: !fileTreeGroupOpen.value[group]
+  }
+}
+
+async function loadConversationAttachments(conversationId = currentId.value) {
+  if (!conversationId) {
+    conversationAttachments.value = []
+    return
+  }
+  fileTreeLoading.value = true
+  try {
+    const rows = await apiFetch<ConversationAttachment[]>(`/conversations/${conversationId}/attachments`)
+    if (currentId.value !== conversationId) return
+    conversationAttachments.value = rows.map(normalizeConversationAttachment)
+  } catch (err) {
+    if (currentId.value === conversationId && err instanceof ApiError) error.value = err.message
+  } finally {
+    if (currentId.value === conversationId) fileTreeLoading.value = false
+  }
+}
+
+async function attachFilesToConversation(conversationId: string, attachments: Attachment[], selected = true) {
+  const attachmentIds = Array.from(new Set(attachments.map((item) => item.id).filter(Boolean)))
+  if (!attachmentIds.length) return
+  const rows = await apiFetch<ConversationAttachment[]>(`/conversations/${conversationId}/attachments`, {
+    method: 'POST',
+    body: JSON.stringify({ attachmentIds, selected })
+  })
+  if (currentId.value === conversationId) {
+    conversationAttachments.value = rows.map(normalizeConversationAttachment)
+  }
+}
+
+async function addUploadedAttachmentToFileTree(attachment: Attachment) {
+  const normalized = normalizeAttachment(attachment)
+  pendingAttachments.value = [
+    ...pendingAttachments.value.filter((item) => item.id !== normalized.id),
+    normalized
+  ]
+  if (currentId.value) {
+    await attachFilesToConversation(currentId.value, [normalized], true)
+    return
+  }
+  const draft = draftConversationAttachmentFromAttachment(normalized)
+  draftConversationAttachments.value = [
+    ...draftConversationAttachments.value.filter((item) => item.attachment.id !== normalized.id),
+    draft
+  ]
+}
+
+async function bindDraftFileTreeToConversation(conversationId: string) {
+  const drafts = draftConversationAttachments.value
+  if (!drafts.length) return
+  await attachFilesToConversation(conversationId, drafts.map((item) => item.attachment), true)
+  const selectedIds = new Set(drafts.filter((item) => item.selected).map((item) => item.attachment.id))
+  const renameTargets = drafts.filter((item) => item.displayName)
+  await Promise.all([
+    ...conversationAttachments.value.map((item) => {
+      const selected = selectedIds.has(item.attachment.id)
+      if (item.selected === selected) return Promise.resolve()
+      return setFileTreeAttachmentSelected(item, selected, { silent: true })
+    }),
+    ...renameTargets.map((draft) => {
+      const attached = conversationAttachments.value.find((item) => item.attachment.id === draft.attachment.id)
+      if (!attached || !draft.displayName) return Promise.resolve()
+      return renameFileTreeAttachment(attached, draft.displayName, { silent: true })
+    })
+  ])
+  draftConversationAttachments.value = []
+}
+
+async function setFileTreeAttachmentSelected(item: ConversationAttachment, selected: boolean, options: { silent?: boolean } = {}) {
+  const updateLocal = (rows: ConversationAttachment[]) =>
+    rows.map((row) => (row.attachment.id === item.attachment.id ? { ...row, selected } : row))
+  if (!currentId.value || item.conversationId === 'new') {
+    draftConversationAttachments.value = updateLocal(draftConversationAttachments.value)
+    return
+  }
+  conversationAttachments.value = updateLocal(conversationAttachments.value)
+  try {
+    const updated = await apiFetch<ConversationAttachment>(`/conversations/${currentId.value}/attachments/${item.attachment.id}`, {
+      method: 'PATCH',
+      body: JSON.stringify({ selected })
+    })
+    conversationAttachments.value = conversationAttachments.value.map((row) =>
+      row.attachment.id === item.attachment.id ? normalizeConversationAttachment(updated) : row
+    )
+  } catch (err) {
+    conversationAttachments.value = updateLocal(conversationAttachments.value).map((row) =>
+      row.attachment.id === item.attachment.id ? { ...row, selected: item.selected } : row
+    )
+    if (!options.silent) error.value = err instanceof Error ? err.message : '更新文件勾选状态失败'
+  }
+}
+
+function handleFileTreeSelectionChange(item: ConversationAttachment, event: Event) {
+  const input = event.target as HTMLInputElement | null
+  void setFileTreeAttachmentSelected(item, input?.checked === true)
+}
+
+function openAttachmentRename(item: ConversationAttachment) {
+  attachmentRenameTarget.value = item
+  attachmentRenameDraft.value = fileTreeDisplayName(item)
+  attachmentRenameError.value = ''
+  attachmentRenameOpen.value = true
+  void nextTick(() => {
+    attachmentRenameInput.value?.focus()
+    attachmentRenameInput.value?.select()
+  })
+}
+
+function closeAttachmentRename() {
+  if (attachmentRenameSaving.value) return
+  attachmentRenameOpen.value = false
+  attachmentRenameTarget.value = null
+  attachmentRenameDraft.value = ''
+  attachmentRenameError.value = ''
+}
+
+async function renameFileTreeAttachment(item: ConversationAttachment, displayName: string, options: { silent?: boolean } = {}) {
+  const name = displayName.trim()
+  if (!name) {
+    if (!options.silent) error.value = '文件名不能为空'
+    return
+  }
+  const updateLocal = (rows: ConversationAttachment[]) =>
+    rows.map((row) => (row.attachment.id === item.attachment.id ? { ...row, displayName: name } : row))
+  if (!currentId.value || item.conversationId === 'new') {
+    draftConversationAttachments.value = updateLocal(draftConversationAttachments.value)
+    return
+  }
+  const updated = await apiFetch<ConversationAttachment>(`/conversations/${currentId.value}/attachments/${item.attachment.id}`, {
+    method: 'PATCH',
+    body: JSON.stringify({ displayName: name })
+  })
+  conversationAttachments.value = conversationAttachments.value.map((row) =>
+    row.attachment.id === item.attachment.id ? normalizeConversationAttachment(updated) : row
+  )
+}
+
+async function saveAttachmentRename() {
+  const target = attachmentRenameTarget.value
+  if (!target || attachmentRenameSaving.value) return
+  const name = attachmentRenameDraft.value.trim()
+  if (!name) {
+    attachmentRenameError.value = '文件名不能为空'
+    return
+  }
+  attachmentRenameSaving.value = true
+  try {
+    await renameFileTreeAttachment(target, name)
+    attachmentRenameOpen.value = false
+    attachmentRenameTarget.value = null
+    attachmentRenameDraft.value = ''
+    attachmentRenameError.value = ''
+  } catch (err) {
+    attachmentRenameError.value = err instanceof Error ? err.message : '重命名失败'
+  } finally {
+    attachmentRenameSaving.value = false
+  }
+}
+
+function requestRemoveFileTreeAttachment(item: ConversationAttachment) {
+  attachmentDeleteTarget.value = item
+  attachmentDeleteOpen.value = true
+}
+
+function closeAttachmentDelete() {
+  if (attachmentDeleting.value) return
+  attachmentDeleteOpen.value = false
+  attachmentDeleteTarget.value = null
+}
+
+async function confirmRemoveFileTreeAttachment() {
+  const target = attachmentDeleteTarget.value
+  if (!target || attachmentDeleting.value) return
+  attachmentDeleting.value = true
+  try {
+    if (currentId.value && target.conversationId !== 'new') {
+      await apiFetch(`/conversations/${currentId.value}/attachments/${target.attachment.id}`, { method: 'DELETE' })
+      conversationAttachments.value = conversationAttachments.value.filter((item) => item.attachment.id !== target.attachment.id)
+    } else {
+      draftConversationAttachments.value = draftConversationAttachments.value.filter((item) => item.attachment.id !== target.attachment.id)
+    }
+    pendingAttachments.value = pendingAttachments.value.filter((item) => item.id !== target.attachment.id)
+    attachmentDeleteOpen.value = false
+    attachmentDeleteTarget.value = null
+  } catch (err) {
+    error.value = err instanceof Error ? err.message : '移除文件失败'
+  } finally {
+    attachmentDeleting.value = false
+  }
+}
 const shellClass = computed(() => (themeMode.value === 'dark' ? 'theme-dark' : 'theme-light'))
 const selectedBubble = computed(() => bubbleOptions.find((item) => item.value === bubbleColor.value) || bubbleOptions[0])
 const shellStyle = computed(
@@ -651,7 +1210,8 @@ const shellStyle = computed(
       '--message-font-size': `${Math.max(16, textSize.value)}px`,
       '--user-message-font-size': `${Math.max(15.5, textSize.value - 0.25)}px`,
       '--code-font-size': `${codeSize.value}px`,
-      '--welcome-font-size': `${welcomeFontSize.value}px`
+      '--welcome-font-size': `${welcomeFontSize.value}px`,
+      '--chat-footer-height': `${chatFooterHeight.value}px`
     }) as CSSProperties
 )
 
@@ -874,8 +1434,27 @@ function conversationUpdatedAtMs(conversation: Conversation) {
   return parseApiDateMs(conversation.updatedAt) ?? 0
 }
 
+function normalizeConversation(conversation: Conversation): Conversation {
+  return {
+    ...conversation,
+    webSearchEnabled: Boolean(conversation.webSearchEnabled ?? conversation.web_search_enabled)
+  }
+}
+
+function activeConversationWebSearchEnabled() {
+  return Boolean(currentConversation.value?.webSearchEnabled ?? false)
+}
+
+function syncWebSearchToggleFromConversation() {
+  webSearchEnabled.value = currentId.value ? activeConversationWebSearchEnabled() : false
+}
+
 function sortConversationsByUpdatedAt(items: Conversation[]) {
-  return [...items].sort((a, b) => conversationUpdatedAtMs(b) - conversationUpdatedAtMs(a))
+  return items.map(normalizeConversation).sort((a, b) => conversationUpdatedAtMs(b) - conversationUpdatedAtMs(a))
+}
+
+function lastVisibleConversation() {
+  return conversations.value[conversations.value.length - 1]
 }
 
 function openSearchDialog() {
@@ -1028,6 +1607,62 @@ async function loadImageSettings() {
   }
 }
 
+async function loadWebSearchStatus() {
+  try {
+    webSearchStatus.value = await apiFetch<WebSearchStatus>('/settings/web-search/status')
+  } catch {
+    webSearchStatus.value = { enabled: false, configured: false }
+    webSearchEnabled.value = false
+  }
+}
+
+async function loadWebSearchSettings() {
+  if (auth.user?.role !== 'admin') return
+  webSearchSettingsLoading.value = true
+  try {
+    webSearchSettings.value = normalizeWebSearchSettings(await apiFetch('/admin/settings/web-search'))
+  } catch (err) {
+    settingsError.value = err instanceof Error ? err.message : '加载联网搜索设置失败'
+  } finally {
+    webSearchSettingsLoading.value = false
+  }
+}
+
+async function saveWebSearchSettings() {
+  resetSettingsMessages()
+  webSearchSettingsSaving.value = true
+  try {
+    webSearchSettings.value = normalizeWebSearchSettings(await apiFetch('/admin/settings/web-search', {
+      method: 'PATCH',
+      body: JSON.stringify(webSearchSettings.value)
+    }))
+    settingsNotice.value = '联网搜索设置已保存'
+    await loadWebSearchStatus()
+  } catch (err) {
+    settingsError.value = err instanceof Error ? err.message : '保存联网搜索设置失败'
+  } finally {
+    webSearchSettingsSaving.value = false
+  }
+}
+
+async function testWebSearchSettings() {
+  resetSettingsMessages()
+  webSearchTesting.value = true
+  webSearchTestResults.value = []
+  try {
+    const result = await apiFetch<{ results: Array<{ title: string; url: string; snippet?: string }> }>('/admin/settings/web-search/test', {
+      method: 'POST',
+      body: JSON.stringify({ query: webSearchTestQuery.value.trim() || 'OpenAI news' })
+    })
+    webSearchTestResults.value = result.results || []
+    settingsNotice.value = `测试完成，返回 ${webSearchTestResults.value.length} 条结果`
+  } catch (err) {
+    settingsError.value = err instanceof Error ? err.message : '联网搜索测试失败'
+  } finally {
+    webSearchTesting.value = false
+  }
+}
+
 async function saveImageSettings() {
   resetSettingsMessages()
   imageSettingsSaving.value = true
@@ -1045,7 +1680,7 @@ async function saveImageSettings() {
 }
 
 async function openSettings(tab: SettingsTab = 'appearance') {
-  const targetTab = tab === 'groups' && auth.user?.role !== 'admin' ? 'appearance' : tab
+  const targetTab = (tab === 'groups' || tab === 'web') && auth.user?.role !== 'admin' ? 'appearance' : tab
   settingsMenuOpen.value = false
   settingsOpen.value = true
   settingsTab.value = targetTab
@@ -1053,6 +1688,7 @@ async function openSettings(tab: SettingsTab = 'appearance') {
   resetSettingsMessages()
   if (targetTab === 'api' || targetTab === 'groups') await loadApiSettings()
   if (targetTab === 'image') await loadImageSettings()
+  if (targetTab === 'web') await loadWebSearchSettings()
 }
 
 function resetAccessSwitchMessages() {
@@ -1176,12 +1812,13 @@ async function confirmLogout() {
 }
 
 async function selectSettingsTab(tab: SettingsTab) {
-  if (tab === 'groups' && auth.user?.role !== 'admin') return
+  if ((tab === 'groups' || tab === 'web') && auth.user?.role !== 'admin') return
   settingsTab.value = tab
   resetSettingsMessages()
   if ((tab === 'api' || tab === 'groups') && !apiKeys.value.length && !apiKeyGroups.value.length) await loadApiSettings()
   if (tab === 'groups' && apiKeyGroups.value.length) await loadGroupKeys(selectedGroupId.value)
   if (tab === 'image') await loadImageSettings()
+  if (tab === 'web') await loadWebSearchSettings()
 }
 
 async function createModelEndpoint() {
@@ -1449,18 +2086,49 @@ async function deleteAvatar() {
   }
 }
 
+function scrollBottomDistance(scroller: HTMLElement) {
+  return Math.max(0, scroller.scrollHeight - scroller.scrollTop - scroller.clientHeight)
+}
+
 function isNearBottom(threshold = 80): boolean {
   const scroller = messageScroller.value
   if (!scroller) return true
-  return scroller.scrollHeight - scroller.scrollTop - scroller.clientHeight < threshold
+  return scrollBottomDistance(scroller) < threshold
+}
+
+function isAtScrollTop(scroller: HTMLElement) {
+  return scroller.scrollTop <= QUESTION_NAV_EDGE_THRESHOLD
+}
+
+function isAtScrollBottom(scroller: HTMLElement, threshold = QUESTION_NAV_EDGE_THRESHOLD) {
+  return scrollBottomDistance(scroller) <= threshold
+}
+
+function questionNavBottomThreshold(scroller: HTMLElement) {
+  return Math.max(
+    QUESTION_NAV_EDGE_THRESHOLD,
+    Math.min(QUESTION_NAV_BOTTOM_THRESHOLD_MAX, scroller.clientHeight * QUESTION_NAV_BOTTOM_THRESHOLD_RATIO)
+  )
+}
+
+function isNearQuestionNavBottom(scroller: HTMLElement) {
+  return isAtScrollBottom(scroller, questionNavBottomThreshold(scroller))
 }
 
 function isProgrammaticScroll() {
   return Date.now() < programmaticScrollUntil
 }
 
-function markProgrammaticScroll() {
-  programmaticScrollUntil = Date.now() + 250
+function markProgrammaticScroll(duration = 250) {
+  programmaticScrollUntil = Date.now() + duration
+}
+
+function isUserScrollSettling() {
+  return Date.now() < userScrollSettlingUntil
+}
+
+function markUserScrollSettling(duration = USER_SCROLL_SETTLE_MS) {
+  userScrollSettlingUntil = Date.now() + duration
 }
 
 function waitForAnimationFrame(): Promise<void> {
@@ -1475,26 +2143,176 @@ async function waitForMessageLayout() {
   await waitForAnimationFrame()
 }
 
+function clearQuestionNavLock() {
+  questionNavLockUntil = 0
+  questionNavLockedMessageId = null
+}
+
 function pauseAutoScrollFromUserScroll() {
+  cancelPendingScroll()
+  markUserScrollSettling()
   if (!streaming.value) return
   userHasScrolledUp = true
   showScrollToBottom.value = messages.value.length > 0
-  cancelPendingScroll()
 }
 
 function handleScrollerWheel(event: WheelEvent) {
+  clearQuestionNavLock()
   if (event.deltaY < 0) pauseAutoScrollFromUserScroll()
 }
 
 function handleScrollerTouchStart() {
+  clearQuestionNavLock()
   pauseAutoScrollFromUserScroll()
 }
 
+function updateQuestionNavOverflow() {
+  const scroller = questionNavScroll.value
+  if (!scroller) {
+    questionNavHasBefore.value = false
+    questionNavHasAfter.value = false
+    return
+  }
+  questionNavHasBefore.value = scroller.scrollTop > 3
+  questionNavHasAfter.value = scroller.scrollTop + scroller.clientHeight < scroller.scrollHeight - 3
+}
+
+function updateQuestionNavLayoutMode() {
+  const scroller = messageScroller.value
+  const items = userQuestionNavItems.value
+  if (!scroller || items.length < 2) {
+    questionNavShortConversation.value = false
+    return
+  }
+  const scrollRange = Math.max(0, scroller.scrollHeight - scroller.clientHeight)
+  const shortRange = Math.min(QUESTION_NAV_SHORT_SCROLL_RANGE, scroller.clientHeight * 0.35)
+  questionNavShortConversation.value = scrollRange <= shortRange
+}
+
+function lockActiveQuestion(messageId: string, lockDuration = 0) {
+  activeQuestionMessageId.value = messageId
+  questionNavLockedMessageId = messageId
+  questionNavLockUntil = lockDuration > 0 ? Date.now() + lockDuration : 0
+  void syncActiveQuestionNavRow()
+}
+
+function setActiveQuestionToLast(lockDuration = 0) {
+  const items = userQuestionNavItems.value
+  const lastQuestion = items[items.length - 1]
+  activeQuestionMessageId.value = lastQuestion?.id || null
+  if (lastQuestion && lockDuration > 0) {
+    lockActiveQuestion(lastQuestion.id, lockDuration)
+    return
+  }
+  void syncActiveQuestionNavRow()
+}
+
+function isQuestionNavLocked() {
+  if (!questionNavLockedMessageId) {
+    return false
+  }
+  if (questionNavLockUntil > 0 && Date.now() >= questionNavLockUntil) {
+    clearQuestionNavLock()
+    return false
+  }
+  if (!userQuestionNavItems.value.some((item) => item.id === questionNavLockedMessageId)) {
+    clearQuestionNavLock()
+    return false
+  }
+  if (activeQuestionMessageId.value !== questionNavLockedMessageId) {
+    activeQuestionMessageId.value = questionNavLockedMessageId
+    void syncActiveQuestionNavRow()
+  }
+  return true
+}
+
+function messageTopInScroller(node: HTMLElement, scroller: HTMLElement) {
+  return node.getBoundingClientRect().top - scroller.getBoundingClientRect().top + scroller.scrollTop
+}
+
+function lastQuestionIsVisible(scroller: HTMLElement, items: Array<{ id: string }>) {
+  const lastQuestion = items[items.length - 1]
+  if (!lastQuestion) return false
+  const node = scroller.querySelector<HTMLElement>(`[data-message-id="${CSS.escape(lastQuestion.id)}"]`)
+  if (!node) return false
+  const messageTop = messageTopInScroller(node, scroller)
+  const messageBottom = messageTop + node.offsetHeight
+  const viewTop = scroller.scrollTop
+  const viewBottom = viewTop + scroller.clientHeight
+  const activationInset = Math.min(QUESTION_NAV_LAST_VISIBLE_INSET_MAX, scroller.clientHeight * QUESTION_NAV_LAST_VISIBLE_INSET_RATIO)
+  return messageBottom >= viewTop + QUESTION_NAV_EDGE_THRESHOLD && messageTop <= viewBottom - activationInset
+}
+
+async function syncActiveQuestionNavRow() {
+  await nextTick()
+  const scroller = questionNavScroll.value
+  const activeId = activeQuestionMessageId.value
+  if (!scroller || !activeId) {
+    updateQuestionNavOverflow()
+    return
+  }
+  const row = scroller.querySelector<HTMLElement>(`[data-question-nav-id="${CSS.escape(activeId)}"]`)
+  if (!row) {
+    updateQuestionNavOverflow()
+    return
+  }
+  const rowTop = row.offsetTop
+  const rowBottom = rowTop + row.offsetHeight
+  const viewTop = scroller.scrollTop
+  const viewBottom = viewTop + scroller.clientHeight
+  if (rowTop < viewTop + 8) {
+    scroller.scrollTo({ top: Math.max(rowTop - 8, 0), behavior: questionNavExpanded.value ? 'smooth' : 'auto' })
+  } else if (rowBottom > viewBottom - 8) {
+    scroller.scrollTo({ top: rowBottom - scroller.clientHeight + 8, behavior: questionNavExpanded.value ? 'smooth' : 'auto' })
+  } else {
+    updateQuestionNavOverflow()
+  }
+}
+
+function refreshActiveQuestionFromScroll() {
+  const scroller = messageScroller.value
+  const items = userQuestionNavItems.value
+  updateQuestionNavLayoutMode()
+  if (!scroller || !items.length) {
+    activeQuestionMessageId.value = null
+    return
+  }
+  if (isQuestionNavLocked()) return
+  if (isAtScrollTop(scroller)) {
+    activeQuestionMessageId.value = items[0].id
+    void syncActiveQuestionNavRow()
+    return
+  }
+  if (isAtScrollBottom(scroller) || isNearQuestionNavBottom(scroller) || lastQuestionIsVisible(scroller, items)) {
+    setActiveQuestionToLast()
+    return
+  }
+  const anchorTop = scroller.scrollTop + scroller.clientHeight * 0.32
+  let bestId = items[0].id
+  for (const item of items) {
+    const node = scroller.querySelector<HTMLElement>(`[data-message-id="${CSS.escape(item.id)}"]`)
+    if (!node) continue
+    const messageTop = messageTopInScroller(node, scroller)
+    if (messageTop <= anchorTop) {
+      bestId = item.id
+    }
+  }
+  activeQuestionMessageId.value = bestId
+  void syncActiveQuestionNavRow()
+}
+
 function handleScrollerScroll() {
-  const nearBottom = isNearBottom(36)
+  const programmatic = isProgrammaticScroll()
+  if (!programmatic) {
+    cancelPendingScroll()
+    markUserScrollSettling()
+    clearQuestionNavLock()
+  }
+  const nearBottom = isNearBottom(80)
+  refreshActiveQuestionFromScroll()
   const awayFromBottom = !nearBottom
   showScrollToBottom.value = messages.value.length > 0 && awayFromBottom
-  if (!streaming.value || isProgrammaticScroll()) return
+  if (!streaming.value || programmatic) return
   if (nearBottom) {
     userHasScrolledUp = false
   } else if (awayFromBottom) {
@@ -1506,8 +2324,9 @@ async function scrollMessagesToBottom(behavior: ScrollBehavior = 'smooth') {
   await nextTick()
   const scroller = messageScroller.value
   if (!scroller) return
-  markProgrammaticScroll()
+  markProgrammaticScroll(behavior === 'smooth' ? 1000 : 300)
   scroller.scrollTo({ top: scroller.scrollHeight, behavior })
+  setActiveQuestionToLast(behavior === 'smooth' ? 900 : 300)
   showScrollToBottom.value = false
 }
 
@@ -1519,12 +2338,20 @@ async function scrollLoadedConversationToBottom(loadId: number) {
 
 async function returnToBottom() {
   userHasScrolledUp = false
+  userScrollSettlingUntil = 0
   await scrollMessagesToBottom('smooth')
+}
+
+async function jumpToQuestion(messageId: string) {
+  questionNavExpanded.value = true
+  lockActiveQuestion(messageId)
+  await scrollToMessage(messageId, 'start')
 }
 
 function scheduleScrollToBottom(force = false) {
   // Skip auto-scroll when the user has intentionally scrolled up.
   if (userHasScrolledUp) return
+  if (isUserScrollSettling()) return
   if (!force && !isNearBottom(40)) return
   if (scrollFrame !== null) return
   scrollFrame = window.requestAnimationFrame(() => {
@@ -1560,8 +2387,18 @@ function findMessageForMerge(message: Message) {
 }
 
 function mergeMessageIntoExisting(existing: Message, incoming: Message, preserve: Partial<Message> = {}) {
+  const previousId = existing.id
+  if (existing.role === 'assistant' && existing.status === 'streaming') rememberStreamProgress(existing)
   const stableClientKey = existing.clientKey || preserve.clientKey || incoming.clientKey || existing.id
   Object.assign(existing, incoming, preserve, { clientKey: stableClientKey })
+  migrateStreamProgress(previousId, existing.id)
+  if (existing.role === 'assistant' && existing.status === 'streaming') {
+    restoreCachedStreamProgress(existing)
+    rememberStreamProgress(existing)
+  } else {
+    forgetStreamProgress(previousId)
+    forgetStreamProgress(existing.id)
+  }
   moveMessageToDisplayPosition(existing)
 }
 
@@ -1584,6 +2421,7 @@ function finishImageFinalization(messageId: string, data: any = {}) {
   imageFinalizationTimers.delete(messageId)
   const message = findMessage(messageId)
   if (!message) return
+  forgetStreamProgress(message.id)
   message.status = data.status || 'completed'
   if (typeof data.content === 'string') message.content = data.content
   message.imageProgress = undefined
@@ -1688,7 +2526,9 @@ function applyConversationEvent(event: string, data: any) {
     model: data.model,
     totalTokens: Number(data.total_tokens || data.totalTokens || 0),
     createdAt: data.created_at || data.createdAt || new Date().toISOString(),
-    parentMessageId: data.user_message_id || data.userMessageId || data.parent_message_id || data.parentMessageId
+    parentMessageId: data.user_message_id || data.userMessageId || data.parent_message_id || data.parentMessageId,
+    webSearchSources: data.web_search_sources || data.webSearchSources || [],
+    web_search_sources: data.web_search_sources || data.webSearchSources || []
   }
   const message = findMessage(messageId) || findMessageForMerge(eventMessage)
   if (event === 'message_delta') {
@@ -1715,6 +2555,10 @@ function applyConversationEvent(event: string, data: any) {
     }
     if (typeof data.content === 'string') message.content = data.content
     if (data.status) message.status = data.status
+    if (data.web_search_sources || data.webSearchSources) {
+      message.webSearchSources = data.web_search_sources || data.webSearchSources || []
+      message.web_search_sources = message.webSearchSources
+    }
     applyRuntimeProgress(message, data)
     syncActiveRequestState()
     return
@@ -1727,6 +2571,21 @@ function applyConversationEvent(event: string, data: any) {
     } else {
       void refreshMessageById(messageId)
     }
+    return
+  }
+  if (event === 'web_search_status') {
+    if (!message) {
+      void refreshMessageById(messageId)
+      return
+    }
+    message.status = 'streaming'
+    message.progressDetail = webSearchProgressDetail(data)
+    message.progress_detail = message.progressDetail
+    message.progressPhase = data.phase || 'web_search'
+    message.progress_phase = message.progressPhase
+    applyRuntimeProgress(message, data)
+    syncActiveRequestState()
+    scheduleScrollToBottom()
     return
   }
   if (event === 'image_status' || event === 'image_progress') {
@@ -1749,6 +2608,7 @@ function applyConversationEvent(event: string, data: any) {
         if (!attachments.some((attachment) => attachment.id === data.attachment.id)) {
           message.attachments = [...attachments, data.attachment]
         }
+        void addUploadedAttachmentToFileTree(data.attachment)
       }
       message.status = 'streaming'
       const progress = message.imageProgress || message.image_progress
@@ -1797,14 +2657,24 @@ function applyConversationEvent(event: string, data: any) {
   }
   if (event === 'message_completed' || event === 'message_failed') {
     if (message) {
-      applyRuntimeProgress(message, data)
-      if (typeof data.content === 'string' && data.content.trim()) freezeFirstTokenSeconds(message, data)
       message.status = data.status || (event === 'message_completed' ? 'completed' : 'failed_no_output')
       if (typeof data.content === 'string') message.content = data.content
+      if (data.web_search_sources || data.webSearchSources) {
+        message.webSearchSources = data.web_search_sources || data.webSearchSources || []
+        message.web_search_sources = message.webSearchSources
+      }
+      applyRuntimeProgress(message, { ...data, status: message.status })
+      if (message.content.trim()) freezeFirstTokenSeconds(message, { ...data, status: message.status })
       if (event === 'message_failed' && !message.content.trim() && typeof data.message === 'string' && data.message.trim()) {
         message.content = data.message.trim()
       }
-      if (message.status !== 'streaming') message.imageProgress = undefined
+      if (message.status !== 'streaming') {
+        forgetStreamProgress(message.id)
+        clearRuntimeProgress(message)
+        message.imageProgress = undefined
+      }
+    } else {
+      forgetStreamProgress(messageId)
     }
     syncActiveRequestState()
     if (!messages.value.some((item) => item.role === 'assistant' && item.status === 'streaming' && messageIsImageGeneration(item))) {
@@ -1830,6 +2700,7 @@ function stopConversationEvents() {
 async function reloadCurrentConversationMessages(conversationId: string) {
   const loadId = ++activeConversationLoad
   try {
+    rememberStreamingProgressForMessages(messages.value)
     const loadedMessages = sortMessagesForDisplay(
       (await apiFetch<Message[]>(`/conversations/${conversationId}/messages`)).map(normalizeLoadedMessage)
     )
@@ -1864,6 +2735,7 @@ function syncConversationEvents() {
     'image_status',
     'image_progress',
     'image_completed',
+    'web_search_status',
     'usage',
     'context'
   ]
@@ -1952,8 +2824,30 @@ function syncImagePolling() {
   }, 3000)
 }
 
+async function toggleWebSearch() {
+  if (currentConversationStreaming.value) return
+  if (!webSearchEnabled.value && !webSearchAvailable.value) return
+  const nextValue = !webSearchEnabled.value
+  webSearchEnabled.value = nextValue
+  const conversationId = currentId.value
+  if (!conversationId) return
+  conversations.value = conversations.value.map((item) => (item.id === conversationId ? { ...item, webSearchEnabled: nextValue } : item))
+  try {
+    const updated = normalizeConversation(await apiFetch<Conversation>(`/conversations/${conversationId}`, {
+      method: 'PATCH',
+      body: JSON.stringify({ webSearchEnabled: nextValue })
+    }))
+    conversations.value = sortConversationsByUpdatedAt(conversations.value.map((item) => (item.id === updated.id ? { ...item, ...updated } : item)))
+  } catch (err) {
+    webSearchEnabled.value = !nextValue
+    conversations.value = conversations.value.map((item) => (item.id === conversationId ? { ...item, webSearchEnabled: !nextValue } : item))
+    error.value = err instanceof Error ? err.message : '联网搜索开关保存失败'
+  }
+}
+
 function newChat() {
   activeConversationLoad++
+  rememberStreamingProgressForMessages(messages.value)
   cancelPendingScroll()
   cancelPendingStreamFlush()
   clearAllImageFinalizationTimers()
@@ -1963,16 +2857,22 @@ function newChat() {
   window.localStorage.removeItem(CURRENT_CONVERSATION_STORAGE_KEY)
   messages.value = []
   messagesLoading.value = false
+  conversationAttachments.value = []
+  draftConversationAttachments.value = []
+  pendingAttachments.value = []
+  fileTreeLoading.value = false
   showScrollToBottom.value = false
   userHasScrolledUp = false
   error.value = ''
   streaming.value = false
+  webSearchEnabled.value = false
 }
 
 async function loadConversations() {
   conversationsLoading.value = conversations.value.length === 0
   try {
     conversations.value = sortConversationsByUpdatedAt(await apiFetch<Conversation[]>('/conversations'))
+    if (currentId.value) syncWebSearchToggleFromConversation()
   } catch (err) {
     if (err instanceof ApiError && err.code === 'INVALID_CREDENTIALS') {
       await router.push('/login')
@@ -2070,6 +2970,7 @@ async function chooseModelKey(keyId: string) {
 async function openConversation(id: string, focusMessageId?: string | null) {
   if (deletingConversationId.value === id) return
   const loadId = ++activeConversationLoad
+  rememberStreamingProgressForMessages(messages.value)
   cancelPendingScroll()
   cancelPendingStreamFlush()
   clearAllImageFinalizationTimers()
@@ -2086,7 +2987,10 @@ async function openConversation(id: string, focusMessageId?: string | null) {
       (await apiFetch<Message[]>(`/conversations/${id}/messages${params}`)).map(normalizeLoadedMessage)
     )
     if (loadId !== activeConversationLoad) return
+    syncWebSearchToggleFromConversation()
     messages.value = loadedMessages
+    await loadConversationAttachments(id)
+    if (loadId !== activeConversationLoad) return
     messagesLoading.value = false
     syncActiveRequestState()
     syncImagePolling()
@@ -2104,7 +3008,7 @@ async function openConversation(id: string, focusMessageId?: string | null) {
   }
 }
 
-async function scrollToMessage(messageId: string) {
+async function scrollToMessage(messageId: string, block: ScrollLogicalPosition = 'center') {
   await waitForMessageLayout()
   const target = Array.from(document.querySelectorAll<HTMLElement>('[data-message-id]')).find(
     (item) => item.dataset.messageId === messageId
@@ -2114,7 +3018,8 @@ async function scrollToMessage(messageId: string) {
     return
   }
   userHasScrolledUp = true
-  target.scrollIntoView({ behavior: 'smooth', block: 'center' })
+  markProgrammaticScroll(block === 'start' ? 1600 : 1000)
+  target.scrollIntoView({ behavior: 'smooth', block })
   target.classList.add('message-search-highlight')
   window.setTimeout(() => target.classList.remove('message-search-highlight'), 1800)
 }
@@ -2195,7 +3100,7 @@ async function confirmDeleteConversation() {
     deleteConfirmOpen.value = false
     conversationPendingDelete.value = null
     if (currentId.value === conversation.id) {
-      const nextConversation = conversations.value[0]
+      const nextConversation = lastVisibleConversation()
       if (nextConversation) {
         await openConversation(nextConversation.id)
       } else {
@@ -2245,7 +3150,7 @@ async function uploadAttachmentFile(file: File) {
       method: 'POST',
       body: JSON.stringify({ uploadId: presign.uploadId, filename: uploadFile.name, contentType: uploadFile.type })
     })
-    pendingAttachments.value.push(attachment)
+    await addUploadedAttachmentToFileTree(attachment)
   } catch (err) {
     error.value = err instanceof Error ? err.message : '附件上传失败'
   } finally {
@@ -2315,13 +3220,13 @@ function handleComposerDrop(event: DragEvent) {
 }
 
 async function send() {
-  if ((!input.value.trim() && !pendingAttachments.value.length) || currentConversationStreaming.value) return
+  if ((!input.value.trim() && !selectedFileTreeAttachments.value.length) || currentConversationStreaming.value) return
   const isImageGeneration = selectedModelIsImageGeneration()
-  if (isImageGeneration && pendingAttachments.value.length) {
+  if (isImageGeneration && selectedFileTreeAttachments.value.length) {
     error.value = '图像生成暂不支持同时上传附件。'
     return
   }
-  if (pendingAttachments.value.some(isImageAttachment) && !selectedModelSupportsVision()) {
+  if (selectedFileTreeAttachments.value.some((item) => isImageAttachment(item.attachment)) && !selectedModelSupportsVision()) {
     error.value = '当前模型不支持图片理解，请切换到支持视觉的模型。'
     return
   }
@@ -2329,10 +3234,13 @@ async function send() {
   userHasScrolledUp = false
   error.value = ''
   const userText = input.value
-  const outgoingAttachments = [...pendingAttachments.value]
-  const attachmentIds = pendingAttachments.value.map((item) => item.id)
+  const selectedAttachments = selectedFileTreeAttachments.value.map((item) => fileTreeAttachmentForPreview(item))
+  const selectedIds = selectedFileTreeAttachmentIds.value
+  const pendingIds = new Set(pendingAttachments.value.map((item) => item.id))
+  const attachmentIds = selectedIds.filter((id) => pendingIds.has(id))
+  const referencedAttachmentIds = selectedIds
+  let targetConversationId = currentId.value
   input.value = ''
-  pendingAttachments.value = []
   const draftConversationId = currentId.value || 'new'
   const draftUserId = `local-${Date.now()}`
   const draftAssistantId = `stream-${Date.now()}`
@@ -2347,7 +3255,7 @@ async function send() {
     content: userText,
     status: 'completed',
     totalTokens: 0,
-    attachments: outgoingAttachments,
+    attachments: selectedAttachments,
     createdAt: nowIso
   }
   const assistantDraft: Message = {
@@ -2365,17 +3273,29 @@ async function send() {
   }
   insertMessageInDisplayOrder(userDraft)
   insertMessageInDisplayOrder(assistantDraft)
+  rememberStreamProgress(assistantDraft)
   syncActiveRequestState()
   await scrollMessagesToBottom('auto')
-  const path = currentId.value ? `/conversations/${currentId.value}/messages` : '/conversations/new/messages'
   try {
+    if (!targetConversationId && draftConversationAttachments.value.length) {
+      const created = await apiFetch<Conversation>('/conversations', {
+        method: 'POST',
+        body: JSON.stringify({ title: (userText.trim() || '新对话').slice(0, 30), webSearchEnabled: webSearchEnabled.value })
+      })
+      targetConversationId = created.id
+      currentId.value = created.id
+      window.localStorage.setItem(CURRENT_CONVERSATION_STORAGE_KEY, created.id)
+      await bindDraftFileTreeToConversation(created.id)
+    }
+    const path = targetConversationId ? `/conversations/${targetConversationId}/messages` : '/conversations/new/messages'
     const result = await apiFetch<SendMessageResponse>(path, {
       method: 'POST',
       body: JSON.stringify({
         content: userText,
         model: selectedModel.value,
         attachmentIds,
-        referencedAttachmentIds: attachmentIds,
+        referencedAttachmentIds,
+        webSearchEnabled: webSearchEnabled.value,
         reasoningEffort: reasoningEffort.value
       })
     })
@@ -2407,13 +3327,16 @@ async function send() {
     syncConversationEvents()
     syncImagePolling()
     await loadConversations()
+    syncWebSearchToggleFromConversation()
     await loadContextStats()
+    pendingAttachments.value = pendingAttachments.value.filter((item) => !selectedIds.includes(item.id))
   } catch (err) {
     cancelPendingScroll()
     const apiErr = err instanceof ApiError ? err : null
     const message = userFacingSendError(err)
     const assistant = findMessage(draftAssistantId)
     if (assistant) {
+      forgetStreamProgress(assistant.id)
       assistant.content = message
       assistant.status = 'failed_no_output'
     }
@@ -2475,6 +3398,32 @@ function updateEmptyFooterAnchorShift() {
   }
 }
 
+function updateChatFooterHeight() {
+  const footer = chatFooter.value
+  const scroller = messageScroller.value
+  const previousBottomDistance = scroller ? scrollBottomDistance(scroller) : 0
+  const nextHeight = footer ? Math.ceil(footer.getBoundingClientRect().height) : 0
+  if (Math.abs(chatFooterHeight.value - nextHeight) <= 1) return
+  const wasPinnedToBottom = previousBottomDistance <= 4 && !userHasScrolledUp
+  chatFooterHeight.value = nextHeight
+  if (wasPinnedToBottom && hasConversationFrame.value) scheduleScrollToBottom(true)
+}
+
+function observeChatFooter() {
+  chatFooterResizeObserver?.disconnect()
+  chatFooterResizeObserver = null
+  const footer = chatFooter.value
+  if (!footer || typeof ResizeObserver === 'undefined') {
+    updateChatFooterHeight()
+    return
+  }
+  chatFooterResizeObserver = new ResizeObserver(() => {
+    updateChatFooterHeight()
+  })
+  chatFooterResizeObserver.observe(footer)
+  updateChatFooterHeight()
+}
+
 function composerMaxInputHeight(textarea: HTMLTextAreaElement, cssMaxHeight: number | null) {
   let maxHeight = cssMaxHeight ?? Number.POSITIVE_INFINITY
   if (!isEmptyChat.value || composerCompact.value) return maxHeight
@@ -2517,6 +3466,7 @@ function resizeComposerInput() {
   textarea.style.height = `${nextHeight}px`
   composerScrollable.value = textarea.scrollHeight > nextHeight
   textarea.style.overflowY = composerScrollable.value ? 'auto' : 'hidden'
+  updateChatFooterHeight()
 }
 
 function scheduleComposerResize() {
@@ -2526,6 +3476,12 @@ function scheduleComposerResize() {
   composerResizeFrame = window.requestAnimationFrame(() => {
     composerResizeFrame = null
     resizeComposerInput()
+    void waitForMessageLayout().then(() => {
+      updateChatFooterHeight()
+      updateQuestionNavLayoutMode()
+      refreshActiveQuestionFromScroll()
+      updateQuestionNavOverflow()
+    })
   })
 }
 
@@ -2547,6 +3503,39 @@ watch(
   }
 )
 
+watch(
+  () => [composerAttachmentItems.value.length, uploadingAttachmentNames.value.length] as const,
+  async () => {
+    await nextTick()
+    scheduleComposerResize()
+  }
+)
+
+watch(
+  () => userQuestionNavItems.value.map((item) => item.id).join('|'),
+  async () => {
+    if (!userQuestionNavItems.value.length) {
+      activeQuestionMessageId.value = null
+      questionNavExpanded.value = false
+      questionNavHasBefore.value = false
+      questionNavHasAfter.value = false
+      questionNavShortConversation.value = false
+      clearQuestionNavLock()
+      return
+    }
+    await waitForMessageLayout()
+    updateQuestionNavLayoutMode()
+    refreshActiveQuestionFromScroll()
+    await syncActiveQuestionNavRow()
+    updateQuestionNavOverflow()
+  }
+)
+
+watch(questionNavExpanded, async () => {
+  await syncActiveQuestionNavRow()
+  updateQuestionNavOverflow()
+})
+
 function closeFloatingMenus() {
   settingsMenuOpen.value = false
 }
@@ -2558,12 +3547,17 @@ watch(searchQuery, () => {
 
 onMounted(async () => {
   loadAppearance()
-  await Promise.all([loadModels(), loadConversations()])
+  loadFileTreePinned()
+  await Promise.all([loadModels(), loadConversations(), loadWebSearchStatus()])
   const storedConversationId = window.localStorage.getItem(CURRENT_CONVERSATION_STORAGE_KEY)
   if (storedConversationId && conversations.value.some((conversation) => conversation.id === storedConversationId)) {
     await openConversation(storedConversationId)
+  } else {
+    const fallbackConversation = lastVisibleConversation()
+    if (fallbackConversation) await openConversation(fallbackConversation.id)
   }
   await nextTick()
+  observeChatFooter()
   resizeComposerInput()
   window.addEventListener('resize', scheduleComposerResize)
 })
@@ -2577,6 +3571,8 @@ onUnmounted(() => {
     window.cancelAnimationFrame(composerResizeFrame)
     composerResizeFrame = null
   }
+  chatFooterResizeObserver?.disconnect()
+  chatFooterResizeObserver = null
   composerMeasureElement?.remove()
   composerMeasureElement = null
   window.removeEventListener('resize', scheduleComposerResize)
@@ -2717,7 +3713,7 @@ onUnmounted(() => {
       class="chat-main flex flex-col min-w-0 min-h-0 overflow-hidden"
       :class="{ 'has-messages': hasConversationFrame, 'is-empty-chat': isEmptyChat, 'composer-open': composerExpanded }"
     >
-      <header class="chat-header">
+      <header class="chat-header" :class="{ 'sources-open': sourceDrawerOpen }">
         <div class="top-model-controls" @click.stop>
           <AppSelect
             v-model="selectedModel"
@@ -2750,61 +3746,233 @@ onUnmounted(() => {
             <Plus :size="15" />
           </button>
         </div>
-        <div class="chat-header-info">
-          <span>{{ conversationUsage.tokens.toLocaleString() }} Tokens · {{ conversationUsage.requests }} requests</span>
-          <span>{{ currentConversation?.title || '新对话' }}</span>
-          <button
-            v-if="currentConversation"
-            class="chat-header-rename-button"
-            type="button"
-            title="修改对话名称"
-            aria-label="修改对话名称"
-            :disabled="currentConversationStreaming"
-            @click.stop="openRenameConversation(currentConversation)"
-          >
-            <Pencil :size="13" />
-          </button>
-        </div>
       </header>
 
-      <section
-        ref="messageScroller"
-        class="chat-surface flex-1 min-h-0 overflow-y-auto overscroll-contain px-6 py-8"
-        @scroll="handleScrollerScroll"
-        @wheel.passive="handleScrollerWheel"
-        @touchstart.passive="handleScrollerTouchStart"
-      >
-        <div class="chat-flow mx-auto">
-          <div v-if="messagesLoading" class="message-skeleton-stack" aria-label="正在加载消息">
-            <div class="message-skeleton-row assistant">
-              <div class="message-skeleton-block">
-                <span class="skeleton-line wide" />
-                <span class="skeleton-line medium" />
-                <span class="skeleton-line narrow" />
+      <div class="chat-workspace" :class="{ 'file-tree-collapsed': !fileTreePinned }">
+        <section
+          ref="messageScroller"
+          class="chat-surface flex-1 min-h-0 overflow-y-auto overscroll-contain px-6 py-8"
+          @scroll="handleScrollerScroll"
+          @wheel.passive="handleScrollerWheel"
+          @touchstart.passive="handleScrollerTouchStart"
+        >
+          <div class="chat-flow mx-auto">
+            <div v-if="messagesLoading" class="message-skeleton-stack" aria-label="正在加载消息">
+              <div class="message-skeleton-row assistant">
+                <div class="message-skeleton-block">
+                  <span class="skeleton-line wide" />
+                  <span class="skeleton-line medium" />
+                  <span class="skeleton-line narrow" />
+                </div>
+              </div>
+              <div class="message-skeleton-row user">
+                <div class="message-skeleton-bubble">
+                  <span class="skeleton-line medium" />
+                </div>
+              </div>
+              <div class="message-skeleton-row assistant">
+                <div class="message-skeleton-block">
+                  <span class="skeleton-line wide" />
+                  <span class="skeleton-line wide" />
+                  <span class="skeleton-line short" />
+                </div>
               </div>
             </div>
-            <div class="message-skeleton-row user">
-              <div class="message-skeleton-bubble">
-                <span class="skeleton-line medium" />
-              </div>
+            <ChatMessage
+              v-else
+              v-for="message in messages"
+              :key="message.clientKey || message.id"
+              :message="message"
+              @preview-attachment="openAttachmentPreview"
+              @open-sources="openWebSearchSources"
+            />
+          </div>
+        </section>
+
+        <div v-if="sourceDrawerOpen" class="source-drawer-backdrop" @click="closeWebSearchSources" />
+        <aside
+          class="source-drawer"
+          :class="{ open: sourceDrawerOpen }"
+          aria-label="联网搜索来源"
+          :aria-hidden="!sourceDrawerOpen"
+        >
+          <div class="source-drawer-header">
+            <div>
+              <span>搜索结果</span>
+              <strong>已阅读 {{ sourceDrawerSources.length }} 个网页</strong>
             </div>
-            <div class="message-skeleton-row assistant">
-              <div class="message-skeleton-block">
-                <span class="skeleton-line wide" />
-                <span class="skeleton-line wide" />
-                <span class="skeleton-line short" />
+            <button class="source-drawer-close" type="button" title="关闭" aria-label="关闭来源面板" @click="closeWebSearchSources">
+              <X :size="18" />
+            </button>
+          </div>
+          <div class="source-drawer-list">
+            <button
+              v-for="source in sourceDrawerSources"
+              :key="`${source.index}-${source.url}`"
+              class="source-result-card"
+              type="button"
+              @click="openSourceUrl(source)"
+            >
+              <span class="source-result-index">{{ source.index }}</span>
+              <span class="source-result-main">
+                <span class="source-result-meta">
+                  <SourceIcon :source="source" />
+                  <span class="source-result-site">{{ sourceSiteName(source) }}</span>
+                  <span v-if="sourcePublishedLabel(source)" class="source-result-date">{{ sourcePublishedLabel(source) }}</span>
+                </span>
+                <strong class="source-result-title">{{ source.title }}</strong>
+                <em v-if="sourceSummaryText(source)" class="source-result-summary">{{ sourceSummaryText(source) }}</em>
+              </span>
+            </button>
+          </div>
+        </aside>
+
+        <aside
+          v-if="userQuestionNavItems.length > 0"
+          class="question-nav-panel"
+          :class="{
+            expanded: questionNavExpanded,
+            'has-before': questionNavHasBefore,
+            'has-after': questionNavHasAfter,
+            'short-conversation': questionNavShortConversation
+          }"
+          aria-label="当前对话问题导航"
+          @mouseenter="questionNavExpanded = true"
+          @mouseleave="questionNavExpanded = false"
+        >
+          <div class="question-nav-card">
+            <div ref="questionNavScroll" class="question-nav-scroll" @scroll="updateQuestionNavOverflow">
+              <div
+                v-for="item in userQuestionNavItems"
+                :key="item.id"
+                class="question-nav-row"
+                :class="{ active: item.id === activeQuestionMessageId }"
+                :data-question-nav-id="item.id"
+              >
+                <button
+                  class="question-nav-item"
+                  :class="{ active: item.id === activeQuestionMessageId }"
+                  type="button"
+                  :aria-label="`跳转到问题：${item.title}`"
+                  @click="jumpToQuestion(item.id)"
+                >
+                  <span>{{ item.index }}. {{ item.summary }}</span>
+                </button>
+                <button
+                  class="question-nav-rail"
+                  :class="{ active: item.id === activeQuestionMessageId }"
+                  type="button"
+                  aria-label="跳转到该问题"
+                  @click="jumpToQuestion(item.id)"
+                >
+                  <span class="question-nav-mark" :class="{ active: item.id === activeQuestionMessageId }" aria-hidden="true" />
+                </button>
               </div>
             </div>
           </div>
-          <ChatMessage
-            v-else
-            v-for="message in messages"
-            :key="message.clientKey || message.id"
-            :message="message"
-            @preview-attachment="openAttachmentPreview"
-          />
-        </div>
-      </section>
+        </aside>
+
+        <aside class="file-tree-panel" :class="{ collapsed: !fileTreePinned }" aria-label="对话文件树">
+          <button class="file-tree-pin" type="button" :title="fileTreePinned ? '收起文件树' : '展开文件树'" @click="toggleFileTreePinned">
+            <PinOff v-if="fileTreePinned" :size="17" />
+            <Pin v-else :size="17" />
+          </button>
+          <Transition name="file-tree-body">
+            <div v-if="fileTreePinned" class="file-tree-body">
+              <header class="file-tree-header">
+                <div>
+                  <strong>文件树</strong>
+                  <span>{{ activeFileTreeAttachments.length }} 个文件 · {{ selectedFileTreeAttachments.length }} 已选</span>
+                </div>
+              </header>
+              <div v-if="fileTreeLoading" class="file-tree-skeleton" aria-label="正在加载文件树">
+                <section v-for="group in ['images', 'documents']" :key="group" class="file-tree-skeleton-group">
+                  <div class="file-tree-skeleton-head">
+                    <span class="skeleton-pill file-tree-skeleton-icon" />
+                    <span class="skeleton-line medium" />
+                    <span class="skeleton-line short" />
+                  </div>
+                  <div
+                    v-for="item in group === 'images' ? 2 : 3"
+                    :key="`${group}-${item}`"
+                    class="file-tree-skeleton-item"
+                  >
+                    <span class="skeleton-pill file-tree-skeleton-check" />
+                    <span class="skeleton-pill file-tree-skeleton-thumb" />
+                    <span class="file-tree-skeleton-meta">
+                      <span class="skeleton-line" :class="item % 2 ? 'wide' : 'medium'" />
+                      <span class="skeleton-line short" />
+                    </span>
+                  </div>
+                </section>
+              </div>
+              <div v-else-if="!activeFileTreeAttachments.length" class="file-tree-empty">当前对话暂无文件</div>
+              <div v-else class="file-tree-groups">
+                <section class="file-tree-group">
+                  <button class="file-tree-group-head" type="button" @click="toggleFileTreeGroup('images')">
+                    <ImageIcon :size="16" />
+                    <span>图片</span>
+                    <em>{{ fileTreeImages.length }}</em>
+                  </button>
+                  <Transition name="file-tree-list">
+                    <div v-if="fileTreeGroupOpen.images" class="file-tree-list">
+                      <div class="file-tree-list-inner">
+                        <article v-for="item in fileTreeImages" :key="item.id" class="file-tree-item" :class="{ selected: item.selected }">
+                          <label class="file-tree-check" :title="item.selected ? '取消勾选' : '勾选引用'">
+                            <input type="checkbox" :checked="item.selected" @change="handleFileTreeSelectionChange(item, $event)" />
+                            <span aria-hidden="true" />
+                          </label>
+                          <button class="file-tree-thumb image" type="button" @click="openAttachmentPreview(fileTreeAttachmentForPreview(item))">
+                            <img :src="attachmentPreviewUrl(item.attachment.id)" :alt="fileTreeDisplayName(item)" />
+                          </button>
+                          <button class="file-tree-meta" type="button" @click="openAttachmentPreview(fileTreeAttachmentForPreview(item))">
+                            <strong>{{ fileTreeDisplayName(item) }}</strong>
+                            <span>{{ formatBytes(item.attachment.sizeBytes) }} · {{ parseStatusText[item.attachment.parseStatus] || item.attachment.parseStatus }}</span>
+                          </button>
+                          <div class="file-tree-actions">
+                            <button type="button" title="重命名" @click="openAttachmentRename(item)"><Pencil :size="14" /></button>
+                            <button type="button" title="移除" @click="requestRemoveFileTreeAttachment(item)"><Trash2 :size="14" /></button>
+                          </div>
+                        </article>
+                      </div>
+                    </div>
+                  </Transition>
+                </section>
+                <section class="file-tree-group">
+                  <button class="file-tree-group-head" type="button" @click="toggleFileTreeGroup('documents')">
+                    <FileText :size="16" />
+                    <span>文档</span>
+                    <em>{{ fileTreeDocuments.length }}</em>
+                  </button>
+                  <Transition name="file-tree-list">
+                    <div v-if="fileTreeGroupOpen.documents" class="file-tree-list">
+                      <div class="file-tree-list-inner">
+                        <article v-for="item in fileTreeDocuments" :key="item.id" class="file-tree-item" :class="{ selected: item.selected }">
+                          <label class="file-tree-check" :title="item.selected ? '取消勾选' : '勾选引用'">
+                            <input type="checkbox" :checked="item.selected" @change="handleFileTreeSelectionChange(item, $event)" />
+                            <span aria-hidden="true" />
+                          </label>
+                          <button class="file-tree-thumb document" type="button" @click="openAttachmentPreview(fileTreeAttachmentForPreview(item))">
+                            <FileText :size="17" />
+                          </button>
+                          <button class="file-tree-meta" type="button" @click="openAttachmentPreview(fileTreeAttachmentForPreview(item))">
+                            <strong>{{ fileTreeDisplayName(item) }}</strong>
+                            <span>{{ attachmentKindLabel(item.attachment) }} · {{ parseStatusText[item.attachment.parseStatus] || item.attachment.parseStatus }}</span>
+                          </button>
+                          <div class="file-tree-actions">
+                            <button type="button" title="重命名" @click="openAttachmentRename(item)"><Pencil :size="14" /></button>
+                            <button type="button" title="移除" @click="requestRemoveFileTreeAttachment(item)"><Trash2 :size="14" /></button>
+                          </div>
+                        </article>
+                      </div>
+                    </div>
+                  </Transition>
+                </section>
+              </div>
+            </div>
+          </Transition>
+        </aside>
+      </div>
 
       <footer ref="chatFooter" class="chat-footer p-4">
         <Transition name="welcome-rise">
@@ -2833,7 +4001,12 @@ onUnmounted(() => {
           @dragleave="handleComposerDragLeave"
           @drop="handleComposerDrop"
         >
-          <div v-if="uploadingAttachmentNames.length || pendingAttachments.length" class="composer-attachments">
+          <div
+            v-if="uploadingAttachmentNames.length || composerAttachmentItems.length"
+            ref="composerAttachmentsScroller"
+            class="composer-attachments"
+            @wheel="handleComposerAttachmentsWheel"
+          >
             <div v-for="name in uploadingAttachmentNames" :key="`uploading-${name}`" class="composer-attachment-card is-uploading">
               <div class="composer-attachment-loading" aria-hidden="true" />
               <div class="composer-attachment-meta">
@@ -2841,27 +4014,59 @@ onUnmounted(() => {
                 <span>上传中</span>
               </div>
             </div>
-            <div
-              v-for="item in pendingAttachments"
-              :key="item.id"
-              class="composer-attachment-card"
-              :class="{ 'is-image': isImageAttachment(item), 'is-file': !isImageAttachment(item) }"
+            <article
+              v-for="item in composerImageAttachments"
+              :key="`composer-image-${item.attachment.id}`"
+              class="composer-attachment-card is-image is-selected"
             >
-              <button class="composer-attachment-preview" type="button" @click="openAttachmentPreview(item)">
-                <img v-if="isImageAttachment(item)" :src="attachmentPreviewUrl(item.id)" :alt="item.filename" />
-                <template v-else>
-                  <span class="composer-file-icon" :class="attachmentKindClass(item)"><FileText :size="21" /></span>
-                  <span class="composer-attachment-meta">
-                    <strong>{{ item.filename }}</strong>
-                    <em>{{ attachmentKindLabel(item) }}</em>
-                  </span>
-                </template>
+              <button
+                class="composer-attachment-preview"
+                type="button"
+                :title="`查看图片：${fileTreeDisplayName(item)}`"
+                :aria-label="`查看图片：${fileTreeDisplayName(item)}`"
+                @click="openAttachmentPreview(fileTreeAttachmentForPreview(item))"
+              >
+                <img :src="attachmentPreviewUrl(item.attachment.id)" :alt="fileTreeDisplayName(item)" />
               </button>
-              <button class="composer-attachment-remove" type="button" title="移除本次附件" aria-label="移除本次附件" @click.stop="removePendingAttachment(item.id)">
-                <X :size="14" />
+              <button
+                class="composer-attachment-remove"
+                type="button"
+                title="取消引用"
+                aria-label="取消引用"
+                @click.stop="setFileTreeAttachmentSelected(item, false)"
+              >
+                <X :size="13" />
               </button>
-              <span v-if="isImageAttachment(item)" class="composer-attachment-status">{{ parseStatusText[item.parseStatus] || item.parseStatus }}</span>
-            </div>
+              <span class="composer-attachment-status">{{ parseStatusText[item.attachment.parseStatus] || item.attachment.parseStatus }}</span>
+            </article>
+            <article
+              v-for="item in composerDocumentAttachments"
+              :key="`composer-file-${item.attachment.id}`"
+              class="composer-attachment-card is-file is-selected"
+            >
+              <button
+                class="composer-attachment-preview"
+                type="button"
+                :title="`查看文件：${fileTreeDisplayName(item)}`"
+                :aria-label="`查看文件：${fileTreeDisplayName(item)}`"
+                @click="openAttachmentPreview(fileTreeAttachmentForPreview(item))"
+              >
+                <span class="composer-file-icon" :class="attachmentKindClass(item.attachment)"><FileText :size="20" /></span>
+                <span class="composer-attachment-meta">
+                  <strong>{{ fileTreeDisplayName(item) }}</strong>
+                  <em>{{ attachmentKindLabel(item.attachment) }} · {{ parseStatusText[item.attachment.parseStatus] || item.attachment.parseStatus }}</em>
+                </span>
+              </button>
+              <button
+                class="composer-attachment-remove"
+                type="button"
+                title="取消引用"
+                aria-label="取消引用"
+                @click.stop="setFileTreeAttachmentSelected(item, false)"
+              >
+                <X :size="13" />
+              </button>
+            </article>
           </div>
           <button
             class="composer-expand-button"
@@ -2888,11 +4093,23 @@ onUnmounted(() => {
                 <Paperclip :size="18" />
                 <input class="hidden" type="file" multiple @change="uploadFile" />
               </label>
+              <button
+                class="composer-icon-button web-search-toggle"
+                :class="{ active: webSearchEnabled }"
+                type="button"
+                :disabled="webSearchToggleDisabled"
+                :title="webSearchToggleLabel"
+                :aria-label="webSearchToggleLabel"
+                :aria-pressed="webSearchEnabled"
+                @click="toggleWebSearch"
+              >
+                <Globe :size="18" />
+              </button>
 
             </div>
 
             <div class="composer-right-tools">
-              <button class="send-button" type="submit" :disabled="currentConversationStreaming || (!input.trim() && !pendingAttachments.length)" title="发送" aria-label="发送">
+              <button class="send-button" type="submit" :disabled="currentConversationStreaming || (!input.trim() && !selectedFileTreeAttachments.length)" title="发送" aria-label="发送">
                 <Send :size="18" />
               </button>
             </div>
@@ -2913,6 +4130,7 @@ onUnmounted(() => {
             </div>
             <button class="settings-tab-button" :class="{ active: settingsTab === 'appearance' }" @click="selectSettingsTab('appearance')">个性化</button>
             <button class="settings-tab-button" :class="{ active: settingsTab === 'image' }" @click="selectSettingsTab('image')">图像生成</button>
+            <button v-if="auth.user?.role === 'admin'" class="settings-tab-button" :class="{ active: settingsTab === 'web' }" @click="selectSettingsTab('web')">联网搜索</button>
             <button class="settings-tab-button" :class="{ active: settingsTab === 'api' }" @click="selectSettingsTab('api')">API 管理</button>
             <button v-if="auth.user?.role === 'admin'" class="settings-tab-button" :class="{ active: settingsTab === 'groups' }" @click="selectSettingsTab('groups')">分组管理</button>
             <button class="settings-tab-button" :class="{ active: settingsTab === 'account' }" @click="selectSettingsTab('account')">账号安全</button>
@@ -3088,6 +4306,79 @@ onUnmounted(() => {
                   <button class="settings-primary" type="submit" :disabled="imageSettingsLoading || imageSettingsSaving">
                     {{ imageSettingsSaving ? '保存中...' : '保存图像设置' }}
                   </button>
+                </form>
+              </section>
+
+              <section v-else-if="settingsTab === 'web' && auth.user?.role === 'admin'" key="web" class="settings-pane">
+                <div class="settings-pane-heading">
+                  <h2>联网搜索</h2>
+                  <p>配置 SearXNG 搜索源。用户在单个对话里开启后，模型可按需调用搜索和网页读取工具。</p>
+                </div>
+                <form class="settings-card" @submit.prevent="saveWebSearchSettings">
+                  <div v-if="webSearchSettingsLoading" class="settings-empty">正在加载联网搜索设置...</div>
+                  <div v-else class="settings-grid">
+                    <label class="settings-check settings-field-wide">
+                      <input v-model="webSearchSettings.enabled" type="checkbox" />
+                      启用联网搜索
+                    </label>
+                    <label class="settings-field settings-field-wide">
+                      <span>SearXNG URL</span>
+                      <input v-model="webSearchSettings.searxngBaseUrl" class="settings-input" placeholder="https://searxng.example.com/search" />
+                    </label>
+                    <label class="settings-field">
+                      <span>结果数</span>
+                      <input v-model.number="webSearchSettings.resultCount" class="settings-input" type="number" min="1" max="10" />
+                    </label>
+                    <label class="settings-field">
+                      <span>语言</span>
+                      <input v-model="webSearchSettings.language" class="settings-input" placeholder="all" />
+                    </label>
+                    <label class="settings-field">
+                      <span>安全搜索</span>
+                      <input v-model="webSearchSettings.safesearch" class="settings-input" placeholder="1" />
+                    </label>
+                    <label class="settings-field">
+                      <span>搜索超时秒</span>
+                      <input v-model.number="webSearchSettings.timeoutSeconds" class="settings-input" type="number" min="3" max="60" />
+                    </label>
+                    <label class="settings-field">
+                      <span>读取网页超时秒</span>
+                      <input v-model.number="webSearchSettings.fetchTimeoutSeconds" class="settings-input" type="number" min="3" max="60" />
+                    </label>
+                    <label class="settings-field">
+                      <span>最大工具调用次数</span>
+                      <input v-model.number="webSearchSettings.maxToolCalls" class="settings-input" type="number" min="1" max="10" />
+                    </label>
+                    <label class="settings-field">
+                      <span>网页最大字符数</span>
+                      <input v-model.number="webSearchSettings.fetchMaxChars" class="settings-input" type="number" min="1000" max="50000" />
+                    </label>
+                  </div>
+                  <div class="settings-api-card-footer">
+                    <button class="settings-primary" type="submit" :disabled="webSearchSettingsLoading || webSearchSettingsSaving">
+                      {{ webSearchSettingsSaving ? '保存中...' : '保存联网搜索设置' }}
+                    </button>
+                  </div>
+                </form>
+                <form class="settings-card" @submit.prevent="testWebSearchSettings">
+                  <div class="settings-card-header">
+                    <div>
+                      <h3>测试搜索</h3>
+                      <p>使用当前已保存配置测试 SearXNG 返回结果。</p>
+                    </div>
+                  </div>
+                  <div class="settings-inline-field">
+                    <input v-model="webSearchTestQuery" class="settings-input" placeholder="输入测试关键词" />
+                    <button class="settings-secondary" type="submit" :disabled="webSearchTesting">
+                      {{ webSearchTesting ? '测试中...' : '测试' }}
+                    </button>
+                  </div>
+                  <div v-if="webSearchTestResults.length" class="settings-web-results">
+                    <a v-for="item in webSearchTestResults" :key="item.url" :href="item.url" target="_blank" rel="noreferrer">
+                      <strong>{{ item.title || item.url }}</strong>
+                      <span>{{ item.snippet || item.url }}</span>
+                    </a>
+                  </div>
                 </form>
               </section>
 
@@ -3289,7 +4580,7 @@ onUnmounted(() => {
                           <div class="settings-api-row-meta">
                             <span>{{ key.endpointName || key.baseUrl || '当前 BaseURL' }}</span>
                             <span>{{ key.groupName || 'gpt-chat' }}</span>
-                            <span class="key-mask">{{ key.apiKey || key.maskedKey }}</span>
+                            <span class="key-mask">{{ key.maskedKey || (key.last4 ? '****' + key.last4 : '未展示') }}</span>
                             <strong v-if="key.isActive">当前分组使用</strong>
                           </div>
                           <div class="settings-api-row-actions">
@@ -3555,7 +4846,7 @@ onUnmounted(() => {
                 >
                   <span class="access-switch-row-main">
                     <strong>{{ key.name }}</strong>
-                    <small>{{ key.groupName || 'gpt-chat' }} · {{ key.maskedKey || key.apiKey || (key.last4 ? '****' + key.last4 : '未展示') }}</small>
+                    <small>{{ key.groupName || 'gpt-chat' }} · {{ key.maskedKey || (key.last4 ? '****' + key.last4 : '未展示') }}</small>
                     <em>{{ key.endpointName || key.baseUrl || activeModelEndpoint?.name || '当前 BaseURL' }}</em>
                   </span>
                   <span class="access-switch-badge">
@@ -3796,6 +5087,60 @@ onUnmounted(() => {
             <button type="button" class="confirm-secondary-button" :disabled="Boolean(deletingConversationId)" @click="closeDeleteConfirm">取消</button>
             <button type="button" class="confirm-danger-button" :disabled="Boolean(deletingConversationId)" @click="confirmDeleteConversation">
               {{ deletingConversationId ? '删除中...' : '确认删除' }}
+            </button>
+          </div>
+        </section>
+      </div>
+    </Transition>
+
+    <Transition name="dialog-pop">
+      <div v-if="attachmentRenameOpen" class="confirm-modal-backdrop" @click.self="closeAttachmentRename">
+        <form class="confirm-modal attachment-rename-modal" role="dialog" aria-modal="true" aria-label="重命名文件" @submit.prevent="saveAttachmentRename">
+          <div class="confirm-modal-header">
+            <h2>重命名文件</h2>
+            <button type="button" class="confirm-modal-close" title="关闭" aria-label="关闭" @click="closeAttachmentRename">
+              <X :size="18" />
+            </button>
+          </div>
+          <label class="attachment-rename-field">
+            <span>显示名称</span>
+            <input
+              ref="attachmentRenameInput"
+              v-model="attachmentRenameDraft"
+              class="attachment-rename-input"
+              maxlength="255"
+              placeholder="文件显示名"
+              autocomplete="off"
+              spellcheck="false"
+              :title="attachmentRenameDraft"
+              @input="attachmentRenameError = ''"
+            />
+          </label>
+          <p v-if="attachmentRenameError" class="attachment-rename-error">{{ attachmentRenameError }}</p>
+          <div class="confirm-modal-actions">
+            <button type="button" class="confirm-secondary-button" :disabled="attachmentRenameSaving" @click="closeAttachmentRename">取消</button>
+            <button type="submit" class="confirm-primary-button" :disabled="attachmentRenameSaving || !attachmentRenameDraft.trim()">
+              {{ attachmentRenameSaving ? '保存中...' : '保存' }}
+            </button>
+          </div>
+        </form>
+      </div>
+    </Transition>
+
+    <Transition name="dialog-pop">
+      <div v-if="attachmentDeleteOpen" class="confirm-modal-backdrop" @click.self="closeAttachmentDelete">
+        <section class="confirm-modal" role="dialog" aria-modal="true" aria-label="移除文件">
+          <div class="confirm-modal-header">
+            <h2>从当前对话移除？</h2>
+            <button type="button" class="confirm-modal-close" title="关闭" aria-label="关闭" @click="closeAttachmentDelete">
+              <X :size="18" />
+            </button>
+          </div>
+          <p>文件「{{ attachmentDeleteTarget ? fileTreeDisplayName(attachmentDeleteTarget) : '未命名文件' }}」将从当前对话文件树移除，其他对话不受影响。</p>
+          <div class="confirm-modal-actions">
+            <button type="button" class="confirm-secondary-button" :disabled="attachmentDeleting" @click="closeAttachmentDelete">取消</button>
+            <button type="button" class="confirm-danger-button" :disabled="attachmentDeleting" @click="confirmRemoveFileTreeAttachment">
+              {{ attachmentDeleting ? '移除中...' : '确认移除' }}
             </button>
           </div>
         </section>

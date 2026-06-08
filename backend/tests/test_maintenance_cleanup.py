@@ -2,7 +2,7 @@ import asyncio
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
 
-from app.models.entities import Attachment, AttachmentChunk, MessageAttachment
+from app.models.entities import Attachment, AttachmentChunk, ConversationAttachment, MessageAttachment
 from app.services import maintenance
 
 
@@ -84,7 +84,12 @@ def test_unused_image_cleanup_deletes_old_unlinked_images(monkeypatch, tmp_path)
     assert not thumb_path.exists()
     assert db.flushed is True
     deleted_tables = {statement.table.name for statement in db.deleted_statements}
-    assert deleted_tables == {MessageAttachment.__tablename__, AttachmentChunk.__tablename__, Attachment.__tablename__}
+    assert deleted_tables == {
+        ConversationAttachment.__tablename__,
+        MessageAttachment.__tablename__,
+        AttachmentChunk.__tablename__,
+        Attachment.__tablename__,
+    }
 
 
 def test_unused_image_cleanup_query_filters_to_old_unlinked_images():

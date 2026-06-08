@@ -329,12 +329,21 @@ async def build_rag_attachment_context_blocks(
         return []
 
     api_key = await chat_api_key(db, user_id)
-    if not api_key:
+    if not api_key and not settings.embedding_api_key:
         return []
 
     try:
-        provider = OpenAICompatibleProvider(api_key.base_url)
-        query_vector = (await provider.embeddings(decrypt_api_key(api_key.ciphertext), settings.embedding_model, [current_content]))[0]
+        provider = OpenAICompatibleProvider(settings.embedding_base_url or (api_key.base_url if api_key else None))
+        plain_api_key = settings.embedding_api_key or decrypt_api_key(api_key.ciphertext)
+        query_vector = (
+            await provider.embeddings(
+                plain_api_key,
+                settings.embedding_model,
+                [current_content],
+                max_retries=max(0, min(int(settings.embedding_retry_attempts or 0), 5)),
+                retry_initial_delay_seconds=max(0.0, float(settings.embedding_retry_initial_delay_seconds or 0.0)),
+            )
+        )[0]
     except Exception:
         return []
 

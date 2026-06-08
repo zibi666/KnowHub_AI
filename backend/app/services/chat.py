@@ -4,6 +4,7 @@ import asyncio
 import contextlib
 import json
 import logging
+import re
 import time
 from collections.abc import AsyncIterator
 from dataclasses import dataclass
@@ -24,6 +25,7 @@ from app.core.db import SessionLocal
 from app.models.entities import (
     Attachment,
     Conversation,
+    ConversationAttachment,
     ConversationCompaction,
     Message,
     MessageAttachment,
@@ -49,12 +51,59 @@ from app.services.image_generation import (
     official_available_models,
     save_generated_image_attachment,
 )
+from app.services.web_search import (
+    effective_web_search_config,
+    format_search_results_for_context,
+    json_tool_output,
+    run_web_search_tool,
+    structured_web_search_sources,
+    tool_result_sources,
+    web_search_tools,
+)
 from app.services.usage import record_usage
 
 DEFAULT_CHAT_MODEL = "gpt-5.5"
 IMAGE_GENERATION_MAX_WAIT_SECONDS = 14 * 60
-
+WEB_SEARCH_FORCE_TERMS = (
+    "news",
+    "latest",
+    "today",
+    "current",
+    "recent",
+    "breaking",
+    "official",
+    "新闻",
+    "最新",
+    "今天",
+    "今日",
+    "现在",
+    "近期",
+    "最近",
+    "官方",
+    "消息",
+    "报道",
+    "去世",
+    "逝世",
+    "死亡",
+    "死了吗",
+    "是否属实",
+    "是真的吗",
+)
+WEB_SEARCH_TOOL_POLICY = (
+    "KnowHub web search policy: When web search is enabled, use search_web first for current events, news, "
+    "recent facts, public external facts, or claims that may have changed. Use fetch_url only when search snippets "
+    "are not enough or a result needs closer reading. Do not invent sources; if search results are weak, missing, "
+    "or unrelated, say so clearly in the final answer. When sources are provided in the final-answer context, add "
+    "inline markers like [[1]] and [[2]] only next to claims directly supported by those exact sources. Do not add "
+    "a markdown source list."
+)
 _STREAM_END = object()
+EMPTY_CHAT_RESPONSE_MESSAGE = (
+    "模型返回了空回复：上游接口请求已完成，但没有返回任何可显示的文本。"
+    "常见原因是上游服务或代理临时异常、模型不完全兼容当前流式接口，"
+    "或当前会话上下文触发了上游空响应。请重试；如果连续出现，请切换模型，"
+    "或检查该 BaseURL 的 /responses 与 /chat/completions 兼容性。"
+)
 
 
 async def _safe_anext(gen: AsyncIterator) -> object:
@@ -67,6 +116,29 @@ async def _safe_anext(gen: AsyncIterator) -> object:
 
 def json_line(event: str, data: dict) -> bytes:
     return (json.dumps({"event": event, "data": data}, ensure_ascii=False) + "\n\n").encode("utf-8")
+
+
+def empty_chat_response_message(model: str | None = None, base_url: str | None = None) -> str:
+    details: list[str] = []
+    if model:
+        details.append(f"模型：{model}")
+    if base_url:
+        details.append(f"BaseURL：{base_url.rstrip('/')}")
+    if not details:
+        return EMPTY_CHAT_RESPONSE_MESSAGE
+    return f"{EMPTY_CHAT_RESPONSE_MESSAGE}（{'，'.join(details)}）"
+
+
+def unique_ids(ids: list[str] | None) -> list[str]:
+    result: list[str] = []
+    seen: set[str] = set()
+    for item in ids or []:
+        candidate = (item or "").strip()
+        if not candidate or candidate in seen:
+            continue
+        result.append(candidate)
+        seen.add(candidate)
+    return result
 
 
 def sse_line(event: str, data: dict) -> bytes:
@@ -379,6 +451,309 @@ def generated_image_data_url(b64_json: str, output_format: str | None) -> str:
     return f"data:image/{image_format};base64,{b64_json}"
 
 
+def add_usage_totals(total: dict | None, usage: dict | None) -> dict | None:
+    if not usage:
+        return total
+    if total is None:
+        total = {"prompt_tokens": 0, "completion_tokens": 0, "total_tokens": 0}
+    total["prompt_tokens"] = int(total.get("prompt_tokens") or 0) + int(usage.get("prompt_tokens") or 0)
+    total["completion_tokens"] = int(total.get("completion_tokens") or 0) + int(usage.get("completion_tokens") or 0)
+    total["total_tokens"] = int(total.get("total_tokens") or 0) + int(usage.get("total_tokens") or 0)
+    return total
+
+
+def should_force_web_search(context: list[dict]) -> bool:
+    user_text = ""
+    for message in reversed(context):
+        if message.get("role") == "user":
+            content = message.get("content")
+            if isinstance(content, list):
+                parts = [str(part.get("text") or "") for part in content if isinstance(part, dict)]
+                user_text = " ".join(parts)
+            else:
+                user_text = str(content or "")
+            break
+    lowered = user_text.lower()
+    return any(term in lowered for term in WEB_SEARCH_FORCE_TERMS)
+
+
+def latest_user_text(context: list[dict]) -> str:
+    for message in reversed(context):
+        if message.get("role") != "user":
+            continue
+        content = message.get("content")
+        if isinstance(content, list):
+            return " ".join(str(part.get("text") or "") for part in content if isinstance(part, dict)).strip()
+        return str(content or "").strip()
+    return ""
+
+
+def web_search_fallback_query(context: list[dict]) -> str:
+    text = latest_user_text(context)
+    return re.sub(r"\s+", " ", text).strip()[:180]
+
+
+def inject_web_search_policy(context: list[dict]) -> None:
+    if any(str(message.get("content") or "").startswith("KnowHub web search policy:") for message in context):
+        return
+    insert_at = 0
+    while insert_at < len(context) and context[insert_at].get("role") == "system":
+        insert_at += 1
+    context.insert(insert_at, {"role": "system", "content": WEB_SEARCH_TOOL_POLICY})
+
+
+def inject_web_search_final_answer_context(context: list[dict], sources: list[dict]) -> None:
+    if not sources:
+        return
+    lines = [
+        "Web search sources for the final answer:",
+        "Use the exact source numbers below for inline citations, for example [[1]] or [[2]].",
+        "Place each marker immediately after the specific claim that is directly supported by that source.",
+        "Do not cite a sentence unless the matching source actually supports it.",
+        "If sources are weak, unrelated, or do not support a claim, say so instead of adding a citation.",
+        "Never add a citation marker just to satisfy formatting.",
+        "Do not append a separate markdown source list.",
+    ]
+    for source in sources[:10]:
+        index = int(source.get("index") or 0)
+        title = str(source.get("title") or source.get("url") or "").strip()
+        url = str(source.get("url") or "").strip()
+        snippet = str(source.get("snippet") or "").strip()
+        if not index or not url:
+            continue
+        lines.append(f"[[{index}]] {title}")
+        lines.append(f"URL: {url}")
+        if snippet:
+            lines.append(f"Snippet: {snippet[:700]}")
+    context.append({"role": "system", "content": "\n".join(lines)})
+
+
+def web_search_cache_key(tool_name: str, arguments: dict) -> tuple[str, str] | None:
+    if tool_name == "search_web":
+        query = re.sub(r"\s+", " ", str(arguments.get("query") or "")).strip().lower()
+        return ("search_web", query) if query else None
+    if tool_name == "fetch_url":
+        url = str(arguments.get("url") or "").strip()
+        return ("fetch_url", url) if url else None
+    return None
+
+
+def web_search_status_payload(
+    *,
+    conversation_id: str,
+    assistant_message_id: str,
+    phase: str,
+    tool: str | None = None,
+    arguments: dict | None = None,
+    payload: dict | None = None,
+    detail: str | None = None,
+    error: str | None = None,
+    source_count: int | None = None,
+) -> dict:
+    arguments = arguments or {}
+    data = {
+        "conversation_id": conversation_id,
+        "message_id": assistant_message_id,
+        "phase": phase,
+    }
+    if tool:
+        data["tool"] = tool
+    query = str(arguments.get("query") or "").strip()
+    url = str(arguments.get("url") or "").strip()
+    if query:
+        data["query"] = query
+    if url:
+        data["url"] = url
+    if payload and isinstance(payload.get("results"), list):
+        data["result_count"] = len(payload["results"])
+    if source_count is not None:
+        data["source_count"] = source_count
+    if error:
+        data["error"] = error[:300]
+    if detail:
+        data["detail"] = detail
+    elif phase == "searching" and query:
+        data["detail"] = f"正在搜索：{query}"
+    elif phase == "reading" and url:
+        data["detail"] = f"正在读取：{url}"
+    elif phase == "failed":
+        data["detail"] = "联网搜索失败，正在尝试继续回答。"
+    elif phase == "completed":
+        data["detail"] = "联网搜索已完成，正在整理回答。"
+    else:
+        data["detail"] = "正在联网搜索..."
+    return data
+
+
+async def run_web_search_tool_loop(
+    *,
+    provider: OpenAICompatibleProvider,
+    api_key: str,
+    model: str,
+    context: list[dict],
+    conversation_id: str,
+    assistant_message_id: str,
+    reasoning_effort: str | None,
+) -> tuple[list, dict | None]:
+    config = effective_web_search_config()
+    if not config.configured:
+        raise HTTPException(
+            status_code=400,
+            detail={"code": "WEB_SEARCH_NOT_CONFIGURED", "message": "联网搜索尚未配置 SearXNG，无法启用。"},
+        )
+    tools = web_search_tools()
+    sources: list = []
+    usage_total: dict | None = None
+    executed_calls = 0
+    saw_tool_calls = False
+    had_tool_error = False
+    tool_cache: dict[tuple[str, str], dict] = {}
+    inject_web_search_policy(context)
+    should_force_search = should_force_web_search(context)
+    for _ in range(max(1, config.max_tool_calls)):
+        turn = await provider.tool_call_turn(
+            api_key=api_key,
+            model=model,
+            messages=context,
+            tools=tools,
+            max_completion_tokens=768,
+            reasoning_effort=reasoning_effort,
+            timeout_seconds=max(10, config.timeout_seconds + config.fetch_timeout_seconds),
+        )
+        usage_total = add_usage_totals(usage_total, turn.usage)
+        if not turn.tool_calls:
+            break
+        saw_tool_calls = True
+        if turn.assistant_message:
+            context.append(turn.assistant_message)
+        for call in turn.tool_calls:
+            cache_key = web_search_cache_key(call.name, call.arguments)
+            if cache_key and cache_key in tool_cache:
+                payload = tool_cache[cache_key]
+            elif executed_calls >= config.max_tool_calls:
+                payload = {"ok": False, "error": "Web search tool call limit reached"}
+            else:
+                executed_calls += 1
+                phase = "searching" if call.name == "search_web" else "reading"
+                await publish_conversation_event(
+                    conversation_id,
+                    "web_search_status",
+                    web_search_status_payload(
+                        conversation_id=conversation_id,
+                        assistant_message_id=assistant_message_id,
+                        phase=phase,
+                        tool=call.name,
+                        arguments=call.arguments,
+                    ),
+                )
+                payload = await run_web_search_tool(call.name, call.arguments, config)
+                if cache_key:
+                    tool_cache[cache_key] = payload
+                if payload.get("ok"):
+                    sources.extend(tool_result_sources(payload))
+                    if call.name == "search_web" and isinstance(payload.get("results"), list):
+                        result_count = len(payload["results"])
+                        await publish_conversation_event(
+                            conversation_id,
+                            "web_search_status",
+                            web_search_status_payload(
+                                conversation_id=conversation_id,
+                                assistant_message_id=assistant_message_id,
+                                phase=phase,
+                                tool=call.name,
+                                arguments=call.arguments,
+                                payload=payload,
+                                detail=f"搜索返回 {result_count} 条结果",
+                            ),
+                        )
+                else:
+                    had_tool_error = True
+                    await publish_conversation_event(
+                        conversation_id,
+                        "web_search_status",
+                        web_search_status_payload(
+                            conversation_id=conversation_id,
+                            assistant_message_id=assistant_message_id,
+                            phase="failed",
+                            tool=call.name,
+                            arguments=call.arguments,
+                            payload=payload,
+                            error=str(payload.get("error") or ""),
+                        ),
+                    )
+            context.append(
+                {
+                    "role": "tool",
+                    "tool_call_id": call.id,
+                    "name": call.name,
+                    "content": json_tool_output(payload),
+                }
+            )
+        if executed_calls >= config.max_tool_calls:
+            break
+    if not saw_tool_calls and should_force_search:
+        query = web_search_fallback_query(context)
+        if query:
+            arguments = {"query": query}
+            executed_calls += 1
+            await publish_conversation_event(
+                conversation_id,
+                "web_search_status",
+                web_search_status_payload(
+                    conversation_id=conversation_id,
+                    assistant_message_id=assistant_message_id,
+                    phase="searching",
+                    tool="search_web",
+                    arguments=arguments,
+                ),
+            )
+            payload = await run_web_search_tool("search_web", arguments, config)
+            if payload.get("ok"):
+                sources.extend(tool_result_sources(payload))
+                if isinstance(payload.get("results"), list):
+                    result_count = len(payload["results"])
+                    await publish_conversation_event(
+                        conversation_id,
+                        "web_search_status",
+                        web_search_status_payload(
+                            conversation_id=conversation_id,
+                            assistant_message_id=assistant_message_id,
+                            phase="searching",
+                            tool="search_web",
+                            arguments=arguments,
+                            payload=payload,
+                            detail=f"搜索返回 {result_count} 条结果",
+                        ),
+                    )
+            else:
+                had_tool_error = True
+            context.append(
+                {
+                    "role": "user",
+                    "content": (
+                        "Web search was enabled and the model did not call tools, so the backend ran search_web automatically. "
+                        "Use the formatted results below only if relevant; if they are weak or unrelated, say so.\n\n"
+                        f"{format_search_results_for_context(query, payload)}"
+                    ),
+                }
+            )
+    if executed_calls:
+        failed_without_sources = had_tool_error and not sources
+        source_count = len({getattr(source, "url", "") for source in sources})
+        await publish_conversation_event(
+            conversation_id,
+            "web_search_status",
+            web_search_status_payload(
+                conversation_id=conversation_id,
+                assistant_message_id=assistant_message_id,
+                phase="failed" if failed_without_sources else "completed",
+                source_count=source_count,
+                detail="联网搜索失败，正在整理回答。" if failed_without_sources else "联网搜索已完成，正在整理回答。",
+            ),
+        )
+    return sources, usage_total
+
+
 def model_supports_vision(model: str | None) -> bool:
     settings = get_settings()
     model_name = (model or "").lower()
@@ -406,6 +781,38 @@ def attach_images_to_current_user_message(context: list[dict], image_attachments
     message["content"] = parts
 
 
+async def ensure_conversation_file_tree_attachments(
+    db,
+    user_id: str,
+    conversation_id: str,
+    attachments: list[Attachment],
+) -> None:
+    attachment_ids = unique_ids([attachment.id for attachment in attachments])
+    if not attachment_ids:
+        return
+    existing = (
+        await db.execute(
+            select(ConversationAttachment).where(
+                ConversationAttachment.user_id == user_id,
+                ConversationAttachment.conversation_id == conversation_id,
+                ConversationAttachment.attachment_id.in_(attachment_ids),
+            )
+        )
+    ).scalars().all()
+    existing_ids = {item.attachment_id for item in existing}
+    for attachment in attachments:
+        if attachment.id in existing_ids:
+            continue
+        db.add(
+            ConversationAttachment(
+                user_id=user_id,
+                conversation_id=conversation_id,
+                attachment_id=attachment.id,
+                selected=True,
+            )
+        )
+
+
 async def _latest_completed_message_id(db, user_id: str, conversation_id: str) -> str | None:
     messages = (
         await db.execute(
@@ -420,6 +827,66 @@ async def _latest_completed_message_id(db, user_id: str, conversation_id: str) -
     ).scalars().all()
     branch = build_current_message_branch(messages)
     return branch[-1].id if branch else None
+
+
+async def resolve_message_attachments(
+    db,
+    user_id: str,
+    payload: SendMessageRequest,
+    model: str,
+    settings,
+) -> tuple[list[Attachment], list[Attachment]]:
+    upload_ids = unique_ids(payload.attachment_ids)
+    reference_ids = unique_ids([*unique_ids(payload.referenced_attachment_ids), *upload_ids])
+    lookup_ids = unique_ids([*upload_ids, *reference_ids])
+    if not lookup_ids:
+        return [], []
+
+    rows = (
+        await db.execute(
+            select(Attachment).where(
+                Attachment.user_id == user_id,
+                Attachment.id.in_(lookup_ids),
+                Attachment.deleted_at.is_(None),
+            )
+        )
+    ).scalars().all()
+    rows_by_id = {attachment.id: attachment for attachment in rows}
+    missing_ids = [attachment_id for attachment_id in lookup_ids if attachment_id not in rows_by_id]
+    if missing_ids:
+        raise HTTPException(
+            status_code=400,
+            detail={"code": "ATTACHMENT_NOT_FOUND", "message": "引用的文档不存在或已被删除"},
+        )
+
+    for attachment_id in lookup_ids:
+        attachment = rows_by_id[attachment_id]
+        if attachment.parse_status != "success":
+            raise HTTPException(
+                status_code=400,
+                detail={"code": "ATTACHMENT_NOT_READY", "message": f"{attachment.filename} 尚未解析完成"},
+            )
+
+    upload_attachments = [rows_by_id[attachment_id] for attachment_id in upload_ids]
+    referenced_attachments = [rows_by_id[attachment_id] for attachment_id in reference_ids]
+
+    uploaded_image_count = sum(1 for attachment in upload_attachments if is_image_attachment(attachment))
+    referenced_image_count = sum(1 for attachment in referenced_attachments if is_image_attachment(attachment))
+    if referenced_image_count and not model_supports_vision(model):
+        raise HTTPException(
+            status_code=400,
+            detail={
+                "code": "VISION_MODEL_REQUIRED",
+                "message": "当前模型不支持图片理解，请取消勾选图片或切换到支持视觉的模型后再发送。",
+            },
+        )
+    if referenced_image_count > settings.vision_image_max_count:
+        raise HTTPException(
+            status_code=400,
+            detail={"code": "QUOTA_EXCEEDED", "message": f"每次最多发送 {settings.vision_image_max_count} 张图片"},
+        )
+
+    return upload_attachments, referenced_attachments
 
 
 @dataclass
@@ -474,7 +941,11 @@ async def prepare_chat_messages(user_id: str, payload: SendMessageRequest, conve
                 raise HTTPException(status_code=400, detail={"code": "KEY_REQUIRED", "message": "请先绑定模型 API Key"})
         if conversation_id is None:
             title = (payload.content.strip() or "新对话")[:30]
-            conversation = Conversation(user_id=user_id, title=title)
+            conversation = Conversation(
+                user_id=user_id,
+                title=title,
+                web_search_enabled=bool(payload.web_search_enabled),
+            )
             db.add(conversation)
             await db.flush()
             conversation_id = conversation.id
@@ -483,39 +954,18 @@ async def prepare_chat_messages(user_id: str, payload: SendMessageRequest, conve
             conversation = await db.get(Conversation, conversation_id)
             if not conversation or conversation.user_id != user_id or conversation.deleted_at is not None:
                 raise HTTPException(status_code=403, detail={"code": "FORBIDDEN", "message": "会话不存在"})
+            if payload.web_search_enabled is not None:
+                conversation.web_search_enabled = payload.web_search_enabled
 
-        attachments = []
-        if payload.attachment_ids:
-            rows = (
-                await db.execute(
-                    select(Attachment).where(
-                        Attachment.user_id == user_id,
-                        Attachment.id.in_(payload.attachment_ids),
-                        Attachment.deleted_at.is_(None),
-                    )
-                )
-            ).scalars().all()
-            image_count = sum(1 for attachment in rows if is_image_attachment(attachment))
-            if image_count and not model_supports_vision(model):
-                raise HTTPException(
-                    status_code=400,
-                    detail={
-                        "code": "VISION_MODEL_REQUIRED",
-                        "message": "当前模型不支持图片理解，请切换到支持视觉的模型后再发送图片。",
-                    },
-                )
-            if image_count > settings.vision_image_max_count:
-                raise HTTPException(
-                    status_code=400,
-                    detail={"code": "QUOTA_EXCEEDED", "message": f"每次最多发送 {settings.vision_image_max_count} 张图片"},
-                )
-            for attachment in rows:
-                if attachment.parse_status != "success":
-                    raise HTTPException(
-                        status_code=400,
-                        detail={"code": "ATTACHMENT_NOT_READY", "message": f"{attachment.filename} 尚未解析完成"},
-                    )
-            attachments = rows
+        upload_attachments, referenced_attachments = await resolve_message_attachments(
+            db,
+            user_id,
+            payload,
+            model,
+            settings,
+        )
+        payload.attachment_ids = [attachment.id for attachment in upload_attachments]
+        payload.referenced_attachment_ids = [attachment.id for attachment in referenced_attachments]
 
         parent_message_id = await _latest_completed_message_id(db, user_id, conversation_id)
         if payload.retry_of_message_id:
@@ -541,8 +991,9 @@ async def prepare_chat_messages(user_id: str, payload: SendMessageRequest, conve
         )
         db.add(user_message)
         await db.flush()
-        for attachment in attachments:
+        for attachment in referenced_attachments:
             db.add(MessageAttachment(message_id=user_message.id, attachment_id=attachment.id))
+        await ensure_conversation_file_tree_attachments(db, user_id, conversation_id, referenced_attachments)
 
         assistant = Message(
             user_id=user_id,
@@ -648,6 +1099,7 @@ async def stream_chat(user_id: str, payload: SendMessageRequest, conversation_id
     buffer: list[str] = []
     usage: dict | None = None
     model = payload.model
+    structured_sources: list[dict] = []
 
     async with SessionLocal() as db:
         quota = await db.get(UserQuota, user_id)
@@ -692,7 +1144,11 @@ async def stream_chat(user_id: str, payload: SendMessageRequest, conversation_id
                 return
         if conversation_id is None:
             title = (payload.content.strip() or "新对话")[:30]
-            conversation = Conversation(user_id=user_id, title=title)
+            conversation = Conversation(
+                user_id=user_id,
+                title=title,
+                web_search_enabled=bool(payload.web_search_enabled),
+            )
             db.add(conversation)
             await db.flush()
             conversation_id = conversation.id
@@ -702,47 +1158,30 @@ async def stream_chat(user_id: str, payload: SendMessageRequest, conversation_id
             if not conversation or conversation.user_id != user_id or conversation.deleted_at is not None:
                 yield json_line("error", {"code": "FORBIDDEN", "message": "会话不存在", "retryable": False})
                 return
+            if payload.web_search_enabled is not None:
+                conversation.web_search_enabled = payload.web_search_enabled
 
-        attachments = []
-        if payload.attachment_ids:
-            rows = (
-                await db.execute(
-                    select(Attachment).where(
-                        Attachment.user_id == user_id,
-                        Attachment.id.in_(payload.attachment_ids),
-                        Attachment.deleted_at.is_(None),
-                    )
-                )
-            ).scalars().all()
-            image_count = sum(1 for attachment in rows if is_image_attachment(attachment))
-            if image_count and not model_supports_vision(model):
-                yield json_line(
-                    "error",
-                    {
-                        "code": "VISION_MODEL_REQUIRED",
-                        "message": "当前模型不支持图片理解，请切换到支持视觉的模型后再发送图片。",
-                        "retryable": False,
-                    },
-                )
-                return
-            if image_count > settings.vision_image_max_count:
-                yield json_line(
-                    "error",
-                    {
-                        "code": "QUOTA_EXCEEDED",
-                        "message": f"每次最多发送 {settings.vision_image_max_count} 张图片",
-                        "retryable": False,
-                    },
-                )
-                return
-            for attachment in rows:
-                if attachment.parse_status != "success":
-                    yield json_line(
-                        "error",
-                        {"code": "ATTACHMENT_NOT_READY", "message": f"{attachment.filename} 尚未解析完成", "retryable": True},
-                    )
-                    return
-            attachments = rows
+        try:
+            upload_attachments, referenced_attachments = await resolve_message_attachments(
+                db,
+                user_id,
+                payload,
+                model,
+                settings,
+            )
+        except HTTPException as exc:
+            detail = exc.detail if isinstance(exc.detail, dict) else {}
+            yield json_line(
+                "error",
+                {
+                    "code": detail.get("code", "ATTACHMENT_ERROR"),
+                    "message": detail.get("message", str(exc.detail)),
+                    "retryable": detail.get("code") == "ATTACHMENT_NOT_READY",
+                },
+            )
+            return
+        payload.attachment_ids = [attachment.id for attachment in upload_attachments]
+        payload.referenced_attachment_ids = [attachment.id for attachment in referenced_attachments]
 
         parent_message_id = await _latest_completed_message_id(db, user_id, conversation_id)
         if payload.retry_of_message_id:
@@ -769,8 +1208,9 @@ async def stream_chat(user_id: str, payload: SendMessageRequest, conversation_id
         db.add(user_message)
         await db.flush()
         user_message_id = user_message.id
-        for attachment in attachments:
+        for attachment in referenced_attachments:
             db.add(MessageAttachment(message_id=user_message.id, attachment_id=attachment.id))
+        await ensure_conversation_file_tree_attachments(db, user_id, conversation_id, referenced_attachments)
 
         assistant = Message(
             user_id=user_id,
@@ -847,20 +1287,20 @@ async def stream_chat(user_id: str, payload: SendMessageRequest, conversation_id
     try:
         context_started = time.perf_counter()
         async with SessionLocal() as db:
+            referenced_ids = unique_ids(payload.referenced_attachment_ids)
             context_bundle = await build_context_bundle(
                 db,
                 user_id,
                 conversation_id,
                 payload.content,
-                payload.referenced_attachment_ids or payload.attachment_ids,
+                referenced_ids,
                 retry_of_message_id=payload.retry_of_message_id,
                 current_message_id=user_message_id,
                 model=model,
             )
             context = context_bundle.messages
             image_attachments: list[Attachment] = []
-            if payload.referenced_attachment_ids or payload.attachment_ids:
-                referenced_ids = payload.referenced_attachment_ids or payload.attachment_ids
+            if referenced_ids:
                 rows = (
                     await db.execute(
                         select(Attachment).where(
@@ -1059,24 +1499,30 @@ async def stream_chat(user_id: str, payload: SendMessageRequest, conversation_id
         # Detect empty response — this is almost always a bug or upstream
         # failure, not a legitimate empty reply.  Surface it to the user.
         if not content.strip():
+            message = empty_chat_response_message(model, api_key_row.base_url)
             logger.warning(
                 "stream_chat EMPTY RESPONSE user=%s conv=%s model=%s "
-                "est_tokens=%d usage=%s",
+                "base_url=%s context_messages=%d est_tokens=%d usage=%s",
                 user_id, conversation_id, model,
+                api_key_row.base_url,
+                len(context),
                 context_bundle.prompt_tokens_estimated, usage,
             )
             # Save as failed so it doesn't pollute conversation history
             async with SessionLocal() as db:
                 assistant = await db.get(Message, assistant_message_id)
                 if assistant:
-                    assistant.content = ""
+                    assistant.content = message
                     assistant.status = "failed_no_output"
+                    assistant.completion_tokens = 0
+                    assistant.total_tokens = 0
+                    assistant.tokens_source = None
                     await db.commit()
             yield json_line(
                 "error",
                 {
                     "code": "UPSTREAM_ERROR",
-                    "message": "模型返回了空回复，可能是上游服务暂时异常或本轮输入过长，请稍后重试或减少本轮输入/附件内容",
+                    "message": message,
                     "retryable": True,
                 },
             )
@@ -1104,6 +1550,7 @@ async def stream_chat(user_id: str, payload: SendMessageRequest, conversation_id
                 assistant.total_tokens = total_tokens
                 assistant.tokens_source = tokens_source
                 assistant.first_token_seconds = first_token_seconds
+                assistant.web_search_sources_json = structured_sources or None
                 await db.commit()
         except Exception as exc:
             logger.exception(
@@ -1160,7 +1607,10 @@ async def stream_chat(user_id: str, payload: SendMessageRequest, conversation_id
             {
                 "message_id": assistant_message_id,
                 "conversation_id": conversation_id,
+                "content": content,
                 "status": "completed",
+                "web_search_sources": structured_sources,
+                "webSearchSources": structured_sources,
                 "finished_at": datetime.utcnow().isoformat(),
             },
         )
@@ -1190,28 +1640,33 @@ async def stream_chat(user_id: str, payload: SendMessageRequest, conversation_id
             code = exc.detail.get("code", code)
             message = exc.detail.get("message", message)
         logger.error("stream_chat HTTPException user=%s conv=%s code=%s msg=%s", user_id, conversation_id, code, message)
+        content = "".join(buffer)
+        persisted_content = content or message
         async with SessionLocal() as db:
             assistant = await db.get(Message, assistant_message_id)
             if assistant:
-                assistant.content = "".join(buffer)
-                assistant.status = "failed_partial" if buffer else "failed_no_output"
-                assistant.completion_tokens = estimate_tokens_text(assistant.content)
+                assistant.content = persisted_content
+                assistant.status = "failed_partial" if content else "failed_no_output"
+                assistant.completion_tokens = estimate_tokens_text(content) if content else 0
                 assistant.total_tokens = assistant.completion_tokens
-                assistant.tokens_source = "estimated" if buffer else None
+                assistant.tokens_source = "estimated" if content else None
                 await db.commit()
         yield json_line("error", {"code": code, "message": message, "retryable": True})
     except Exception as exc:
         logger.exception("stream_chat unexpected error user=%s conv=%s", user_id, conversation_id)
+        content = "".join(buffer)
+        message = str(exc)[:500] or "回复生成失败，请稍后重试。"
+        persisted_content = content or message
         async with SessionLocal() as db:
             assistant = await db.get(Message, assistant_message_id)
             if assistant:
-                assistant.content = "".join(buffer)
-                assistant.status = "failed_partial" if buffer else "failed_no_output"
-                assistant.completion_tokens = estimate_tokens_text(assistant.content)
+                assistant.content = persisted_content
+                assistant.status = "failed_partial" if content else "failed_no_output"
+                assistant.completion_tokens = estimate_tokens_text(content) if content else 0
                 assistant.total_tokens = assistant.completion_tokens
-                assistant.tokens_source = "estimated" if buffer else None
+                assistant.tokens_source = "estimated" if content else None
                 await db.commit()
-        yield json_line("error", {"code": "UPSTREAM_ERROR", "message": str(exc)[:500], "retryable": True})
+        yield json_line("error", {"code": "UPSTREAM_ERROR", "message": message, "retryable": True})
 
 
 async def stream_image_generation_chat(
@@ -1783,7 +2238,10 @@ async def run_chat_generation_job(
     request_started = time.perf_counter()
     buffer: list[str] = []
     usage: dict | None = None
+    tool_usage: dict | None = None
+    web_search_sources: list = []
     context_event: dict | None = None
+    web_search_enabled = False
     try:
         assistant_started_at: datetime | None = None
         async with SessionLocal() as db:
@@ -1841,12 +2299,15 @@ async def run_chat_generation_job(
         settings = get_settings()
         async with SessionLocal() as db:
             quota = await db.get(UserQuota, user_id)
+            conversation = await db.get(Conversation, conversation_id)
+            web_search_enabled = bool(conversation.web_search_enabled) if conversation else False
+            referenced_ids = unique_ids(payload.referenced_attachment_ids)
             context_bundle = await build_context_bundle(
                 db,
                 user_id,
                 conversation_id,
                 payload.content,
-                payload.referenced_attachment_ids or payload.attachment_ids,
+                referenced_ids,
                 retry_of_message_id=payload.retry_of_message_id,
                 current_message_id=user_message_id,
                 model=model,
@@ -1854,8 +2315,7 @@ async def run_chat_generation_job(
             context = context_bundle.messages
             context_event = context_bundle.event_data()
             image_attachments: list[Attachment] = []
-            if payload.referenced_attachment_ids or payload.attachment_ids:
-                referenced_ids = payload.referenced_attachment_ids or payload.attachment_ids
+            if referenced_ids:
                 rows = (
                     await db.execute(
                         select(Attachment).where(
@@ -1883,7 +2343,7 @@ async def run_chat_generation_job(
                 allow_auto_choose_multiple=True,
             )
             if not api_key_row:
-                raise HTTPException(status_code=400, detail={"code": "KEY_REQUIRED", "message": "璇峰厛缁戝畾妯″瀷 API Key"})
+                raise HTTPException(status_code=400, detail={"code": "KEY_REQUIRED", "message": "请先绑定模型 API Key"})
             api_key = decrypt_api_key(api_key_row.ciphertext)
 
         await publish_conversation_event(
@@ -1909,6 +2369,19 @@ async def run_chat_generation_job(
         request_reasoning_effort = requested_effort if requested_effort and requested_effort in allowed_reasoning else settings.model_reasoning_effort
 
         provider = OpenAICompatibleProvider(api_key_row.base_url)
+        structured_sources: list[dict] = []
+        if web_search_enabled:
+            web_search_sources, tool_usage = await run_web_search_tool_loop(
+                provider=provider,
+                api_key=api_key,
+                model=model,
+                context=context,
+                conversation_id=conversation_id,
+                assistant_message_id=assistant_message_id,
+                reasoning_effort=request_reasoning_effort,
+            )
+            structured_sources = structured_web_search_sources(web_search_sources)
+            inject_web_search_final_answer_context(context, structured_sources)
         stream = provider.chat_stream(
             api_key=api_key,
             model=model,
@@ -1936,6 +2409,8 @@ async def run_chat_generation_job(
                             "message_id": assistant_message_id,
                             "content": content,
                             "status": "streaming",
+                            "web_search_sources": structured_sources,
+                            "webSearchSources": structured_sources,
                             **message_progress_event_data(assistant),
                         },
                     )
@@ -2010,7 +2485,27 @@ async def run_chat_generation_job(
 
         content = "".join(buffer)
         if not content.strip():
-            await _persist_assistant_partial(assistant_message_id, "", status="failed_no_output")
+            message = empty_chat_response_message(model, api_key_row.base_url)
+            logger.warning(
+                "chat_generation EMPTY RESPONSE user=%s conv=%s msg=%s model=%s "
+                "base_url=%s context_messages=%d est_tokens=%d usage=%s",
+                user_id,
+                conversation_id,
+                assistant_message_id,
+                model,
+                api_key_row.base_url,
+                len(context),
+                context_bundle.prompt_tokens_estimated,
+                usage,
+            )
+            await _persist_assistant_partial(
+                assistant_message_id,
+                message,
+                status="failed_no_output",
+                completion_tokens=0,
+                total_tokens=0,
+                tokens_source=None,
+            )
             async with SessionLocal() as db:
                 assistant = await db.get(Message, assistant_message_id)
             await publish_conversation_event(
@@ -2019,20 +2514,32 @@ async def run_chat_generation_job(
                 {
                     "conversation_id": conversation_id,
                     "message_id": assistant_message_id,
-                    "content": "",
+                    "content": message,
                     "status": "failed_no_output",
                     "code": "UPSTREAM_ERROR",
-                    "message": "妯″瀷杩斿洖浜嗙┖鍥炲",
+                    "message": message,
                     **message_progress_event_data(assistant),
                 },
             )
             return
 
         if usage:
-            prompt_tokens = int(usage.get("prompt_tokens") or 0)
-            completion_tokens = int(usage.get("completion_tokens") or 0)
-            total_tokens = int(usage.get("total_tokens") or prompt_tokens + completion_tokens)
+            combined_usage = add_usage_totals(tool_usage, usage)
             tokens_source = "actual"
+        elif tool_usage:
+            estimated_final_usage = {
+                "prompt_tokens": estimate_tokens_text(json.dumps(context, ensure_ascii=False)),
+                "completion_tokens": estimate_tokens_text(content),
+            }
+            estimated_final_usage["total_tokens"] = estimated_final_usage["prompt_tokens"] + estimated_final_usage["completion_tokens"]
+            combined_usage = add_usage_totals(tool_usage, estimated_final_usage)
+            tokens_source = "estimated"
+        else:
+            combined_usage = None
+        if combined_usage:
+            prompt_tokens = int(combined_usage.get("prompt_tokens") or 0)
+            completion_tokens = int(combined_usage.get("completion_tokens") or 0)
+            total_tokens = int(combined_usage.get("total_tokens") or prompt_tokens + completion_tokens)
         else:
             prompt_tokens = estimate_tokens_text(json.dumps(context, ensure_ascii=False))
             completion_tokens = estimate_tokens_text(content)
@@ -2050,6 +2557,7 @@ async def run_chat_generation_job(
             assistant.total_tokens = total_tokens
             assistant.tokens_source = tokens_source
             assistant.first_token_seconds = first_token_seconds
+            assistant.web_search_sources_json = structured_sources or None
             await db.commit()
             progress = first_token_progress_event_data(assistant)
 
@@ -2100,6 +2608,8 @@ async def run_chat_generation_job(
                 "message_id": assistant_message_id,
                 "content": content,
                 "status": "completed",
+                "web_search_sources": structured_sources,
+                "webSearchSources": structured_sources,
                 "finished_at": datetime.utcnow().isoformat(),
                 **progress,
             },
@@ -2124,9 +2634,10 @@ async def run_chat_generation_job(
         if isinstance(exc.detail, dict):
             code = exc.detail.get("code", code)
         content = "".join(buffer)
+        failed_content = content or message
         await _persist_assistant_partial(
             assistant_message_id,
-            content,
+            failed_content,
             status="failed_partial" if content else "failed_no_output",
             completion_tokens=estimate_tokens_text(content) if content else 0,
             total_tokens=estimate_tokens_text(content) if content else 0,
@@ -2140,7 +2651,7 @@ async def run_chat_generation_job(
             {
                 "conversation_id": conversation_id,
                 "message_id": assistant_message_id,
-                "content": content,
+                "content": failed_content,
                 "status": "failed_partial" if content else "failed_no_output",
                 "code": code,
                 "message": message,
@@ -2150,9 +2661,11 @@ async def run_chat_generation_job(
     except Exception as exc:
         logger.exception("chat_generation unexpected error user=%s conv=%s msg=%s", user_id, conversation_id, assistant_message_id)
         content = "".join(buffer)
+        message = str(exc)[:500] or "回复生成失败，请稍后重试。"
+        failed_content = content or message
         await _persist_assistant_partial(
             assistant_message_id,
-            content,
+            failed_content,
             status="failed_partial" if content else "failed_no_output",
             completion_tokens=estimate_tokens_text(content) if content else 0,
             total_tokens=estimate_tokens_text(content) if content else 0,
@@ -2166,10 +2679,10 @@ async def run_chat_generation_job(
             {
                 "conversation_id": conversation_id,
                 "message_id": assistant_message_id,
-                "content": content,
+                "content": failed_content,
                 "status": "failed_partial" if content else "failed_no_output",
                 "code": "UPSTREAM_ERROR",
-                "message": str(exc)[:500],
+                "message": message,
                 **message_progress_event_data(assistant),
             },
         )

@@ -38,6 +38,26 @@ class AttachmentOut(ApiModel):
     created_at: datetime
 
 
+class ConversationAttachmentOut(ApiModel):
+    id: str
+    conversation_id: str
+    attachment: AttachmentOut
+    selected: bool
+    display_name: str | None = None
+    created_at: datetime
+    updated_at: datetime
+
+
+class AttachConversationFilesRequest(ApiModel):
+    attachment_ids: list[str]
+    selected: bool = True
+
+
+class UpdateConversationAttachmentRequest(ApiModel):
+    selected: bool | None = None
+    display_name: str | None = None
+
+
 class PreviewTextOut(ApiModel):
     attachment_id: str
     filename: str

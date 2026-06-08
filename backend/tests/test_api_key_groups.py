@@ -8,6 +8,7 @@ from app.core.db import Base
 from app.models.entities import ApiKeyGroup, User, UserApiKey, UserQuota
 from app.security.crypto import encrypt_api_key
 from app.schemas.settings import UpdateModelRequest
+from app.providers.openai_compatible import ModelProbeResult
 from app.api.routes import models as model_routes
 from app.services import api_keys
 
@@ -246,10 +247,10 @@ def test_create_api_key_without_group_defaults_to_gpt_chat(monkeypatch):
     async def run():
         engine, db = await _make_session()
 
-        async def fake_probe_models(self, api_key):
-            return ["gpt-5.5"]
+        async def fake_probe_models_with_base_url(self, api_key):
+            return ModelProbeResult(models=["gpt-5.5"], base_url=self.base_url)
 
-        monkeypatch.setattr(api_keys.OpenAICompatibleProvider, "probe_models", fake_probe_models)
+        monkeypatch.setattr(api_keys.OpenAICompatibleProvider, "probe_models_with_base_url", fake_probe_models_with_base_url)
         try:
             await _seed_user(db)
             row = await api_keys.create_api_key_for_user(db, "user-1", "sk-test", name="created", make_active=True)

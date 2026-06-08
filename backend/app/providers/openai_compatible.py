@@ -3,9 +3,11 @@ from __future__ import annotations
 import json
 import logging
 import time
+import asyncio
 from collections.abc import AsyncIterator
 from dataclasses import dataclass
 from typing import Any
+from urllib.parse import urlparse
 
 import httpx
 
@@ -15,6 +17,8 @@ from app.core.errors import api_error
 logger = logging.getLogger("app.providers.openai")
 perf_logger = logging.getLogger("uvicorn.error")
 
+EMBEDDING_RETRYABLE_STATUS_CODES = {408, 409, 425, 429, 500, 502, 503, 504}
+
 
 @dataclass
 class StreamEvent:
@@ -22,57 +26,164 @@ class StreamEvent:
     data: dict[str, Any]
 
 
+@dataclass
+class ModelProbeResult:
+    models: list[str]
+    base_url: str
+
+
+@dataclass
+class ToolCall:
+    id: str
+    name: str
+    arguments: dict[str, Any]
+
+
+@dataclass
+class ToolCallTurnResult:
+    tool_calls: list[ToolCall]
+    assistant_message: dict[str, Any] | None = None
+    usage: dict[str, int] | None = None
+
+
 class OpenAICompatibleProvider:
     def __init__(self, base_url: str | None = None) -> None:
         settings = get_settings()
         self.base_url = (base_url or settings.model_base_url).rstrip("/")
 
-    async def probe_models(self, api_key: str) -> list[str]:
-        headers = {"Authorization": f"Bearer {api_key}"}
+    def _model_probe_base_urls(self) -> list[str]:
+        urls = [self.base_url]
+        parsed = urlparse(self.base_url)
+        if not parsed.path.rstrip("/").endswith("/v1"):
+            urls.append(f"{self.base_url}/v1")
+        return urls
+
+    @staticmethod
+    def _response_preview(text: str) -> str:
+        return " ".join((text or "").strip().split())[:300]
+
+    @staticmethod
+    def _content_type(response: httpx.Response) -> str:
+        return response.headers.get("content-type") or response.headers.get("Content-Type") or ""
+
+    def _model_probe_failure(
+        self,
+        *,
+        base_url: str,
+        reason: str,
+        message: str,
+        status_code: int | None = None,
+        content_type: str | None = None,
+        response_preview: str | None = None,
+    ) -> dict[str, Any]:
+        detail: dict[str, Any] = {
+            "baseUrl": base_url,
+            "url": f"{base_url}/models",
+            "reason": reason,
+            "message": message,
+        }
+        if status_code is not None:
+            detail["status"] = status_code
+        if content_type:
+            detail["contentType"] = content_type
+        if response_preview:
+            detail["responsePreview"] = response_preview
+        return detail
+
+    async def _probe_models_once(self, client: httpx.AsyncClient, base_url: str, headers: dict[str, str]) -> ModelProbeResult | dict[str, Any]:
+        request_url = f"{base_url}/models"
         try:
-            async with httpx.AsyncClient(timeout=30) as client:
-                response = await client.get(f"{self.base_url}/models", headers=headers)
-        except httpx.TimeoutException as exc:
-            raise api_error(
-                "UPSTREAM_ERROR",
-                "Model list request timed out",
-                status_code=504,
-                extra={"baseUrl": self.base_url},
-            ) from exc
+            response = await client.get(request_url, headers=headers)
+        except httpx.TimeoutException:
+            return self._model_probe_failure(
+                base_url=base_url,
+                reason="timeout",
+                message="模型列表请求超时，请检查 BaseURL 是否可访问。",
+            )
         except httpx.RequestError as exc:
-            raise api_error(
-                "UPSTREAM_ERROR",
-                f"Model list request failed: {exc}",
-                extra={"baseUrl": self.base_url},
-            ) from exc
+            return self._model_probe_failure(
+                base_url=base_url,
+                reason="request_error",
+                message=f"模型列表请求失败：{exc}",
+            )
+
+        content_type = self._content_type(response)
+        response_preview = self._response_preview(response.text)
         if response.status_code in {401, 403}:
-            raise api_error("API_KEY_INVALID", "上游拒绝了该 API Key")
+            return self._model_probe_failure(
+                base_url=base_url,
+                reason="api_key_rejected",
+                message="上游拒绝了该 API Key，可能是密钥无效、密钥不属于该 BaseURL，或权限不足。",
+                status_code=response.status_code,
+                content_type=content_type,
+                response_preview=response_preview,
+            )
         if response.status_code >= 400:
-            body = (response.text or "").strip()
-            message = f"Model list request failed with HTTP {response.status_code}"
-            if body:
-                message = f"{message}: {body[:300]}"
-            raise api_error(
-                "UPSTREAM_ERROR",
-                message,
-                extra={"baseUrl": self.base_url, "upstreamStatus": response.status_code},
+            return self._model_probe_failure(
+                base_url=base_url,
+                reason="http_error",
+                message=f"模型列表请求返回 HTTP {response.status_code}。",
+                status_code=response.status_code,
+                content_type=content_type,
+                response_preview=response_preview,
             )
         try:
             payload = response.json()
-        except ValueError as exc:
-            raise api_error(
-                "UPSTREAM_ERROR",
-                "Model list response was not valid JSON",
-                extra={"baseUrl": self.base_url},
-            ) from exc
+        except ValueError:
+            reason = "html_response" if "html" in content_type.lower() or response_preview.lower().startswith("<!doctype html") else "invalid_json"
+            return self._model_probe_failure(
+                base_url=base_url,
+                reason=reason,
+                message="模型列表接口返回的不是 JSON，可能 BaseURL 指向了网页入口，或该服务不是 OpenAI-compatible /models 接口。",
+                status_code=response.status_code,
+                content_type=content_type,
+                response_preview=response_preview,
+            )
         models = self.parse_models(payload)
         if not models:
-            raise api_error(
-                "UPSTREAM_ERROR",
-                "Model list response format is invalid or empty",
-                extra={"baseUrl": self.base_url},
+            return self._model_probe_failure(
+                base_url=base_url,
+                reason="invalid_model_list",
+                message="模型列表响应格式不正确或为空，未找到可用模型 ID。",
+                status_code=response.status_code,
+                content_type=content_type,
+                response_preview=response_preview,
             )
-        return sorted(set(models))
+        return ModelProbeResult(models=sorted(set(models)), base_url=base_url)
+
+    def _raise_model_probe_error(self, attempts: list[dict[str, Any]]) -> None:
+        lines = ["无法从上游获取模型列表，已尝试以下地址："]
+        for index, attempt in enumerate(attempts, start=1):
+            status = f"HTTP {attempt['status']}" if "status" in attempt else "无 HTTP 状态"
+            content_type = f"，Content-Type: {attempt['contentType']}" if attempt.get("contentType") else ""
+            preview = f"，响应片段: {attempt['responsePreview']}" if attempt.get("responsePreview") else ""
+            lines.append(f"{index}. {attempt['url']}：{status}{content_type}。{attempt['message']}{preview}")
+        message = "\n".join(lines)
+        raise api_error(
+            "API_KEY_INVALID" if any(attempt.get("reason") == "api_key_rejected" for attempt in attempts) else "UPSTREAM_ERROR",
+            message,
+            extra={
+                "baseUrl": self.base_url,
+                "attempts": attempts,
+                "reason": "model_probe_failed",
+            },
+        )
+
+    async def probe_models_with_base_url(self, api_key: str) -> ModelProbeResult:
+        headers = {"Authorization": f"Bearer {api_key}"}
+        attempts: list[dict[str, Any]] = []
+        async with httpx.AsyncClient(timeout=30) as client:
+            for base_url in self._model_probe_base_urls():
+                result = await self._probe_models_once(client, base_url, headers)
+                if isinstance(result, ModelProbeResult):
+                    self.base_url = result.base_url
+                    return result
+                attempts.append(result)
+        self._raise_model_probe_error(attempts)
+        raise RuntimeError("unreachable")
+
+    async def probe_models(self, api_key: str) -> list[str]:
+        return (await self.probe_models_with_base_url(api_key)).models
 
     async def embeddings(
         self,
@@ -80,13 +191,25 @@ class OpenAICompatibleProvider:
         model: str,
         input_texts: list[str],
         timeout_seconds: float = 60.0,
+        max_retries: int = 0,
+        retry_initial_delay_seconds: float = 0.5,
     ) -> list[list[float]]:
         if not input_texts:
             return []
         headers = {"Authorization": f"Bearer {api_key}", "Content-Type": "application/json"}
         payload = {"model": model, "input": input_texts}
+        max_retries = max(0, min(int(max_retries or 0), 5))
+        retry_initial_delay_seconds = max(0.0, float(retry_initial_delay_seconds or 0.0))
+        response: httpx.Response | None = None
         async with httpx.AsyncClient(timeout=timeout_seconds) as client:
-            response = await client.post(f"{self.base_url}/embeddings", headers=headers, json=payload)
+            for attempt in range(max_retries + 1):
+                response = await client.post(f"{self.base_url}/embeddings", headers=headers, json=payload)
+                if response.status_code not in EMBEDDING_RETRYABLE_STATUS_CODES or attempt >= max_retries:
+                    break
+                if retry_initial_delay_seconds > 0:
+                    await asyncio.sleep(retry_initial_delay_seconds * (2**attempt))
+        if response is None:
+            raise api_error("UPSTREAM_ERROR", "embedding response missing")
         if response.status_code in {401, 403}:
             raise api_error("API_KEY_INVALID", "涓婃父鎷掔粷浜嗚 API Key")
         if response.status_code >= 400:
@@ -125,6 +248,199 @@ class OpenAICompatibleProvider:
                 if model_id:
                     result.append(str(model_id))
         return result
+
+    def responses_tools(self, tools: list[dict[str, Any]]) -> list[dict[str, Any]]:
+        normalized: list[dict[str, Any]] = []
+        for tool in tools:
+            if tool.get("type") != "function":
+                continue
+            fn = tool.get("function") if isinstance(tool.get("function"), dict) else tool
+            name = fn.get("name")
+            if not name:
+                continue
+            normalized.append(
+                {
+                    "type": "function",
+                    "name": name,
+                    "description": fn.get("description") or "",
+                    "parameters": fn.get("parameters") or {"type": "object", "properties": {}},
+                }
+            )
+        return normalized
+
+    async def tool_call_turn(
+        self,
+        api_key: str,
+        model: str,
+        messages: list[dict[str, Any]],
+        tools: list[dict[str, Any]],
+        max_completion_tokens: int | None = None,
+        reasoning_effort: str | None = None,
+        timeout_seconds: float = 60.0,
+    ) -> ToolCallTurnResult:
+        settings = get_settings()
+        has_multimodal_content = any(isinstance(message.get("content"), list) for message in messages)
+        if settings.model_api_mode == "responses" and not has_multimodal_content:
+            try:
+                return await self.responses_tool_call_turn(
+                    api_key=api_key,
+                    model=model,
+                    messages=messages,
+                    tools=tools,
+                    max_output_tokens=max_completion_tokens,
+                    reasoning_effort=reasoning_effort,
+                    timeout_seconds=timeout_seconds,
+                )
+            except Exception as exc:
+                status = getattr(exc, "status_code", None)
+                if status not in {404, 405}:
+                    raise
+        return await self.chat_completions_tool_call_turn(
+            api_key=api_key,
+            model=model,
+            messages=messages,
+            tools=tools,
+            max_completion_tokens=max_completion_tokens,
+            reasoning_effort=reasoning_effort,
+            timeout_seconds=timeout_seconds,
+        )
+
+    async def chat_completions_tool_call_turn(
+        self,
+        api_key: str,
+        model: str,
+        messages: list[dict[str, Any]],
+        tools: list[dict[str, Any]],
+        max_completion_tokens: int | None = None,
+        reasoning_effort: str | None = None,
+        timeout_seconds: float = 60.0,
+    ) -> ToolCallTurnResult:
+        headers = {"Authorization": f"Bearer {api_key}", "Content-Type": "application/json"}
+        payload: dict[str, Any] = {
+            "model": model,
+            "messages": messages,
+            "stream": False,
+            "tools": tools,
+            "tool_choice": "auto",
+        }
+        if max_completion_tokens:
+            payload["max_completion_tokens"] = max_completion_tokens
+        if reasoning_effort:
+            payload["reasoning_effort"] = reasoning_effort
+        async with httpx.AsyncClient(timeout=timeout_seconds) as client:
+            resp = await client.post(f"{self.base_url}/chat/completions", headers=headers, json=payload)
+        if resp.status_code in {401, 403}:
+            raise api_error("API_KEY_INVALID", "上游拒绝了该 API Key")
+        if resp.status_code >= 400:
+            raise api_error("UPSTREAM_ERROR", resp.text[:500], status_code=resp.status_code)
+        data = resp.json()
+        usage = data.get("usage")
+        choice = (data.get("choices") or [{}])[0]
+        message = choice.get("message") or {}
+        tool_calls = self.parse_chat_tool_calls(message.get("tool_calls"))
+        if not tool_calls:
+            return ToolCallTurnResult(tool_calls=[], assistant_message=None, usage=self.normalize_chat_usage(usage))
+        assistant_message = {
+            "role": "assistant",
+            "content": message.get("content") or "",
+            "tool_calls": message.get("tool_calls") or [],
+        }
+        return ToolCallTurnResult(tool_calls=tool_calls, assistant_message=assistant_message, usage=self.normalize_chat_usage(usage))
+
+    async def responses_tool_call_turn(
+        self,
+        api_key: str,
+        model: str,
+        messages: list[dict[str, Any]],
+        tools: list[dict[str, Any]],
+        max_output_tokens: int | None = None,
+        reasoning_effort: str | None = None,
+        timeout_seconds: float = 60.0,
+    ) -> ToolCallTurnResult:
+        headers = {"Authorization": f"Bearer {api_key}", "Content-Type": "application/json"}
+        instructions, input_items = self.to_responses_input(messages)
+        effective_reasoning = (reasoning_effort or get_settings().model_reasoning_effort).strip().lower()
+        payload: dict[str, Any] = {
+            "model": model,
+            "input": input_items,
+            "stream": False,
+            "tools": self.responses_tools(tools),
+            "tool_choice": "auto",
+            "reasoning": {"effort": effective_reasoning},
+        }
+        if instructions:
+            payload["instructions"] = instructions
+        if max_output_tokens:
+            payload["max_output_tokens"] = max_output_tokens
+        async with httpx.AsyncClient(timeout=timeout_seconds) as client:
+            resp = await client.post(f"{self.base_url}/responses", headers=headers, json=payload)
+        if resp.status_code in {401, 403}:
+            raise api_error("API_KEY_INVALID", "上游拒绝了该 API Key")
+        if resp.status_code >= 400:
+            raise api_error("UPSTREAM_ERROR", resp.text[:500], status_code=resp.status_code)
+        data = resp.json()
+        output_items = [item for item in data.get("output") or [] if isinstance(item, dict)]
+        tool_calls = self.parse_responses_tool_calls(output_items)
+        usage = data.get("usage")
+        if not tool_calls:
+            return ToolCallTurnResult(tool_calls=[], assistant_message=None, usage=self.normalize_responses_usage(usage or {}))
+        assistant_message = {
+            "role": "assistant",
+            "content": "",
+            "tool_calls": [
+                {
+                    "id": call.id,
+                    "type": "function",
+                    "function": {"name": call.name, "arguments": json.dumps(call.arguments, ensure_ascii=False)},
+                }
+                for call in tool_calls
+            ],
+        }
+        return ToolCallTurnResult(tool_calls=tool_calls, assistant_message=assistant_message, usage=self.normalize_responses_usage(usage or {}))
+
+    def parse_chat_tool_calls(self, raw_tool_calls: Any) -> list[ToolCall]:
+        if not isinstance(raw_tool_calls, list):
+            return []
+        calls: list[ToolCall] = []
+        for index, item in enumerate(raw_tool_calls):
+            if not isinstance(item, dict):
+                continue
+            fn = item.get("function") if isinstance(item.get("function"), dict) else {}
+            name = fn.get("name")
+            if not name:
+                continue
+            args_raw = fn.get("arguments") or "{}"
+            try:
+                arguments = json.loads(args_raw) if isinstance(args_raw, str) else dict(args_raw)
+            except (TypeError, ValueError):
+                arguments = {}
+            calls.append(ToolCall(id=str(item.get("id") or f"tool-{index}"), name=str(name), arguments=arguments))
+        return calls
+
+    def parse_responses_tool_calls(self, output_items: list[dict[str, Any]]) -> list[ToolCall]:
+        calls: list[ToolCall] = []
+        for index, item in enumerate(output_items):
+            if item.get("type") not in {"function_call", "tool_call"}:
+                continue
+            name = item.get("name")
+            if not name:
+                continue
+            args_raw = item.get("arguments") or "{}"
+            try:
+                arguments = json.loads(args_raw) if isinstance(args_raw, str) else dict(args_raw)
+            except (TypeError, ValueError):
+                arguments = {}
+            call_id = item.get("call_id") or item.get("id") or f"call-{index}"
+            calls.append(ToolCall(id=str(call_id), name=str(name), arguments=arguments))
+        return calls
+
+    def normalize_chat_usage(self, usage: Any) -> dict[str, int] | None:
+        if not isinstance(usage, dict):
+            return None
+        prompt = int(usage.get("prompt_tokens") or 0)
+        completion = int(usage.get("completion_tokens") or 0)
+        total = int(usage.get("total_tokens") or prompt + completion)
+        return {"prompt_tokens": prompt, "completion_tokens": completion, "total_tokens": total}
 
     async def chat_stream(
         self,
@@ -444,6 +760,34 @@ class OpenAICompatibleProvider:
             content = message.get("content")
             if role == "system":
                 instructions.append(str(content or ""))
+                continue
+            if role == "tool":
+                call_id = message.get("tool_call_id") or message.get("call_id") or message.get("id")
+                if call_id:
+                    input_items.append({
+                        "type": "function_call_output",
+                        "call_id": str(call_id),
+                        "output": str(content or ""),
+                    })
+                continue
+            tool_calls = message.get("tool_calls")
+            if role == "assistant" and isinstance(tool_calls, list) and tool_calls:
+                assistant_text = str(content or "")
+                if assistant_text:
+                    input_items.append({"role": "assistant", "content": assistant_text})
+                for index, tool_call in enumerate(tool_calls):
+                    if not isinstance(tool_call, dict):
+                        continue
+                    fn = tool_call.get("function") if isinstance(tool_call.get("function"), dict) else {}
+                    name = fn.get("name")
+                    if not name:
+                        continue
+                    input_items.append({
+                        "type": "function_call",
+                        "call_id": str(tool_call.get("id") or f"call-{index}"),
+                        "name": str(name),
+                        "arguments": str(fn.get("arguments") or "{}"),
+                    })
                 continue
             input_items.append({
                 "role": "assistant" if role == "assistant" else "user",

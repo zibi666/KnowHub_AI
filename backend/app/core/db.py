@@ -59,6 +59,9 @@ async def ensure_lightweight_migrations(conn) -> None:
         result = await conn.execute(text("SHOW COLUMNS FROM messages LIKE 'first_token_seconds'"))
         if result.first() is None:
             await conn.execute(text("ALTER TABLE messages ADD COLUMN first_token_seconds INT NULL"))
+        result = await conn.execute(text("SHOW COLUMNS FROM messages LIKE 'web_search_sources_json'"))
+        if result.first() is None:
+            await conn.execute(text("ALTER TABLE messages ADD COLUMN web_search_sources_json JSON NULL"))
         result = await conn.execute(text("SHOW COLUMNS FROM api_key_groups LIKE 'purpose'"))
         if result.first() is None:
             await conn.execute(text("ALTER TABLE api_key_groups ADD COLUMN purpose VARCHAR(20) NOT NULL DEFAULT 'none'"))
@@ -71,6 +74,9 @@ async def ensure_lightweight_migrations(conn) -> None:
         result = await conn.execute(text("SHOW COLUMNS FROM user_api_key_entries LIKE 'base_url'"))
         if result.first() is None:
             await conn.execute(text("ALTER TABLE user_api_key_entries ADD COLUMN base_url VARCHAR(500) NULL"))
+        result = await conn.execute(text("SHOW COLUMNS FROM conversations LIKE 'web_search_enabled'"))
+        if result.first() is None:
+            await conn.execute(text("ALTER TABLE conversations ADD COLUMN web_search_enabled BOOLEAN NOT NULL DEFAULT FALSE"))
         return
 
     if settings.database_url.startswith("sqlite"):
@@ -90,6 +96,8 @@ async def ensure_lightweight_migrations(conn) -> None:
         existing_messages = {row[1] for row in result.fetchall()}
         if "first_token_seconds" not in existing_messages:
             await conn.execute(text("ALTER TABLE messages ADD COLUMN first_token_seconds INTEGER"))
+        if "web_search_sources_json" not in existing_messages:
+            await conn.execute(text("ALTER TABLE messages ADD COLUMN web_search_sources_json JSON"))
         result = await conn.execute(text("PRAGMA table_info(api_key_groups)"))
         existing_groups = {row[1] for row in result.fetchall()}
         if "purpose" not in existing_groups:
@@ -102,3 +110,7 @@ async def ensure_lightweight_migrations(conn) -> None:
             await conn.execute(text("ALTER TABLE user_api_key_entries ADD COLUMN endpoint_id VARCHAR(36)"))
         if "base_url" not in existing_keys:
             await conn.execute(text("ALTER TABLE user_api_key_entries ADD COLUMN base_url VARCHAR(500)"))
+        result = await conn.execute(text("PRAGMA table_info(conversations)"))
+        existing_conversations = {row[1] for row in result.fetchall()}
+        if "web_search_enabled" not in existing_conversations:
+            await conn.execute(text("ALTER TABLE conversations ADD COLUMN web_search_enabled BOOLEAN NOT NULL DEFAULT 0"))

@@ -7,21 +7,34 @@ from app.schemas.base import ApiModel
 from app.services.image_generation import is_image_generation_model
 
 
+class WebSearchSourceOut(ApiModel):
+    index: int
+    title: str
+    url: str
+    snippet: str = ""
+    site_name: str | None = None
+    published_at: str | None = None
+    favicon_url: str | None = None
+
+
 class ConversationOut(ApiModel):
     id: str
     title: str
     auto_compaction_enabled: bool
+    web_search_enabled: bool = False
     created_at: datetime
     updated_at: datetime
 
 
 class CreateConversationRequest(ApiModel):
     title: str | None = None
+    web_search_enabled: bool = False
 
 
 class UpdateConversationRequest(ApiModel):
     title: str | None = None
     auto_compaction_enabled: bool | None = None
+    web_search_enabled: bool | None = None
 
 
 class MessageOut(ApiModel):
@@ -45,6 +58,7 @@ class MessageOut(ApiModel):
     started_at: int | None = None
     progress_detail: str | None = None
     progress_phase: str | None = None
+    web_search_sources: list[WebSearchSourceOut] = []
 
     @classmethod
     def from_message(cls, message: object, attachments: list[AttachmentOut] | None = None) -> "MessageOut":
@@ -90,6 +104,7 @@ class MessageOut(ApiModel):
             started_at=runtime_progress["startedAt"] if runtime_progress else None,
             progress_detail=(image_progress or runtime_progress or {}).get("detail"),
             progress_phase=(image_progress or runtime_progress or {}).get("phase"),
+            web_search_sources=getattr(message, "web_search_sources_json", None) or [],
         )
 
 
@@ -122,6 +137,7 @@ class SendMessageRequest(ApiModel):
     attachment_ids: list[str] = []
     referenced_attachment_ids: list[str] = []
     retry_of_message_id: str | None = None
+    web_search_enabled: bool | None = None
     # Per-request overrides. None means "use server default".
     reasoning_effort: str | None = None
     max_completion_tokens: int | None = None

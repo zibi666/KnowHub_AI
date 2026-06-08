@@ -26,12 +26,14 @@ from app.schemas.admin import (
     UpdateUserRequest,
 )
 from app.schemas.auth import UserOut
+from app.schemas.settings import WebSearchSettings, WebSearchTestRequest
 from app.security.passwords import hash_password
 from app.services.api_keys import create_api_key_for_user, has_any_api_key
 from app.services.audit import write_audit
 from app.services.dead_letters import list_dead_letters
 from app.services.maintenance import preview_cleanup, purge_user, run_cleanup
 from app.services.runtime_settings import load_runtime_settings, save_runtime_settings
+from app.services.web_search import effective_web_search_config, save_web_search_settings, search_web
 
 router = APIRouter(prefix="/admin", tags=["admin"])
 
@@ -262,6 +264,26 @@ async def update_reasoning_models(payload: ReasoningModelsRequest, admin: User =
     data["reasoning_models"] = payload.models
     save_runtime_settings(data)
     return {"ok": True, "models": payload.models}
+
+
+@router.get("/settings/web-search", response_model=WebSearchSettings)
+async def get_web_search_settings(admin: User = Depends(get_admin_user)) -> WebSearchSettings:
+    return WebSearchSettings(**effective_web_search_config().__dict__)
+
+
+@router.patch("/settings/web-search", response_model=WebSearchSettings)
+async def update_web_search_settings(payload: WebSearchSettings, admin: User = Depends(get_admin_user)) -> WebSearchSettings:
+    config = save_web_search_settings(payload.model_dump())
+    return WebSearchSettings(**config.__dict__)
+
+
+@router.post("/settings/web-search/test")
+async def test_web_search_settings(payload: WebSearchTestRequest, admin: User = Depends(get_admin_user)):
+    config = effective_web_search_config()
+    if not config.configured:
+        raise api_error("WEB_SEARCH_NOT_CONFIGURED", "Web search is not configured", status_code=400)
+    results = await search_web(payload.query, config)
+    return {"ok": True, "results": [item.__dict__ for item in results]}
 
 
 @router.post("/conversations/{conversation_id}/restore")

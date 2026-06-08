@@ -136,7 +136,7 @@ onMounted(load)
 
     <section class="max-w-5xl mx-auto p-5 space-y-5">
       <div v-if="notice" class="app-card rounded-lg p-3 text-sm text-green-700">{{ notice }}</div>
-      <div v-if="error" class="app-card rounded-lg p-3 text-sm text-red-600">{{ error }}</div>
+      <div v-if="error" class="app-card key-error rounded-lg p-3 text-sm text-red-600">{{ error }}</div>
 
       <form class="app-card rounded-lg p-5 space-y-3" @submit.prevent="createKey">
         <h2 class="font-semibold">添加新密钥</h2>

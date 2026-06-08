@@ -77,12 +77,12 @@ def test_create_api_key_uses_selected_endpoint_base_url(monkeypatch):
         engine, db = await _make_session()
         captured = {}
 
-        async def fake_probe_models(self, api_key):
+        async def fake_probe_models_with_base_url(self, api_key):
             captured["base_url"] = self.base_url
             captured["api_key"] = api_key
-            return ["gpt-5.5"]
+            return openai_compatible.ModelProbeResult(models=["gpt-5.5"], base_url=self.base_url)
 
-        monkeypatch.setattr(api_keys.OpenAICompatibleProvider, "probe_models", fake_probe_models)
+        monkeypatch.setattr(api_keys.OpenAICompatibleProvider, "probe_models_with_base_url", fake_probe_models_with_base_url)
         try:
             await _seed_user(db)
             groups = await api_keys.ensure_default_api_key_groups(db)
@@ -113,14 +113,53 @@ def test_create_api_key_uses_selected_endpoint_base_url(monkeypatch):
     asyncio.run(run())
 
 
+def test_create_api_key_updates_endpoint_when_v1_probe_succeeds(monkeypatch):
+    async def run():
+        engine, db = await _make_session()
+
+        async def fake_probe_models_with_base_url(self, api_key):
+            assert self.base_url == "https://example.test"
+            return openai_compatible.ModelProbeResult(models=["gpt-5.5"], base_url="https://example.test/v1")
+
+        monkeypatch.setattr(api_keys.OpenAICompatibleProvider, "probe_models_with_base_url", fake_probe_models_with_base_url)
+        try:
+            await _seed_user(db)
+            groups = await api_keys.ensure_default_api_key_groups(db)
+            endpoint = await api_keys.create_model_endpoint(
+                db,
+                "user-1",
+                name="Custom",
+                base_url="https://example.test/",
+                make_active=True,
+            )
+
+            row = await api_keys.create_api_key_for_user(
+                db,
+                "user-1",
+                "sk-chat",
+                name="chat",
+                group_id=groups[api_keys.GROUP_PURPOSE_CHAT].id,
+                endpoint_id=endpoint.id,
+            )
+
+            assert endpoint.base_url == "https://example.test/v1"
+            assert row.endpoint_id == endpoint.id
+            assert row.base_url == "https://example.test/v1"
+        finally:
+            await db.close()
+            await engine.dispose()
+
+    asyncio.run(run())
+
+
 def test_create_api_key_replaces_existing_key_for_same_endpoint_purpose(monkeypatch):
     async def run():
         engine, db = await _make_session()
 
-        async def fake_probe_models(self, api_key):
-            return ["gpt-5.5"]
+        async def fake_probe_models_with_base_url(self, api_key):
+            return openai_compatible.ModelProbeResult(models=["gpt-5.5"], base_url=self.base_url)
 
-        monkeypatch.setattr(api_keys.OpenAICompatibleProvider, "probe_models", fake_probe_models)
+        monkeypatch.setattr(api_keys.OpenAICompatibleProvider, "probe_models_with_base_url", fake_probe_models_with_base_url)
         try:
             await _seed_user(db)
             groups = await api_keys.ensure_default_api_key_groups(db)
@@ -343,22 +382,27 @@ def test_set_active_api_key_rejects_inactive_endpoint_key():
 
 
 class _ProbeResponse:
-    def __init__(self, status_code: int, payload=None, text: str = ""):
+    def __init__(self, status_code: int, payload=None, text: str = "", headers=None, json_error: bool = False):
         self.status_code = status_code
         self._payload = payload
         self.text = text
+        self.headers = headers or {}
+        self._json_error = json_error
 
     def raise_for_status(self):
         if self.status_code >= 400:
             raise RuntimeError(f"HTTP {self.status_code}")
 
     def json(self):
+        if self._json_error:
+            raise ValueError("invalid json")
         return self._payload
 
 
 class _ProbeClient:
-    def __init__(self, response: _ProbeResponse):
-        self.response = response
+    def __init__(self, response: _ProbeResponse | list[_ProbeResponse]):
+        self.responses = list(response) if isinstance(response, list) else [response]
+        self.urls: list[str] = []
 
     async def __aenter__(self):
         return self
@@ -367,7 +411,10 @@ class _ProbeClient:
         return False
 
     async def get(self, *args, **kwargs):
-        return self.response
+        self.urls.append(str(args[0]))
+        if len(self.responses) > 1:
+            return self.responses.pop(0)
+        return self.responses[0]
 
 
 def test_probe_models_reports_upstream_http_status(monkeypatch):
@@ -381,7 +428,81 @@ def test_probe_models_reports_upstream_http_status(monkeypatch):
         assert exc.value.status_code == 502
         assert exc.value.detail["code"] == "UPSTREAM_ERROR"
         assert "HTTP 503" in exc.value.detail["message"]
-        assert exc.value.detail["upstreamStatus"] == 503
+        assert exc.value.detail["attempts"][0]["status"] == 503
+
+    asyncio.run(run())
+
+
+def test_probe_models_does_not_try_v1_when_original_succeeds(monkeypatch):
+    client = _ProbeClient(_ProbeResponse(200, payload={"data": [{"id": "gpt-5.5"}]}))
+    monkeypatch.setattr(openai_compatible.httpx, "AsyncClient", lambda *args, **kwargs: client)
+
+    async def run():
+        result = await OpenAICompatibleProvider("https://example.test").probe_models_with_base_url("sk-test")
+
+        assert result.models == ["gpt-5.5"]
+        assert result.base_url == "https://example.test"
+        assert client.urls == ["https://example.test/models"]
+
+    asyncio.run(run())
+
+
+def test_probe_models_falls_back_to_v1_after_html_response(monkeypatch):
+    client = _ProbeClient(
+        [
+            _ProbeResponse(200, text="<!doctype html><html></html>", headers={"content-type": "text/html"}, json_error=True),
+            _ProbeResponse(200, payload={"data": [{"id": "gpt-5.5"}]}, headers={"content-type": "application/json"}),
+        ]
+    )
+    monkeypatch.setattr(openai_compatible.httpx, "AsyncClient", lambda *args, **kwargs: client)
+
+    async def run():
+        provider = OpenAICompatibleProvider("https://example.test")
+        result = await provider.probe_models_with_base_url("sk-test")
+
+        assert result.models == ["gpt-5.5"]
+        assert result.base_url == "https://example.test/v1"
+        assert provider.base_url == "https://example.test/v1"
+        assert client.urls == ["https://example.test/models", "https://example.test/v1/models"]
+
+    asyncio.run(run())
+
+
+def test_probe_models_does_not_append_v1_twice(monkeypatch):
+    client = _ProbeClient(_ProbeResponse(401, payload={"error": "bad key"}, text="bad key"))
+    monkeypatch.setattr(openai_compatible.httpx, "AsyncClient", lambda *args, **kwargs: client)
+
+    async def run():
+        with pytest.raises(HTTPException) as exc:
+            await OpenAICompatibleProvider("https://example.test/v1").probe_models("sk-test")
+
+        assert exc.value.detail["code"] == "API_KEY_INVALID"
+        assert client.urls == ["https://example.test/v1/models"]
+
+    asyncio.run(run())
+
+
+def test_probe_models_summarizes_all_failed_attempts(monkeypatch):
+    client = _ProbeClient(
+        [
+            _ProbeResponse(200, text="<html>home</html>", headers={"content-type": "text/html"}, json_error=True),
+            _ProbeResponse(404, payload={"error": "missing"}, text="missing", headers={"content-type": "text/plain"}),
+        ]
+    )
+    monkeypatch.setattr(openai_compatible.httpx, "AsyncClient", lambda *args, **kwargs: client)
+
+    async def run():
+        with pytest.raises(HTTPException) as exc:
+            await OpenAICompatibleProvider("https://example.test").probe_models("sk-test")
+
+        detail = exc.value.detail
+        assert detail["code"] == "UPSTREAM_ERROR"
+        assert "已尝试以下地址" in detail["message"]
+        assert "https://example.test/models" in detail["message"]
+        assert "https://example.test/v1/models" in detail["message"]
+        assert len(detail["attempts"]) == 2
+        assert detail["attempts"][0]["reason"] == "html_response"
+        assert detail["attempts"][1]["status"] == 404
 
     asyncio.run(run())
 
@@ -396,7 +517,8 @@ def test_probe_models_rejects_invalid_model_list_shape(monkeypatch):
 
         assert exc.value.status_code == 502
         assert exc.value.detail["code"] == "UPSTREAM_ERROR"
-        assert "model list" in exc.value.detail["message"].lower()
+        assert "模型列表" in exc.value.detail["message"]
+        assert exc.value.detail["attempts"][0]["reason"] == "invalid_model_list"
 
     asyncio.run(run())
 

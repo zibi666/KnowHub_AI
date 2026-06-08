@@ -12,6 +12,8 @@ export interface Conversation {
   id: string
   title: string
   autoCompactionEnabled: boolean
+  webSearchEnabled?: boolean
+  web_search_enabled?: boolean
   createdAt: string
   updatedAt: string
 }
@@ -33,6 +35,7 @@ export interface Message {
   firstTokenSeconds?: number | null
   first_token_seconds?: number | null
   createdAt: string
+  created_at?: string
   attachments?: Attachment[]
   generatedImageSize?: string
   imageProgress?: ImageProgress
@@ -45,6 +48,46 @@ export interface Message {
   progress_detail?: string
   progressPhase?: string
   progress_phase?: string
+  webSearchSources?: WebSearchSource[]
+  web_search_sources?: WebSearchSource[]
+}
+
+export interface WebSearchSource {
+  index: number
+  title: string
+  url: string
+  snippet?: string
+  siteName?: string | null
+  site_name?: string | null
+  publishedAt?: string | null
+  published_at?: string | null
+  faviconUrl?: string | null
+  favicon_url?: string | null
+  displayUrl?: string
+  display_url?: string
+}
+
+export interface WebSearchStatus {
+  enabled: boolean
+  configured: boolean
+}
+
+export interface WebSearchSettings {
+  enabled: boolean
+  searxngBaseUrl?: string | null
+  searxng_base_url?: string | null
+  resultCount: number
+  result_count?: number
+  language: string
+  safesearch: string
+  timeoutSeconds: number
+  timeout_seconds?: number
+  fetchTimeoutSeconds: number
+  fetch_timeout_seconds?: number
+  maxToolCalls: number
+  max_tool_calls?: number
+  fetchMaxChars: number
+  fetch_max_chars?: number
 }
 
 export interface SendMessageResponse {
@@ -96,6 +139,20 @@ export interface Attachment {
   previewText?: string | null
   previewDataUrl?: string
   createdAt?: string
+}
+
+export interface ConversationAttachment {
+  id: string
+  conversationId: string
+  conversation_id?: string
+  attachment: Attachment
+  selected: boolean
+  displayName?: string | null
+  display_name?: string | null
+  createdAt: string
+  created_at?: string
+  updatedAt: string
+  updated_at?: string
 }
 
 export interface ImageGenerationSettings {

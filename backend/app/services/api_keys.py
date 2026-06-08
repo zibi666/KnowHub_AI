@@ -319,6 +319,35 @@ async def load_model_endpoint(db: AsyncSession, user_id: str, endpoint_id: str |
     return await ensure_default_model_endpoint(db, user_id)
 
 
+async def apply_probe_base_url(
+    db: AsyncSession,
+    user_id: str,
+    endpoint: UserModelEndpoint,
+    probed_base_url: str,
+) -> UserModelEndpoint:
+    if endpoint.base_url == probed_base_url:
+        return endpoint
+    duplicate = (
+        await db.execute(
+            select(UserModelEndpoint).where(
+                UserModelEndpoint.user_id == user_id,
+                UserModelEndpoint.base_url == probed_base_url,
+                UserModelEndpoint.status == "active",
+                UserModelEndpoint.id != endpoint.id,
+            )
+        )
+    ).scalars().one_or_none()
+    if duplicate:
+        if endpoint.is_active:
+            endpoint.is_active = False
+            duplicate.is_active = True
+        await db.flush()
+        return duplicate
+    endpoint.base_url = probed_base_url
+    await db.flush()
+    return endpoint
+
+
 async def set_active_model_endpoint(
     db: AsyncSession,
     user_id: str,
@@ -786,11 +815,17 @@ async def create_api_key_for_user(
     group = await db.get(ApiKeyGroup, group_id)
     endpoint = await load_model_endpoint(db, user_id, endpoint_id)
     provider = OpenAICompatibleProvider(endpoint.base_url)
+    try:
+        probe_result = await provider.probe_models_with_base_url(api_key)
+        models = probe_result.models
     except Exception as exc:
         endpoint.last_probe_error = str(exc)
         endpoint.probed_at = datetime.utcnow()
         await db.commit()
         raise
+    endpoint = await apply_probe_base_url(db, user_id, endpoint, probe_result.base_url)
+    endpoint.last_probe_error = None
+    endpoint.probed_at = datetime.utcnow()
     slot_group_ids = await key_slot_group_ids(db, group)
     existing_query = select(UserApiKey).where(
         UserApiKey.user_id == user_id,

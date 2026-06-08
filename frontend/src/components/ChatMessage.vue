@@ -1,12 +1,14 @@
 <script setup lang="ts">
 import { computed, nextTick, onMounted, onUnmounted, ref, watch, type CSSProperties } from 'vue'
-import { Check, ChevronDown, ChevronUp, Copy, Download, FileText } from 'lucide-vue-next'
+import { Check, ChevronDown, ChevronUp, Copy, Download, FileText, Search } from 'lucide-vue-next'
 import MarkdownMessage from './MarkdownMessage.vue'
-import type { Attachment, Message } from '../types'
+import SourceIcon from './SourceIcon.vue'
+import type { Attachment, Message, WebSearchSource } from '../types'
 import { copyText } from '../utils/clipboard'
+import { messageWebSearchSources, sourceOpenUrl, stripLegacySourcesMarkdown } from '../utils/sources'
 
 const props = defineProps<{ message: Message }>()
-const emit = defineEmits<{ previewAttachment: [attachment: Attachment] }>()
+const emit = defineEmits<{ previewAttachment: [attachment: Attachment]; openSources: [message: Message, sources: WebSearchSource[]] }>()
 
 const USER_COLLAPSE_VISIBLE_LINES = 3
 
@@ -29,12 +31,13 @@ const showThinkingPanel = computed(
 )
 const emptyAssistantFailureText = computed(() => {
   if (props.message.content.trim()) return ''
-  if (props.message.status === 'failed_no_output') return '回复生成失败，请重试'
+  if (props.message.status === 'failed_no_output') return '回复生成失败：上游没有返回可显示文本，可能是模型服务或代理临时异常，请重试或切换模型。'
   if (props.message.status === 'failed_partial') return '回复生成中断，请重试'
   if (props.message.status === 'interrupted') return '回复已中断'
   return ''
 })
 const showAssistantCopyAction = computed(() => props.message.role === 'assistant' && !isStreaming.value && props.message.content.trim())
+const thinkingStatusText = computed(() => props.message.progressDetail || props.message.progress_detail || '正在思考')
 const canCollapse = computed(() => isUserMessage.value && !isStreaming.value && userMessageOverflows.value)
 const isCollapsed = computed(() => canCollapse.value && !isExpanded.value)
 const collapseButtonLabel = computed(() => (isCollapsed.value ? '展开全文' : '收起'))
@@ -48,6 +51,11 @@ const collapsibleClasses = computed(() => ({
 }))
 const imageAttachments = computed(() => (props.message.attachments || []).filter(isImageAttachment))
 const fileAttachments = computed(() => (props.message.attachments || []).filter((attachment) => !isImageAttachment(attachment)))
+const webSearchSources = computed(() => messageWebSearchSources(props.message))
+const hasWebSearchSources = computed(() => props.message.role === 'assistant' && webSearchSources.value.length > 0)
+const assistantMarkdownContent = computed(() =>
+  hasWebSearchSources.value ? stripLegacySourcesMarkdown(props.message.content) : props.message.content
+)
 const showGeneratedImageProgress = computed(() => props.message.role === 'assistant' && props.message.status === 'streaming' && props.message.imageProgress)
 const generatedImageFrameStyle = computed(() => generatedImageFrameFromSize(props.message.imageProgress?.size || props.message.generatedImageSize))
 const generatedImageProgressSrc = computed(() => {
@@ -73,16 +81,21 @@ function formatElapsedSeconds(seconds: number | undefined) {
   const rest = Math.floor(seconds % 60)
   return `${minutes} 分 ${String(rest).padStart(2, '0')} 秒`
 }
+function normalizeStartedAt(value: number | undefined) {
+  if (!Number.isFinite(value) || value === undefined || value <= 0) return undefined
+  return value < 10_000_000_000 ? value * 1000 : value
+}
 const streamingElapsed = computed(() => {
   if (props.message.status !== 'streaming' || props.message.imageProgress || props.message.content.trim()) return ''
-  const startedAt = props.message.startedAt || props.message.started_at
+  const startedAt = normalizeStartedAt(props.message.startedAt ?? props.message.started_at)
   const baseElapsed = props.message.elapsedSeconds ?? props.message.elapsed_seconds ?? 0
   const seconds = startedAt ? Math.max(baseElapsed || 0, Math.floor((nowMs.value - startedAt) / 1000)) : baseElapsed
   return formatElapsedSeconds(seconds)
 })
 const finalElapsed = computed(() => {
   if (props.message.imageProgress) return ''
-  const elapsed = props.message.firstTokenSeconds ?? props.message.first_token_seconds ?? props.message.elapsedSeconds ?? props.message.elapsed_seconds
+  if (props.message.status === 'streaming') return ''
+  const elapsed = props.message.firstTokenSeconds ?? props.message.first_token_seconds ?? undefined
   return formatElapsedSeconds(elapsed)
 })
 const generatedImageProgressLabel = computed(() => {
@@ -208,7 +221,7 @@ function attachmentKindClass(item: Attachment) {
 }
 
 async function copyMessage() {
-  const content = props.message.content
+  const content = assistantMarkdownContent.value || props.message.content
   if (!content.trim()) return
 
   try {
@@ -223,6 +236,22 @@ async function copyMessage() {
     copyState.value = 'idle'
     copyStateTimer = null
   }, 1200)
+}
+
+function openSource(source: WebSearchSource) {
+  const url = sourceOpenUrl(source)
+  if (!url) return
+  window.open(url, '_blank', 'noopener,noreferrer')
+}
+
+function openSourcesPanel() {
+  if (!hasWebSearchSources.value) return
+  emit('openSources', props.message, webSearchSources.value)
+}
+
+function handleCitationClick(index: number) {
+  const source = webSearchSources.value.find((item) => Number(item.index) === index)
+  if (source) openSource(source)
 }
 
 function measureUserMessageOverflow() {
@@ -426,19 +455,33 @@ onUnmounted(() => {
           </div>
         </div>
         <div v-else-if="showThinkingPanel" class="thinking-panel">
-          <div class="thinking-label">正在思考</div>
+          <div class="thinking-label">{{ thinkingStatusText }}</div>
           <div class="thinking-bars" aria-hidden="true">
             <span />
             <span />
             <span />
           </div>
-          <div v-if="streamingElapsed" class="thinking-elapsed">思考中 {{ streamingElapsed }}</div>
+          <div v-if="streamingElapsed" class="thinking-elapsed">已用时 {{ streamingElapsed }}</div>
         </div>
         <div v-else-if="emptyAssistantFailureText" class="message-status-text">
           {{ emptyAssistantFailureText }}
         </div>
         <template v-else>
           <div v-if="finalElapsed" class="thinking-final-elapsed">思考用时 {{ finalElapsed }}</div>
+          <button
+            v-if="hasWebSearchSources"
+            class="source-read-strip"
+            type="button"
+            :aria-label="`查看已阅读的 ${webSearchSources.length} 个网页`"
+            :title="`查看已阅读的 ${webSearchSources.length} 个网页`"
+            @click="openSourcesPanel"
+          >
+            <span class="source-read-icon"><Search :size="15" /></span>
+            <span class="source-read-text">已阅读 {{ webSearchSources.length }} 个网页</span>
+            <span class="source-favicon-stack" aria-hidden="true">
+              <SourceIcon v-for="source in webSearchSources.slice(0, 4)" :key="source.url" :source="source" />
+            </span>
+          </button>
           <div class="message-collapsible" :class="collapsibleClasses">
             <button
               v-if="canCollapse"
@@ -452,10 +495,28 @@ onUnmounted(() => {
               <ChevronUp v-else :size="16" />
             </button>
             <div class="message-collapsible-content">
-              <MarkdownMessage :content="message.content" :live="message.status === 'streaming'" />
+              <MarkdownMessage
+                :content="assistantMarkdownContent"
+                :live="message.status === 'streaming'"
+                :citation-sources="webSearchSources"
+                @citation-click="handleCitationClick"
+              />
               <span v-if="message.status === 'streaming'" class="typing-cursor" />
             </div>
           </div>
+          <button
+            v-if="hasWebSearchSources"
+            class="source-bottom-pill"
+            type="button"
+            :aria-label="`查看 ${webSearchSources.length} 个来源网页`"
+            :title="`查看 ${webSearchSources.length} 个来源网页`"
+            @click="openSourcesPanel"
+          >
+            <span class="source-favicon-stack compact" aria-hidden="true">
+              <SourceIcon v-for="source in webSearchSources.slice(0, 4)" :key="source.url" :source="source" />
+            </span>
+            <span>{{ webSearchSources.length }} 个网页</span>
+          </button>
         </template>
         <div v-if="showAssistantCopyAction" class="message-assistant-actions" aria-live="polite">
           <button

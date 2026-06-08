@@ -139,6 +139,7 @@ class Conversation(Base, TimestampMixin):
     compaction_pending: Mapped[bool] = mapped_column(Boolean, default=False, nullable=False)
     compaction_pending_since: Mapped[datetime | None] = mapped_column(DateTime(timezone=False), nullable=True)
     auto_compaction_enabled: Mapped[bool] = mapped_column(Boolean, default=True, nullable=False)
+    web_search_enabled: Mapped[bool] = mapped_column(Boolean, default=False, nullable=False)
 
     messages: Mapped[list[Message]] = relationship(back_populates="conversation", cascade="all, delete-orphan")
 
@@ -160,6 +161,7 @@ class Message(Base, TimestampMixin):
     total_tokens: Mapped[int] = mapped_column(Integer, default=0, nullable=False)
     tokens_source: Mapped[str | None] = mapped_column(String(20), nullable=True)
     first_token_seconds: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    web_search_sources_json: Mapped[list | None] = mapped_column(JSON, nullable=True)
 
     conversation: Mapped[Conversation] = relationship(back_populates="messages")
     attachments: Mapped[list[MessageAttachment]] = relationship(cascade="all, delete-orphan")
@@ -171,6 +173,19 @@ class MessageAttachment(Base):
 
     message_id: Mapped[str] = mapped_column(ForeignKey("messages.id", ondelete="CASCADE"), primary_key=True)
     attachment_id: Mapped[str] = mapped_column(ForeignKey("attachments.id", ondelete="CASCADE"), primary_key=True)
+
+
+class ConversationAttachment(Base, TimestampMixin):
+    __tablename__ = "conversation_attachments"
+    __table_args__ = (UniqueConstraint("conversation_id", "attachment_id", name="uq_conversation_attachment"),)
+
+    id: Mapped[str] = mapped_column(String(36), primary_key=True, default=uuid_str)
+    conversation_id: Mapped[str] = mapped_column(ForeignKey("conversations.id", ondelete="CASCADE"), index=True, nullable=False)
+    attachment_id: Mapped[str] = mapped_column(ForeignKey("attachments.id", ondelete="CASCADE"), index=True, nullable=False)
+    user_id: Mapped[str] = mapped_column(ForeignKey("users.id", ondelete="CASCADE"), index=True, nullable=False)
+    selected: Mapped[bool] = mapped_column(Boolean, default=True, nullable=False)
+    display_name: Mapped[str | None] = mapped_column(String(255), nullable=True)
+    removed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=False), nullable=True)
 
 
 class ConversationCompaction(Base, TimestampMixin):

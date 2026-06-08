@@ -22,6 +22,7 @@ const deleteConfirmUser = ref<User | null>(null)
 const deleteConfirming = ref(false)
 const reasoningModels = ref('')
 const notice = ref('')
+const error = ref('')
 let noticeTimer: ReturnType<typeof window.setTimeout> | null = null
 const userDrafts = ref<Record<string, { username: string; role: string; status: string; password: string }>>({})
 const quotaDrafts = ref<Record<string, { uploadRateLimitPerHour: number }>>({})
@@ -84,12 +85,18 @@ function editableUserStatus(status: string) {
 }
 
 function showNotice(message: string) {
+  error.value = ''
   notice.value = message
   if (noticeTimer) window.clearTimeout(noticeTimer)
   noticeTimer = window.setTimeout(() => {
     notice.value = ''
     noticeTimer = null
   }, 2600)
+}
+
+function showError(message: string) {
+  notice.value = ''
+  error.value = message
 }
 
 function draftFor(user: User) {
@@ -247,18 +254,22 @@ async function loadSelectedUserKeys(user: User) {
 
 async function createAdminKey() {
   if (!selectedKeyUser.value) return
-  await apiFetch<ApiKeyEntry>(`/admin/users/${selectedKeyUser.value.id}/api-keys`, {
-    method: 'POST',
-    body: JSON.stringify({
-      name: adminKeyDraft.value.name,
-      apiKey: adminKeyDraft.value.apiKey,
-      groupId: adminKeyDraft.value.groupId || defaultChatGroup.value?.id || null,
-      makeActive: adminKeyDraft.value.makeActive
+  try {
+    await apiFetch<ApiKeyEntry>(`/admin/users/${selectedKeyUser.value.id}/api-keys`, {
+      method: 'POST',
+      body: JSON.stringify({
+        name: adminKeyDraft.value.name,
+        apiKey: adminKeyDraft.value.apiKey,
+        groupId: adminKeyDraft.value.groupId || defaultChatGroup.value?.id || null,
+        makeActive: adminKeyDraft.value.makeActive
+      })
     })
-  })
-  adminKeyDraft.value = { name: '默认密钥', apiKey: '', groupId: defaultChatGroup.value?.id || '', makeActive: true }
-  showNotice('用户密钥已添加')
-  await load()
+    adminKeyDraft.value = { name: '默认密钥', apiKey: '', groupId: defaultChatGroup.value?.id || '', makeActive: true }
+    showNotice('用户密钥已添加')
+    await load()
+  } catch (err) {
+    showError(err instanceof Error ? err.message : '添加用户密钥失败')
+  }
 }
 
 async function saveAdminKey(key: ApiKeyEntry) {
@@ -342,6 +353,9 @@ onBeforeUnmount(() => {
     </header>
     <Transition name="admin-toast">
       <div v-if="notice" class="admin-toast" role="status" aria-live="polite">{{ notice }}</div>
+    </Transition>
+    <Transition name="admin-toast">
+      <div v-if="error" class="admin-toast error" role="alert" aria-live="assertive">{{ error }}</div>
     </Transition>
     <section class="max-w-6xl mx-auto p-5 space-y-5">
       <div class="grid grid-cols-5 gap-3">

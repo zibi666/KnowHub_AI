@@ -13,7 +13,13 @@ from arq import create_pool
 from app.core.db import get_session
 from app.core.deps import get_current_user
 from app.core.errors import api_error
-from app.models.entities import Attachment, Conversation, ConversationCompaction, CosTrafficDaily, Message, MessageAttachment, UsageDaily, User
+from app.models.entities import Attachment, Conversation, ConversationAttachment, ConversationCompaction, CosTrafficDaily, Message, MessageAttachment, UsageDaily, User
+from app.schemas.attachments import (
+    AttachConversationFilesRequest,
+    AttachmentOut,
+    ConversationAttachmentOut,
+    UpdateConversationAttachmentRequest,
+)
 from app.schemas.chat import (
     ConversationOut,
     ConversationSearchResult,
@@ -77,6 +83,127 @@ async def hydrate_single_message(db: AsyncSession, message_id: str, user_id: str
         raise api_error("FORBIDDEN", "消息不存在")
     rows = await hydrate_message_attachments(db, [message], user_id)
     return rows[0]
+
+
+async def require_conversation(db: AsyncSession, conversation_id: str, user_id: str) -> Conversation:
+    conversation = await db.get(Conversation, conversation_id)
+    if not conversation or conversation.user_id != user_id or conversation.deleted_at is not None:
+        raise api_error("FORBIDDEN", "会话不存在")
+    return conversation
+
+
+async def ensure_conversation_attachment_rows(
+    db: AsyncSession,
+    user_id: str,
+    conversation_id: str,
+    attachment_ids: list[str],
+    *,
+    selected: bool = True,
+    update_existing_selected: bool = False,
+) -> None:
+    ordered_ids: list[str] = []
+    seen: set[str] = set()
+    for item in attachment_ids:
+        attachment_id = (item or "").strip()
+        if not attachment_id or attachment_id in seen:
+            continue
+        ordered_ids.append(attachment_id)
+        seen.add(attachment_id)
+    if not ordered_ids:
+        return
+    attachments = (
+        await db.execute(
+            select(Attachment).where(
+                Attachment.user_id == user_id,
+                Attachment.id.in_(ordered_ids),
+                Attachment.deleted_at.is_(None),
+            )
+        )
+    ).scalars().all()
+    by_id = {attachment.id: attachment for attachment in attachments}
+    missing_ids = [attachment_id for attachment_id in ordered_ids if attachment_id not in by_id]
+    if missing_ids:
+        raise api_error("ATTACHMENT_NOT_FOUND", "附件不存在或已被删除")
+    existing = (
+        await db.execute(
+            select(ConversationAttachment).where(
+                ConversationAttachment.user_id == user_id,
+                ConversationAttachment.conversation_id == conversation_id,
+                ConversationAttachment.attachment_id.in_(ordered_ids),
+            )
+        )
+    ).scalars().all()
+    existing_ids = {item.attachment_id for item in existing}
+    if update_existing_selected:
+        for item in existing:
+            item.selected = selected
+            item.removed_at = None
+    for attachment_id in ordered_ids:
+        if attachment_id not in existing_ids:
+            db.add(
+                ConversationAttachment(
+                    user_id=user_id,
+                    conversation_id=conversation_id,
+                    attachment_id=attachment_id,
+                    selected=selected,
+                )
+            )
+
+
+async def backfill_conversation_attachments(db: AsyncSession, user_id: str, conversation_id: str) -> None:
+    rows = (
+        await db.execute(
+            select(MessageAttachment.attachment_id)
+            .join(Message, Message.id == MessageAttachment.message_id)
+            .join(Attachment, Attachment.id == MessageAttachment.attachment_id)
+            .where(
+                Message.user_id == user_id,
+                Message.conversation_id == conversation_id,
+                Attachment.user_id == user_id,
+                Attachment.deleted_at.is_(None),
+            )
+        )
+    ).all()
+    await ensure_conversation_attachment_rows(
+        db,
+        user_id,
+        conversation_id,
+        [attachment_id for (attachment_id,) in rows],
+        selected=True,
+    )
+
+
+async def load_conversation_attachment_rows(
+    db: AsyncSession,
+    user_id: str,
+    conversation_id: str,
+) -> list[ConversationAttachmentOut]:
+    rows = (
+        await db.execute(
+            select(ConversationAttachment, Attachment)
+            .join(Attachment, Attachment.id == ConversationAttachment.attachment_id)
+            .where(
+                ConversationAttachment.user_id == user_id,
+                ConversationAttachment.conversation_id == conversation_id,
+                Attachment.user_id == user_id,
+                Attachment.deleted_at.is_(None),
+                ConversationAttachment.removed_at.is_(None),
+            )
+            .order_by(ConversationAttachment.created_at.asc(), ConversationAttachment.id.asc())
+        )
+    ).all()
+    return [
+        ConversationAttachmentOut(
+            id=row.id,
+            conversation_id=row.conversation_id,
+            attachment=AttachmentOut.model_validate(attachment),
+            selected=row.selected,
+            display_name=row.display_name,
+            created_at=row.created_at,
+            updated_at=row.updated_at,
+        )
+        for row, attachment in rows
+    ]
 
 
 @router.get("/conversations", response_model=list[ConversationOut])
@@ -155,7 +282,11 @@ async def create_conversation(
     user: User = Depends(get_current_user),
     db: AsyncSession = Depends(get_session),
 ):
-    conversation = Conversation(user_id=user.id, title=payload.title or "新对话")
+    conversation = Conversation(
+        user_id=user.id,
+        title=payload.title or "新对话",
+        web_search_enabled=payload.web_search_enabled,
+    )
     db.add(conversation)
     await db.commit()
     await db.refresh(conversation)
@@ -176,6 +307,8 @@ async def update_conversation(
         conversation.title = payload.title
     if payload.auto_compaction_enabled is not None:
         conversation.auto_compaction_enabled = payload.auto_compaction_enabled
+    if payload.web_search_enabled is not None:
+        conversation.web_search_enabled = payload.web_search_enabled
     await db.commit()
     await db.refresh(conversation)
     return conversation
@@ -194,6 +327,107 @@ async def delete_conversation(
 
     conversation.deleted_at = datetime.utcnow()
     await db.commit()
+    return {"ok": True}
+
+
+@router.get("/conversations/{conversation_id}/attachments", response_model=list[ConversationAttachmentOut])
+async def list_conversation_attachments(
+    conversation_id: str,
+    user: User = Depends(get_current_user),
+    db: AsyncSession = Depends(get_session),
+):
+    await require_conversation(db, conversation_id, user.id)
+    await backfill_conversation_attachments(db, user.id, conversation_id)
+    await db.commit()
+    return await load_conversation_attachment_rows(db, user.id, conversation_id)
+
+
+@router.post("/conversations/{conversation_id}/attachments", response_model=list[ConversationAttachmentOut])
+async def attach_conversation_files(
+    conversation_id: str,
+    payload: AttachConversationFilesRequest,
+    user: User = Depends(get_current_user),
+    db: AsyncSession = Depends(get_session),
+):
+    await require_conversation(db, conversation_id, user.id)
+    await ensure_conversation_attachment_rows(
+        db,
+        user.id,
+        conversation_id,
+        payload.attachment_ids,
+        selected=payload.selected,
+        update_existing_selected=True,
+    )
+    await db.commit()
+    return await load_conversation_attachment_rows(db, user.id, conversation_id)
+
+
+@router.patch("/conversations/{conversation_id}/attachments/{attachment_id}", response_model=ConversationAttachmentOut)
+async def update_conversation_attachment(
+    conversation_id: str,
+    attachment_id: str,
+    payload: UpdateConversationAttachmentRequest,
+    user: User = Depends(get_current_user),
+    db: AsyncSession = Depends(get_session),
+):
+    await require_conversation(db, conversation_id, user.id)
+    row = (
+        await db.execute(
+            select(ConversationAttachment).where(
+                ConversationAttachment.user_id == user.id,
+                ConversationAttachment.conversation_id == conversation_id,
+                ConversationAttachment.attachment_id == attachment_id,
+                ConversationAttachment.removed_at.is_(None),
+            )
+        )
+    ).scalar_one_or_none()
+    if not row:
+        raise api_error("ATTACHMENT_NOT_FOUND", "附件不在当前对话文件树中")
+    attachment = await db.get(Attachment, attachment_id)
+    if not attachment or attachment.user_id != user.id or attachment.deleted_at is not None:
+        raise api_error("ATTACHMENT_NOT_FOUND", "附件不存在或已被删除")
+    if payload.selected is not None:
+        row.selected = payload.selected
+    if payload.display_name is not None:
+        display_name = payload.display_name.strip()
+        if not display_name:
+            raise api_error("VALIDATION_ERROR", "文件名不能为空")
+        row.display_name = display_name[:255]
+    await db.commit()
+    await db.refresh(row)
+    return ConversationAttachmentOut(
+        id=row.id,
+        conversation_id=row.conversation_id,
+        attachment=AttachmentOut.model_validate(attachment),
+        selected=row.selected,
+        display_name=row.display_name,
+        created_at=row.created_at,
+        updated_at=row.updated_at,
+    )
+
+
+@router.delete("/conversations/{conversation_id}/attachments/{attachment_id}")
+async def remove_conversation_attachment(
+    conversation_id: str,
+    attachment_id: str,
+    user: User = Depends(get_current_user),
+    db: AsyncSession = Depends(get_session),
+):
+    await require_conversation(db, conversation_id, user.id)
+    row = (
+        await db.execute(
+            select(ConversationAttachment).where(
+                ConversationAttachment.user_id == user.id,
+                ConversationAttachment.conversation_id == conversation_id,
+                ConversationAttachment.attachment_id == attachment_id,
+                ConversationAttachment.removed_at.is_(None),
+            )
+        )
+    ).scalar_one_or_none()
+    if row:
+        row.selected = False
+        row.removed_at = datetime.utcnow()
+        await db.commit()
     return {"ok": True}
 
 
@@ -289,6 +523,8 @@ async def conversation_events(
             "content": message.content,
             "status": message.status,
             "model": message.model,
+            "web_search_sources": message.web_search_sources_json or [],
+            "webSearchSources": message.web_search_sources_json or [],
             **message_progress_event_data(message),
         }
         for message in streaming_rows
