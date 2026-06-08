@@ -3711,7 +3711,7 @@ onUnmounted(() => {
 
     <main
       class="chat-main flex flex-col min-w-0 min-h-0 overflow-hidden"
-      :class="{ 'has-messages': hasConversationFrame, 'is-empty-chat': isEmptyChat, 'composer-open': composerExpanded }"
+      :class="{ 'has-messages': hasConversationFrame, 'is-empty-chat': isEmptyChat, 'composer-open': composerExpanded, 'sources-open': sourceDrawerOpen }"
     >
       <header class="chat-header" :class="{ 'sources-open': sourceDrawerOpen }">
         <div class="top-model-controls" @click.stop>

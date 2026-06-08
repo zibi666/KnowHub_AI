@@ -3475,6 +3475,15 @@ body,
   flex: 1 1 auto;
 }
 
+.chat-main.sources-open .chat-workspace {
+  z-index: 80;
+}
+
+.chat-main.sources-open .chat-footer {
+  pointer-events: none;
+  z-index: 1;
+}
+
 .question-nav-panel {
   position: absolute;
   top: 50%;
@@ -3495,7 +3504,7 @@ body,
 .source-drawer-backdrop {
   position: absolute;
   inset: 0;
-  z-index: 18;
+  z-index: 88;
   pointer-events: auto;
   background: rgba(0, 0, 0, 0.16);
 }
@@ -3504,7 +3513,7 @@ body,
   position: absolute;
   top: 0;
   right: 0;
-  z-index: 19;
+  z-index: 89;
   display: flex;
   width: min(29rem, calc(100vw - 1.5rem));
   height: 100%;
