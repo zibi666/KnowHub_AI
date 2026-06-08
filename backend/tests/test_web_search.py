@@ -1093,6 +1093,92 @@ def test_tool_loop_reuses_duplicate_searches_and_fetches_without_extra_count(mon
     asyncio.run(run())
 
 
+def test_tool_loop_stops_after_successful_search_results(monkeypatch):
+    async def run():
+        executed = []
+        tool_turn_count = {"value": 0}
+        context = [{"role": "user", "content": "latest ai news"}]
+
+        class FakeProvider:
+            async def tool_call_turn(self, **kwargs):
+                tool_turn_count["value"] += 1
+                if tool_turn_count["value"] == 1:
+                    return ToolCallTurnResult(
+                        tool_calls=[ToolCall(id="call-1", name="search_web", arguments={"query": "latest ai news"})],
+                        assistant_message={
+                            "role": "assistant",
+                            "content": "",
+                            "tool_calls": [
+                                {
+                                    "id": "call-1",
+                                    "type": "function",
+                                    "function": {"name": "search_web", "arguments": '{"query":"latest ai news"}'},
+                                }
+                            ],
+                        },
+                        usage={"prompt_tokens": 1, "completion_tokens": 1, "total_tokens": 2},
+                    )
+                return ToolCallTurnResult(
+                    tool_calls=[ToolCall(id="call-2", name="search_web", arguments={"query": "latest ai news follow up"})],
+                    assistant_message={
+                        "role": "assistant",
+                        "content": "",
+                        "tool_calls": [
+                            {
+                                "id": "call-2",
+                                "type": "function",
+                                "function": {"name": "search_web", "arguments": '{"query":"latest ai news follow up"}'},
+                            }
+                        ],
+                    },
+                    usage={"prompt_tokens": 1, "completion_tokens": 1, "total_tokens": 2},
+                )
+
+        def fake_config():
+            return WebSearchConfig(
+                enabled=True,
+                searxng_base_url="https://search.example.com/search",
+                result_count=30,
+                language="all",
+                safesearch="1",
+                timeout_seconds=5,
+                fetch_timeout_seconds=5,
+                max_tool_calls=20,
+                fetch_max_chars=4000,
+            )
+
+        async def fake_publish(*args, **kwargs):
+            return None
+
+        async def fake_run_web_search_tool(name, arguments, config):
+            executed.append((name, arguments))
+            return {
+                "ok": True,
+                "results": [{"title": "Example", "url": "https://example.com/news", "snippet": "news"}],
+            }
+
+        monkeypatch.setattr(chat, "effective_web_search_config", fake_config)
+        monkeypatch.setattr(chat, "publish_conversation_event", fake_publish)
+        monkeypatch.setattr(chat, "run_web_search_tool", fake_run_web_search_tool)
+
+        sources, usage = await chat.run_web_search_tool_loop(
+            provider=FakeProvider(),
+            api_key="sk-test",
+            model="gpt-5.5",
+            context=context,
+            conversation_id="conv-1",
+            assistant_message_id="msg-assistant",
+            reasoning_effort=None,
+        )
+
+        assert executed == [("search_web", {"query": "latest ai news"})]
+        assert tool_turn_count["value"] == 1
+        assert len(sources) == 1
+        assert usage["total_tokens"] == 2
+
+    asyncio.run(run())
+
+
 def test_chat_job_runs_web_search_tool_and_saves_structured_sources(monkeypatch):
     async def run():
         engine, session_maker = await _make_session()
@@ -1217,7 +1303,7 @@ def test_chat_job_runs_web_search_tool_and_saves_structured_sources(monkeypatch)
                         "favicon_url": "https://example.com/favicon.ico",
                     }
                 ]
-                assert assistant.total_tokens == 13
+                assert assistant.total_tokens == 12
 
             assert any(event == "web_search_status" for event, _ in published_events)
             assert any(

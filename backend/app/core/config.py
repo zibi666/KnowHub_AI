@@ -99,7 +99,7 @@ class Settings(BaseSettings):
     web_search_safesearch: str = "1"
     web_search_timeout_seconds: int = 20
     web_search_fetch_timeout_seconds: int = 20
-    web_search_max_tool_calls: int = 20
+    web_search_max_tool_calls: int = 4
     web_search_fetch_max_chars: int = 12000
 
     @field_validator("app_encryption_key")

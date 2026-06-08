@@ -607,6 +607,7 @@ async def run_web_search_tool_loop(
     executed_calls = 0
     saw_tool_calls = False
     had_tool_error = False
+    should_stop_after_batch = False
     tool_cache: dict[tuple[str, str], dict] = {}
     inject_web_search_policy(context)
     should_force_search = should_force_web_search(context)
@@ -653,6 +654,8 @@ async def run_web_search_tool_loop(
                     sources.extend(tool_result_sources(payload))
                     if call.name == "search_web" and isinstance(payload.get("results"), list):
                         result_count = len(payload["results"])
+                        if result_count > 0:
+                            should_stop_after_batch = True
                         await publish_conversation_event(
                             conversation_id,
                             "web_search_status",
@@ -689,7 +692,7 @@ async def run_web_search_tool_loop(
                     "content": json_tool_output(payload),
                 }
             )
-        if executed_calls >= config.max_tool_calls:
+        if should_stop_after_batch or executed_calls >= config.max_tool_calls:
             break
     if not saw_tool_calls and should_force_search:
         query = web_search_fallback_query(context)
