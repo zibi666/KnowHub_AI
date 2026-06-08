@@ -166,16 +166,6 @@ _QUERY_STOP_TERMS = {
 _LOW_VALUE_SOURCE_HOSTS = {
     "baike.baidu.com",
     "wikipedia.org",
-    "mp.weixin.qq.com",
-    "weixin.qq.com",
-    "newsa.html5.qq.com",
-    "profile.zjurl.cn",
-}
-
-_AGGREGATED_NEWS_HOSTS = {
-    "article.zlink.toutiao.com",
-    "m.toutiao.com",
-    "so.html5.qq.com",
 }
 
 _AUTHORITY_SOURCE_HOSTS = {
@@ -198,7 +188,6 @@ _AUTHORITY_SOURCE_HOSTS = {
     "guancha.cn",
     "gmw.cn",
     "ce.cn",
-    "cnr.cn",
 }
 
 _COMMUNITY_OR_VIDEO_HOSTS = {
@@ -229,50 +218,6 @@ _DIRECT_SEARCH_NAVIGATION_TITLES = {
     "ai问答",
 }
 
-_OBITUARY_SIGNAL_TERMS = (
-    "讣告",
-    "去世",
-    "逝世",
-    "离世",
-    "死亡",
-    "抢救无效",
-    "心源性猝死",
-    "猝死",
-    "不幸去世",
-    "因病去世",
-)
-
-_OFFICIAL_SIGNAL_TERMS = (
-    "官方",
-    "公司发布",
-    "发布讣告",
-    "央视",
-    "中新网",
-    "新华社",
-    "人民日报",
-    "中国新闻社",
-    "央广网",
-    "每日经济新闻",
-    "每经",
-    "江苏人大发布",
-)
-
-_ACCOUNT_UPDATE_TERMS = (
-    "账号突然更新",
-    "账号更新",
-    "本人出镜",
-    "高考祝福",
-    "发布新视频",
-    "最新动态",
-    "网友",
-    "热搜",
-    "点赞",
-    "评论",
-    "头条号",
-    "企鹅号",
-    "小沈阳",
-)
-
 _LOW_VALUE_TITLE_TERMS = (
     "的更多内容",
     "百科",
@@ -300,28 +245,6 @@ _TIME_SENSITIVE_QUERY_TERMS = {
     "死了",
     "死了吗",
 }
-
-_DEATH_VERIFICATION_TERMS = (
-    "死了吗",
-    "死了没有",
-    "去世了吗",
-    "逝世了吗",
-    "死亡了吗",
-    "去世",
-    "逝世",
-    "离世",
-    "死亡",
-    "死了",
-    "讣告",
-    "猝死",
-    "抢救无效",
-)
-
-_DEATH_SUBJECT_NOISE_PATTERN = re.compile(
-    r"(死了吗|死了没有|去世了吗|逝世了吗|死亡了吗|"
-    r"去世|逝世|离世|死亡|死了|讣告|猝死|抢救无效|"
-    r"真的吗|是否|官方|媒体|报道|消息|老师|先生|女士|吗|了)"
-)
 
 _TERM_ALIASES = {
     "ai": ("ai", "人工智能", "人工智慧"),
@@ -535,39 +458,6 @@ def _query_contains_time_sensitive_term(query: str) -> bool:
     return any(term in lowered for term in _TIME_SENSITIVE_QUERY_TERMS)
 
 
-def _is_death_verification_query(query: str) -> bool:
-    lowered = query.lower()
-    return any(term in lowered for term in _DEATH_VERIFICATION_TERMS)
-
-
-def _death_verification_subject(query: str, query_terms: list[str]) -> str | None:
-    cleaned = _DEATH_SUBJECT_NOISE_PATTERN.sub(" ", query)
-    chunks = re.findall(r"[\u4e00-\u9fff]{2,10}", cleaned)
-    if chunks:
-        return max(chunks, key=len)[:10]
-    for term in query_terms:
-        if re.search(r"[\u4e00-\u9fff]", term) and not _is_death_verification_query(term):
-            return term[:10]
-    return None
-
-
-def _search_query_variants(query: str, query_terms: list[str]) -> list[str]:
-    variants = [query]
-    if _is_death_verification_query(query):
-        subject = _death_verification_subject(query, query_terms)
-        if subject:
-            variants.append(f"{subject} 去世 讣告 官方 媒体 公司发布")
-    deduped: list[str] = []
-    seen: set[str] = set()
-    for variant in variants:
-        normalized = _compact_text(variant, 300)
-        key = normalized.lower()
-        if normalized and key not in seen:
-            deduped.append(normalized)
-            seen.add(key)
-    return deduped
-
-
 def _allow_unfiltered_fallback(query_terms: list[str], query: str) -> bool:
     if _query_contains_time_sensitive_term(query):
         return False
@@ -582,24 +472,17 @@ def _is_high_signal_query(query_terms: list[str], query: str) -> bool:
     ) or _query_contains_time_sensitive_term(query)
 
 
-def _host_matches(host: str, candidates: set[str]) -> bool:
-    return any(host == candidate or host.endswith(f".{candidate}") for candidate in candidates)
-
-
-def _has_official_source_signal(text: str) -> bool:
-    return any(term in text for term in _OFFICIAL_SIGNAL_TERMS) or "权威发布" in text
-
-
-def _is_low_value_result(title: str, url: str, snippet: str = "") -> bool:
+def _is_low_value_result(title: str, url: str) -> bool:
     parsed = urlsplit(url)
     host = (parsed.hostname or "").lower()
-    if _host_matches(host, _LOW_VALUE_SOURCE_HOSTS):
+    if any(host == blocked or host.endswith(f".{blocked}") for blocked in _LOW_VALUE_SOURCE_HOSTS):
         return True
-    haystack = f"{title} {snippet}".lower()
-    if _host_matches(host, _AGGREGATED_NEWS_HOSTS):
-        return not _has_official_source_signal(haystack)
     lowered_title = title.lower()
     return any(term in lowered_title for term in _LOW_VALUE_TITLE_TERMS)
+
+
+def _host_matches(host: str, candidates: set[str]) -> bool:
+    return any(host == candidate or host.endswith(f".{candidate}") for candidate in candidates)
 
 
 def _result_rank_score(result: WebSearchResult) -> int:
@@ -611,11 +494,6 @@ def _result_rank_score(result: WebSearchResult) -> int:
         score += 30
     if _host_matches(host, _COMMUNITY_OR_VIDEO_HOSTS):
         score -= 12
-    if _host_matches(host, _AGGREGATED_NEWS_HOSTS):
-        score -= 8
-    score += sum(14 for term in _OBITUARY_SIGNAL_TERMS if term in haystack)
-    score += sum(8 for term in _OFFICIAL_SIGNAL_TERMS if term in haystack)
-    score -= sum(10 for term in _ACCOUNT_UPDATE_TERMS if term in haystack)
     return score
 
 
@@ -671,6 +549,8 @@ def _is_search_navigation_result(source_name: str, title: str, url: str) -> bool
         return True
     parsed = urlsplit(url)
     host = (parsed.hostname or "").lower()
+    if source_name == "so360" and host in _DIRECT_SEARCH_INTERNAL_HOSTS[source_name] and parsed.path.startswith("/link"):
+        return False
     if source_name in {"bing", "sogou"}:
         return _host_matches(host, _DIRECT_SEARCH_INTERNAL_HOSTS.get(source_name, set()))
     if source_name == "so360":
@@ -680,7 +560,6 @@ def _is_search_navigation_result(source_name: str, title: str, url: str) -> bool
 
 def _parse_generic_direct_search_results(source_name: str, source_url: str, body: str) -> list[dict[str, str]]:
     rows: list[dict[str, str]] = []
-    rows_by_url: dict[str, dict[str, str]] = {}
     for match in re.finditer(r'(?is)<a\b[^>]*href=["\']([^"\']+)["\'][^>]*>(.*?)</a>', body):
         title = _strip_inline_html(match.group(2))
         if len(title) < 2:
@@ -688,14 +567,7 @@ def _parse_generic_direct_search_results(source_name: str, source_url: str, body
         url = _search_href_target(match.group(1), source_url)
         if not url or _is_search_navigation_result(source_name, title, url):
             continue
-        existing = rows_by_url.get(url)
-        if existing:
-            snippets = [part for part in (existing.get("content"), title) if part]
-            existing["content"] = _compact_text(" ".join(snippets), 700)
-            continue
-        row = {"title": title, "url": url, "content": ""}
-        rows_by_url[url] = row
-        rows.append(row)
+        rows.append({"title": title, "url": url, "content": ""})
         if len(rows) >= 60:
             break
     return rows
@@ -754,18 +626,6 @@ async def _search_direct_sources(
     return _rank_search_results(results)[:result_limit]
 
 
-def _dedupe_search_results(results: list[WebSearchResult]) -> list[WebSearchResult]:
-    deduped: list[WebSearchResult] = []
-    seen: set[str] = set()
-    for result in results:
-        canonical_url = canonical_source_url(result.url) or result.url
-        if canonical_url in seen:
-            continue
-        seen.add(canonical_url)
-        deduped.append(result)
-    return deduped
-
-
 def _parse_search_rows(
     rows: Any,
     *,
@@ -785,7 +645,7 @@ def _parse_search_rows(
             continue
         title = _compact_text(item.get("title"), 180) or url
         snippet = _compact_text(item.get("content") or item.get("snippet"), 700)
-        if high_signal_query and _is_low_value_result(title, url, snippet):
+        if high_signal_query and _is_low_value_result(title, url):
             continue
         seen.add(url)
         result = WebSearchResult(title=title, url=url, snippet=snippet)
@@ -811,23 +671,17 @@ async def search_web(
         return []
     result_limit = _normalize_search_result_count(result_count, config)
     query_terms = _query_relevance_terms(clean_query)
-    query_variants = _search_query_variants(clean_query, query_terms)
+    high_signal_query = _is_high_signal_query(query_terms, clean_query)
+    seen: set[str] = set()
     async with httpx.AsyncClient(timeout=_search_request_timeout(config)) as client:
-        result_batches = await asyncio.gather(
-            *(
-                _search_direct_sources(
-                    client,
-                    variant,
-                    query_terms=_query_relevance_terms(variant),
-                    high_signal_query=_is_high_signal_query(_query_relevance_terms(variant), variant),
-                    seen=set(),
-                    result_limit=result_limit,
-                )
-                for variant in query_variants
-            )
+        return await _search_direct_sources(
+            client,
+            clean_query,
+            query_terms=query_terms,
+            high_signal_query=high_signal_query,
+            seen=seen,
+            result_limit=result_limit,
         )
-    results = [result for batch in result_batches for result in batch]
-    return _rank_search_results(_dedupe_search_results(results))[:result_limit]
 
 
 def _hostname_is_blocked(hostname: str) -> bool:

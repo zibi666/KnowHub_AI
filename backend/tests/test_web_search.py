@@ -556,7 +556,7 @@ def test_search_web_direct_sources_reject_unrelated_rows(monkeypatch):
     asyncio.run(run())
 
 
-def test_search_web_high_signal_queries_continue_across_sources_and_rank_obituaries(monkeypatch):
+def test_search_web_high_signal_queries_continue_across_sources_and_rank_authority(monkeypatch):
     captured_urls = []
 
     class FakeClient:
@@ -576,18 +576,18 @@ def test_search_web_high_signal_queries_continue_across_sources_and_rank_obituar
                     _bing_html(
                         [
                             (
-                                "张雪峰去世2个月后，高考前其账号突然更新",
+                                "某位老师最新动态短视频",
                                 "https://www.bilibili.com/video/BV14vEs6cEye/",
-                                "网传张雪峰离世，账号发布高考祝福视频。",
+                                "网友剪辑的相关动态。",
                             ),
                             (
-                                "张雪峰离世细节曝光",
+                                "某位老师相关讨论",
                                 "https://zhuanlan.zhihu.com/p/2020255751449366857",
-                                "网友整理的张雪峰离世时间线。",
+                                "网友整理的讨论帖。",
                             ),
                         ]
                     ),
-                    url=f"{url}?q=zhang",
+                    url=f"{url}?q=teacher",
                 )
             if url == "https://www.sogou.com/web":
                 return DirectSearchResponse(
@@ -596,18 +596,18 @@ def test_search_web_high_signal_queries_continue_across_sources_and_rank_obituar
                             ("帮助", "http://help.sogou.com/?w=01091500&v=1"),
                             ("举报", "https://fankui.sogou.com/index.php/web/web/index/type/5"),
                             (
-                                "张雪峰因心源性猝死抢救无效去世",
+                                "中新网：某位老师发布最新公开回应",
                                 "https://www.chinanews.com.cn/sh/2026/03-24/10592189.shtml",
                             ),
                         ]
                     ),
-                    url=f"{url}?query=zhang",
+                    url=f"{url}?query=teacher",
                 )
             return DirectSearchResponse("<html><body></body></html>", url=url)
 
     async def run():
         monkeypatch.setattr(web_search.httpx, "AsyncClient", FakeClient)
-        results = await search_web("张雪峰死了吗", _search_config(result_count=2))
+        results = await search_web("某位老师最新消息", _search_config(result_count=2))
 
         assert captured_urls[:2] == ["https://www.bing.com/search", "https://www.sogou.com/web"]
         assert results[0].url == "https://www.chinanews.com.cn/sh/2026/03-24/10592189.shtml"
@@ -616,7 +616,7 @@ def test_search_web_high_signal_queries_continue_across_sources_and_rank_obituar
     asyncio.run(run())
 
 
-def test_search_web_expands_death_verification_queries_and_filters_social_noise(monkeypatch):
+def test_search_web_death_queries_are_not_expanded_with_special_terms(monkeypatch):
     captured_queries = []
 
     class FakeClient:
@@ -631,48 +631,15 @@ def test_search_web_expands_death_verification_queries_and_filters_social_noise(
 
         async def get(self, url, **kwargs):
             params = kwargs.get("params") or {}
-            query = params.get("q") or params.get("query") or params.get("keyword") or ""
-            captured_queries.append(query)
-            if "讣告" in query and url == "https://www.bing.com/search":
-                return DirectSearchResponse(
-                    _bing_html(
-                        [
-                            (
-                                "中新网：张雪峰因心源性猝死抢救无效去世",
-                                "https://www.chinanews.com.cn/sh/2026/03-24/10592189.shtml",
-                                "公司发布讣告称，张雪峰因心源性猝死抢救无效去世。",
-                            )
-                        ]
-                    ),
-                    url=f"{url}?q=zhang",
-                )
-            if url == "https://www.bing.com/search":
-                return DirectSearchResponse(
-                    _bing_html(
-                        [
-                            ("张雪峰死了，但在他家，他还活着", "http://mp.weixin.qq.com/s?__biz=abc", ""),
-                            ("# 张雪峰死了", "https://newsa.html5.qq.com/v1/share-video?vid=123", ""),
-                        ]
-                    ),
-                    url=f"{url}?q=zhang",
-                )
-            return DirectSearchResponse(
-                _generic_html(
-                    [
-                        ("张雪峰猝死不到2月，小沈阳被紧急送医", "https://article.zlink.toutiao.com/J4dQM?h5_url=https%3A%2F%2Ftoutiao.com%2Fgroup%2F1%2F"),
-                        ("张雪峰老师 - 头条号", "https://profile.zjurl.cn/rogue/ugc/profile/?user_id=1"),
-                    ]
-                ),
-                url=f"{url}?query=zhang",
-            )
+            captured_queries.append(params.get("q") or params.get("query") or params.get("keyword") or "")
+            return DirectSearchResponse("<html><body></body></html>", url=url)
 
     async def run():
         monkeypatch.setattr(web_search.httpx, "AsyncClient", FakeClient)
-        results = await search_web("张雪峰死了吗", _search_config(result_count=5))
+        await search_web("某位老师死了吗", _search_config(result_count=5))
 
-        assert any("讣告" in query for query in captured_queries)
-        assert [item.url for item in results] == ["https://www.chinanews.com.cn/sh/2026/03-24/10592189.shtml"]
-        assert "公司发布讣告" in results[0].snippet
+        assert captured_queries == ["某位老师死了吗"] * 4
+        assert not any("讣告" in query or "公司发布" in query or "官方 媒体" in query for query in captured_queries)
 
     asyncio.run(run())
 
@@ -794,7 +761,7 @@ def test_search_web_clamps_count_and_sends_direct_query_params(monkeypatch):
 
 def test_search_web_filters_unrelated_chinese_results_without_fallback(monkeypatch):
     class FakeResponse:
-        url = "https://www.bing.com/search?q=zhang"
+        url = "https://www.bing.com/search?q=teacher"
         text = _bing_html(
             [
                 ("Word bookmark error", "https://example.com/word", "Word editing tips"),
@@ -839,21 +806,21 @@ def test_search_web_filters_unrelated_chinese_results_without_fallback(monkeypat
             max_tool_calls=2,
             fetch_max_chars=4000,
         )
-        assert await search_web("张雪峰老师死了吗", config) == []
+        assert await search_web("某位老师最新消息", config) == []
 
     asyncio.run(run())
 
 
 def test_search_web_skips_low_value_sources_for_high_signal_chinese_queries(monkeypatch):
     class FakeResponse:
-        url = "https://www.bing.com/search?q=zhang"
+        url = "https://www.bing.com/search?q=teacher"
         text = _bing_html(
             [
-                ("Zhang Xuefeng - Wikipedia", "https://zh.wikipedia.org/wiki/%E5%BC%A0%E9%9B%AA%E5%B3%B0", "profile page"),
+                ("Example Teacher - Wikipedia", "https://zh.wikipedia.org/wiki/example-teacher", "profile page"),
                 (
-                    "&#24352;&#38634;&#23792; related report",
+                    "某位老师 related report",
                     "https://news.example.com/story",
-                    "&#24352;&#38634;&#23792; latest news report",
+                    "某位老师 latest news report",
                 ),
             ]
         )
@@ -864,8 +831,8 @@ def test_search_web_skips_low_value_sources_for_high_signal_chinese_queries(monk
         def json(self):
             return {
                 "results": [
-                    {"title": "张雪峰 - 维基百科", "url": "https://zh.wikipedia.org/wiki/%E5%BC%A0%E9%9B%AA%E5%B3%B0", "content": "人物页面"},
-                    {"title": "张雪峰相关报道", "url": "https://news.example.com/story", "content": "张雪峰 相关新闻 报道"},
+                    {"title": "某位老师 - 维基百科", "url": "https://zh.wikipedia.org/wiki/example-teacher", "content": "人物页面"},
+                    {"title": "某位老师相关报道", "url": "https://news.example.com/story", "content": "某位老师 相关新闻 报道"},
                 ]
             }
 
@@ -895,7 +862,7 @@ def test_search_web_skips_low_value_sources_for_high_signal_chinese_queries(monk
             max_tool_calls=2,
             fetch_max_chars=4000,
         )
-        results = await search_web("张雪峰老师死了吗", config)
+        results = await search_web("某位老师最新消息", config)
         assert [item.url for item in results] == ["https://news.example.com/story"]
 
     asyncio.run(run())
