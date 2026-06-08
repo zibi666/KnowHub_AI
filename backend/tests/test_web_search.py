@@ -616,6 +616,67 @@ def test_search_web_high_signal_queries_continue_across_sources_and_rank_obituar
     asyncio.run(run())
 
 
+def test_search_web_expands_death_verification_queries_and_filters_social_noise(monkeypatch):
+    captured_queries = []
+
+    class FakeClient:
+        def __init__(self, *args, **kwargs):
+            pass
+
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, *args):
+            return None
+
+        async def get(self, url, **kwargs):
+            params = kwargs.get("params") or {}
+            query = params.get("q") or params.get("query") or params.get("keyword") or ""
+            captured_queries.append(query)
+            if "讣告" in query and url == "https://www.bing.com/search":
+                return DirectSearchResponse(
+                    _bing_html(
+                        [
+                            (
+                                "中新网：张雪峰因心源性猝死抢救无效去世",
+                                "https://www.chinanews.com.cn/sh/2026/03-24/10592189.shtml",
+                                "公司发布讣告称，张雪峰因心源性猝死抢救无效去世。",
+                            )
+                        ]
+                    ),
+                    url=f"{url}?q=zhang",
+                )
+            if url == "https://www.bing.com/search":
+                return DirectSearchResponse(
+                    _bing_html(
+                        [
+                            ("张雪峰死了，但在他家，他还活着", "http://mp.weixin.qq.com/s?__biz=abc", ""),
+                            ("# 张雪峰死了", "https://newsa.html5.qq.com/v1/share-video?vid=123", ""),
+                        ]
+                    ),
+                    url=f"{url}?q=zhang",
+                )
+            return DirectSearchResponse(
+                _generic_html(
+                    [
+                        ("张雪峰猝死不到2月，小沈阳被紧急送医", "https://article.zlink.toutiao.com/J4dQM?h5_url=https%3A%2F%2Ftoutiao.com%2Fgroup%2F1%2F"),
+                        ("张雪峰老师 - 头条号", "https://profile.zjurl.cn/rogue/ugc/profile/?user_id=1"),
+                    ]
+                ),
+                url=f"{url}?query=zhang",
+            )
+
+    async def run():
+        monkeypatch.setattr(web_search.httpx, "AsyncClient", FakeClient)
+        results = await search_web("张雪峰死了吗", _search_config(result_count=5))
+
+        assert any("讣告" in query for query in captured_queries)
+        assert [item.url for item in results] == ["https://www.chinanews.com.cn/sh/2026/03-24/10592189.shtml"]
+        assert "公司发布讣告" in results[0].snippet
+
+    asyncio.run(run())
+
+
 def test_web_search_tools_include_agentic_parameters():
     tools = {tool["function"]["name"]: tool["function"]["parameters"] for tool in web_search_tools()}
 
