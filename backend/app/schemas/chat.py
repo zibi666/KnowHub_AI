@@ -10,6 +10,9 @@ from app.schemas.base import ApiModel
 from app.services.image_generation import is_image_generation_model
 
 
+WEB_SEARCH_MAX_ROUNDS_LIMIT = 10
+
+
 class WebSearchSourceOut(ApiModel):
     index: int
     title: str
@@ -49,7 +52,7 @@ class CreateConversationRequest(ApiModel):
     @field_validator("web_search_max_rounds")
     @classmethod
     def clamp_web_search_max_rounds(cls, value: int) -> int:
-        return max(1, min(5, int(value)))
+        return max(1, min(WEB_SEARCH_MAX_ROUNDS_LIMIT, int(value)))
 
 
 class UpdateConversationRequest(ApiModel):
@@ -64,7 +67,7 @@ class UpdateConversationRequest(ApiModel):
     def clamp_web_search_max_rounds(cls, value: int | None) -> int | None:
         if value is None:
             return None
-        return max(1, min(5, int(value)))
+        return max(1, min(WEB_SEARCH_MAX_ROUNDS_LIMIT, int(value)))
 
 
 class MessageOut(ApiModel):
@@ -89,6 +92,7 @@ class MessageOut(ApiModel):
     progress_detail: str | None = None
     progress_phase: str | None = None
     web_search_sources: list[WebSearchSourceOut] = []
+    web_search_trace: dict | None = None
 
     @classmethod
     def from_message(cls, message: object, attachments: list[AttachmentOut] | None = None) -> "MessageOut":
@@ -135,6 +139,7 @@ class MessageOut(ApiModel):
             progress_detail=(image_progress or runtime_progress or {}).get("detail"),
             progress_phase=(image_progress or runtime_progress or {}).get("phase"),
             web_search_sources=getattr(message, "web_search_sources_json", None) or [],
+            web_search_trace=getattr(message, "web_search_trace_json", None) or None,
         )
 
 
@@ -179,7 +184,7 @@ class SendMessageRequest(ApiModel):
     def clamp_web_search_max_rounds(cls, value: int | None) -> int | None:
         if value is None:
             return None
-        return max(1, min(5, int(value)))
+        return max(1, min(WEB_SEARCH_MAX_ROUNDS_LIMIT, int(value)))
 
 
 class SendMessageResponse(ApiModel):

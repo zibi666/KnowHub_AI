@@ -95,17 +95,22 @@ WEB_SEARCH_FORCE_TERMS = (
 WEB_SEARCH_TOOL_POLICY = (
     "KnowHub web search policy: When web search is enabled, use search_web first for current events, news, "
     "recent facts, public external facts, or claims that may have changed. Use fetch_url only when search snippets "
-    "are not enough or a result needs closer reading. Do not invent sources; if search results are weak, missing, "
-    "or unrelated, say so clearly in the final answer. When sources are provided in the final-answer context, add "
-    "inline markers like [[1]] and [[2]] only next to claims directly supported by those exact sources. Do not add "
-    "a markdown source list."
+    "are not enough or a result needs closer reading. Judge relevance semantically, especially for Chinese queries "
+    "where synonyms, abbreviations, translations, and rewritten headlines may be relevant. Do not invent sources; "
+    "if search results are weak, missing, stale, contradictory, or only weakly related, say so clearly in the final "
+    "answer. For time-sensitive, legal, medical, financial, policy, death, or disputed claims, prefer body evidence "
+    "from official, primary, major-news, or multiple independent sources rather than title/snippet-only support. "
+    "When sources are provided in the final-answer context, add inline markers like [[1]] and [[2]] only next to "
+    "claims directly supported by those exact sources. Do not add a markdown source list."
 )
 WEB_SEARCH_DEEP_REVIEW_POLICY = (
     "You are reviewing web-search evidence. Return JSON only, with keys: "
     "needs_more (boolean), new_queries (array of strings), urls_to_fetch (array of URLs), "
-    "evidence_gaps (array of short strings), reason_codes (array of short strings). "
+    "evidence_gaps (array of short strings), relevance_notes (array of short public notes), "
+    "accuracy_notes (array of short public notes), stop_reason (short string), reason_codes (array of short strings). "
+    "Judge Chinese relevance semantically; allow synonyms, abbreviations, translations, and headline rewrites. "
     "Do not include hidden reasoning or prose. Ask for more only when the current evidence is weak, stale, "
-    "contradictory, or missing primary/major-news support."
+    "contradictory, clearly unrelated, or missing primary/major-news support."
 )
 _STREAM_END = object()
 EMPTY_CHAT_RESPONSE_MESSAGE = (
@@ -696,6 +701,116 @@ def _clean_fetch_urls(values: object, *, limit: int = 4) -> list[str]:
     return urls
 
 
+def _compact_trace_text(value: object, limit: int = 220) -> str:
+    return re.sub(r"\s+", " ", str(value or "")).strip()[:limit]
+
+
+def _clean_review_notes(values: object, *, limit: int = 6, item_limit: int = 220) -> list[str]:
+    if not isinstance(values, list):
+        return []
+    notes: list[str] = []
+    for item in values:
+        note = _compact_trace_text(item, item_limit)
+        if note and note not in notes:
+            notes.append(note)
+        if len(notes) >= limit:
+            break
+    return notes
+
+
+def _public_search_result(item: object) -> dict | None:
+    if not isinstance(item, dict):
+        return None
+    url = _compact_trace_text(item.get("url"), 500)
+    if not url:
+        return None
+    row = {
+        "title": _compact_trace_text(item.get("title"), 140) or url,
+        "url": url,
+    }
+    for source_key, target_key in (
+        ("provider", "provider"),
+        ("confidence", "confidence"),
+        ("source_tier", "source_tier"),
+        ("sourceTier", "source_tier"),
+        ("support_level", "support_level"),
+        ("supportLevel", "support_level"),
+        ("search_depth", "search_depth"),
+        ("searchDepth", "search_depth"),
+        ("filter_reason", "filter_reason"),
+        ("filterReason", "filter_reason"),
+    ):
+        if source_key in item and item.get(source_key) not in (None, "", []):
+            row[target_key] = item.get(source_key)
+    if item.get("degraded"):
+        row["degraded"] = True
+    return row
+
+
+def _trace_tool_event(
+    *,
+    round_index: int,
+    phase: str,
+    tool: str,
+    arguments: dict,
+    payload: dict,
+    cached: bool = False,
+) -> dict:
+    query = _compact_trace_text(arguments.get("query"), 220)
+    url = _compact_trace_text(arguments.get("url"), 500)
+    ok = bool(payload.get("ok"))
+    event = {
+        "round": round_index,
+        "phase": phase,
+        "type": "read" if tool == "fetch_url" else "search",
+        "tool": tool,
+        "ok": ok,
+    }
+    if cached:
+        event["cached"] = True
+    if query:
+        event["query"] = query
+    if url:
+        event["url"] = url
+    if not ok:
+        event["error"] = _compact_trace_text(payload.get("error"), 300)
+        return event
+    if isinstance(payload.get("results"), list):
+        results = payload["results"]
+        event["result_count"] = len(results)
+        event["sources"] = [
+            source
+            for source in (_public_search_result(item) for item in results[:8])
+            if source
+        ]
+    elif payload.get("url"):
+        event["result_count"] = 1
+        event["sources"] = [
+            {
+                "title": _compact_trace_text(payload.get("title"), 140) or _compact_trace_text(payload.get("url"), 500),
+                "url": _compact_trace_text(payload.get("url"), 500),
+            }
+        ]
+    return event
+
+
+def _trace_review_event(round_index: int, review_payload: dict) -> dict:
+    event = {
+        "round": round_index,
+        "phase": "reviewing",
+        "type": "review",
+        "needs_more": bool(review_payload.get("needs_more", True)),
+        "new_queries": _clean_search_queries(review_payload.get("new_queries"), limit=6),
+        "urls_to_fetch": _clean_fetch_urls(review_payload.get("urls_to_fetch"), limit=6),
+        "evidence_gaps": _clean_review_notes(review_payload.get("evidence_gaps")),
+        "relevance_notes": _clean_review_notes(review_payload.get("relevance_notes")),
+        "accuracy_notes": _clean_review_notes(review_payload.get("accuracy_notes")),
+        "reason_codes": _clean_review_notes(review_payload.get("reason_codes"), item_limit=80),
+        "stop_reason": _compact_trace_text(review_payload.get("stop_reason"), 220),
+    }
+    return {key: value for key, value in event.items() if value not in (None, "", [])}
+
+
 async def review_web_search_evidence(
     *,
     provider: OpenAICompatibleProvider,
@@ -766,7 +881,7 @@ async def run_web_search_tool_loop(
     reasoning_effort: str | None,
     search_mode: str = "auto",
     max_rounds: int = 3,
-) -> tuple[list, dict | None]:
+) -> tuple[list, dict | None, dict | None]:
     config = effective_web_search_config()
     if not config.configured:
         raise HTTPException(
@@ -785,6 +900,12 @@ async def run_web_search_tool_loop(
     max_rounds = normalized_web_search_rounds(max_rounds)
     effective_depth = effective_search_depth(latest_user_text(context), search_mode)
     iterative_deep_search = search_mode == "deep"
+    trace: dict = {
+        "mode": search_mode,
+        "effective_depth": effective_depth,
+        "max_rounds": max_rounds,
+        "events": [],
+    }
     inject_web_search_policy(context)
     should_force_search = should_force_web_search(context) or search_mode in {"fast", "deep"}
     for _ in range(max(1, config.max_tool_calls)):
@@ -809,8 +930,10 @@ async def run_web_search_tool_loop(
                 effective_arguments.setdefault("search_depth", effective_depth)
                 effective_arguments.setdefault("max_rounds", max_rounds)
             cache_key = web_search_cache_key(call.name, effective_arguments)
+            cached_payload = False
             if cache_key and cache_key in tool_cache:
                 payload = tool_cache[cache_key]
+                cached_payload = True
             elif executed_calls >= config.max_tool_calls:
                 payload = {"ok": False, "error": "Web search tool call limit reached"}
             else:
@@ -864,6 +987,16 @@ async def run_web_search_tool_loop(
                             error=str(payload.get("error") or ""),
                         ),
                     )
+            trace["events"].append(
+                _trace_tool_event(
+                    round_index=1,
+                    phase="tool_call",
+                    tool=call.name,
+                    arguments=effective_arguments,
+                    payload=payload,
+                    cached=cached_payload,
+                )
+            )
             context.append(
                 {
                     "role": "tool",
@@ -893,6 +1026,15 @@ async def run_web_search_tool_loop(
                 ),
             )
             payload = await run_web_search_tool("search_web", arguments, config)
+            trace["events"].append(
+                _trace_tool_event(
+                    round_index=1,
+                    phase="auto_fallback",
+                    tool="search_web",
+                    arguments=arguments,
+                    payload=payload,
+                )
+            )
             if payload.get("ok"):
                 sources.extend(tool_result_sources(payload))
                 if isinstance(payload.get("results"), list):
@@ -927,19 +1069,6 @@ async def run_web_search_tool_loop(
         seen_queries = {user_query.strip().lower()} if user_query else set()
         seen_urls = {str(getattr(source, "url", "") or "").strip() for source in sources if getattr(source, "url", "")}
         for round_index in range(2, max_rounds + 1):
-            if _web_search_result_support_is_enough(sources):
-                await publish_conversation_event(
-                    conversation_id,
-                    "web_search_status",
-                    web_search_status_payload(
-                        conversation_id=conversation_id,
-                        assistant_message_id=assistant_message_id,
-                        phase="completed",
-                        detail=f"深搜证据已足够，提前结束于第 {round_index - 1} 轮。",
-                        source_count=len({getattr(source, "url", "") for source in sources}),
-                    ),
-                )
-                break
             await publish_conversation_event(
                 conversation_id,
                 "web_search_status",
@@ -963,15 +1092,19 @@ async def run_web_search_tool_loop(
             )
             usage_total = add_usage_totals(usage_total, review_usage)
             needs_more = bool(review_payload.get("needs_more", True))
+            trace["events"].append(_trace_review_event(round_index - 1, review_payload))
             new_queries = _clean_search_queries(review_payload.get("new_queries"))
             urls_to_fetch = _clean_fetch_urls(review_payload.get("urls_to_fetch"))
-            if not needs_more and _web_search_result_support_is_enough(sources):
+            if not needs_more:
+                trace["early_stop"] = True
+                trace["stop_reason"] = _compact_trace_text(review_payload.get("stop_reason"), 220) or f"模型判断第 {round_index - 1} 轮证据已足够。"
                 break
             if not new_queries and user_query:
                 new_queries = [user_query]
             new_queries = [query for query in new_queries if query.lower() not in seen_queries][:4]
             urls_to_fetch = [url for url in urls_to_fetch if url not in seen_urls][:4]
             if not new_queries and not urls_to_fetch:
+                trace["stop_reason"] = "模型未提出新的搜索关键词或读取 URL，深搜已停止。"
                 break
             await publish_conversation_event(
                 conversation_id,
@@ -1022,6 +1155,15 @@ async def run_web_search_tool_loop(
                 executed_calls += 1
                 if payload.get("ok"):
                     sources.extend(tool_result_sources(payload))
+                trace["events"].append(
+                    _trace_tool_event(
+                        round_index=round_index,
+                        phase="deepening",
+                        tool=tool_name,
+                        arguments=arguments,
+                        payload=payload,
+                    )
+                )
                 context.append(
                     {
                         "role": "system",
@@ -1046,7 +1188,12 @@ async def run_web_search_tool_loop(
                 detail="联网搜索失败，正在整理回答。" if failed_without_sources else "联网搜索已完成，正在整理回答。",
             ),
         )
-    return sources, usage_total
+    trace["source_count"] = len({getattr(source, "url", "") for source in sources if getattr(source, "url", "")})
+    if "early_stop" not in trace:
+        trace["early_stop"] = False
+    if "stop_reason" not in trace and executed_calls:
+        trace["stop_reason"] = "搜索完成，正在整理回答。"
+    return sources, usage_total, trace if trace["events"] else None
 
 
 def model_supports_vision(model: str | None) -> bool:
@@ -1858,6 +2005,7 @@ async def stream_chat(user_id: str, payload: SendMessageRequest, conversation_id
                 assistant.tokens_source = tokens_source
                 assistant.first_token_seconds = first_token_seconds
                 assistant.web_search_sources_json = structured_sources or None
+                assistant.web_search_trace_json = None
                 await db.commit()
         except Exception as exc:
             logger.exception(
@@ -1918,6 +2066,8 @@ async def stream_chat(user_id: str, payload: SendMessageRequest, conversation_id
                 "status": "completed",
                 "web_search_sources": structured_sources,
                 "webSearchSources": structured_sources,
+                "web_search_trace": None,
+                "webSearchTrace": None,
                 "finished_at": datetime.utcnow().isoformat(),
             },
         )
@@ -2512,6 +2662,8 @@ async def _persist_assistant_partial(
     total_tokens: int | None = None,
     tokens_source: str | None = None,
     first_token_seconds: int | None = None,
+    web_search_sources: list | None = None,
+    web_search_trace: dict | None = None,
 ) -> None:
     async with SessionLocal() as db:
         assistant = await db.get(Message, assistant_message_id)
@@ -2527,6 +2679,10 @@ async def _persist_assistant_partial(
             assistant.tokens_source = tokens_source
         if first_token_seconds is not None and assistant.first_token_seconds is None:
             assistant.first_token_seconds = max(0, int(first_token_seconds))
+        if web_search_sources is not None:
+            assistant.web_search_sources_json = web_search_sources or None
+        if web_search_trace is not None:
+            assistant.web_search_trace_json = web_search_trace or None
         await db.commit()
 
 
@@ -2547,6 +2703,8 @@ async def run_chat_generation_job(
     usage: dict | None = None
     tool_usage: dict | None = None
     web_search_sources: list = []
+    web_search_trace: dict | None = None
+    structured_sources: list[dict] = []
     context_event: dict | None = None
     web_search_enabled = False
     web_search_mode = "auto"
@@ -2680,9 +2838,9 @@ async def run_chat_generation_job(
         request_reasoning_effort = requested_effort if requested_effort and requested_effort in allowed_reasoning else settings.model_reasoning_effort
 
         provider = OpenAICompatibleProvider(api_key_row.base_url)
-        structured_sources: list[dict] = []
+        structured_sources = []
         if web_search_enabled:
-            web_search_sources, tool_usage = await run_web_search_tool_loop(
+            web_search_sources, tool_usage, web_search_trace = await run_web_search_tool_loop(
                 provider=provider,
                 api_key=api_key,
                 model=model,
@@ -2695,6 +2853,12 @@ async def run_chat_generation_job(
             )
             structured_sources = structured_web_search_sources(web_search_sources)
             inject_web_search_final_answer_context(context, structured_sources)
+            await _persist_assistant_partial(
+                assistant_message_id,
+                "".join(buffer),
+                web_search_sources=structured_sources,
+                web_search_trace=web_search_trace,
+            )
         stream = provider.chat_stream(
             api_key=api_key,
             model=model,
@@ -2724,6 +2888,8 @@ async def run_chat_generation_job(
                             "status": "streaming",
                             "web_search_sources": structured_sources,
                             "webSearchSources": structured_sources,
+                            "web_search_trace": web_search_trace,
+                            "webSearchTrace": web_search_trace,
                             **message_progress_event_data(assistant),
                         },
                     )
@@ -2818,6 +2984,8 @@ async def run_chat_generation_job(
                 completion_tokens=0,
                 total_tokens=0,
                 tokens_source=None,
+                web_search_sources=structured_sources,
+                web_search_trace=web_search_trace,
             )
             async with SessionLocal() as db:
                 assistant = await db.get(Message, assistant_message_id)
@@ -2831,6 +2999,10 @@ async def run_chat_generation_job(
                     "status": "failed_no_output",
                     "code": "UPSTREAM_ERROR",
                     "message": message,
+                    "web_search_sources": structured_sources,
+                    "webSearchSources": structured_sources,
+                    "web_search_trace": web_search_trace,
+                    "webSearchTrace": web_search_trace,
                     **message_progress_event_data(assistant),
                 },
             )
@@ -2871,6 +3043,7 @@ async def run_chat_generation_job(
             assistant.tokens_source = tokens_source
             assistant.first_token_seconds = first_token_seconds
             assistant.web_search_sources_json = structured_sources or None
+            assistant.web_search_trace_json = web_search_trace or None
             await db.commit()
             progress = first_token_progress_event_data(assistant)
 
@@ -2923,6 +3096,8 @@ async def run_chat_generation_job(
                 "status": "completed",
                 "web_search_sources": structured_sources,
                 "webSearchSources": structured_sources,
+                "web_search_trace": web_search_trace,
+                "webSearchTrace": web_search_trace,
                 "finished_at": datetime.utcnow().isoformat(),
                 **progress,
             },
@@ -2955,6 +3130,8 @@ async def run_chat_generation_job(
             completion_tokens=estimate_tokens_text(content) if content else 0,
             total_tokens=estimate_tokens_text(content) if content else 0,
             tokens_source="estimated" if content else None,
+            web_search_sources=structured_sources,
+            web_search_trace=web_search_trace,
         )
         async with SessionLocal() as db:
             assistant = await db.get(Message, assistant_message_id)
@@ -2968,6 +3145,10 @@ async def run_chat_generation_job(
                 "status": "failed_partial" if content else "failed_no_output",
                 "code": code,
                 "message": message,
+                "web_search_sources": structured_sources,
+                "webSearchSources": structured_sources,
+                "web_search_trace": web_search_trace,
+                "webSearchTrace": web_search_trace,
                 **message_progress_event_data(assistant),
             },
         )
@@ -2983,6 +3164,8 @@ async def run_chat_generation_job(
             completion_tokens=estimate_tokens_text(content) if content else 0,
             total_tokens=estimate_tokens_text(content) if content else 0,
             tokens_source="estimated" if content else None,
+            web_search_sources=structured_sources,
+            web_search_trace=web_search_trace,
         )
         async with SessionLocal() as db:
             assistant = await db.get(Message, assistant_message_id)
@@ -2996,6 +3179,10 @@ async def run_chat_generation_job(
                 "status": "failed_partial" if content else "failed_no_output",
                 "code": "UPSTREAM_ERROR",
                 "message": message,
+                "web_search_sources": structured_sources,
+                "webSearchSources": structured_sources,
+                "web_search_trace": web_search_trace,
+                "webSearchTrace": web_search_trace,
                 **message_progress_event_data(assistant),
             },
         )

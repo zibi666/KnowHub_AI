@@ -164,6 +164,7 @@ class Message(Base, TimestampMixin):
     tokens_source: Mapped[str | None] = mapped_column(String(20), nullable=True)
     first_token_seconds: Mapped[int | None] = mapped_column(Integer, nullable=True)
     web_search_sources_json: Mapped[list | None] = mapped_column(JSON, nullable=True)
+    web_search_trace_json: Mapped[dict | None] = mapped_column(JSON, nullable=True)
 
     conversation: Mapped[Conversation] = relationship(back_populates="messages")
     attachments: Mapped[list[MessageAttachment]] = relationship(cascade="all, delete-orphan")

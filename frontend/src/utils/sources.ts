@@ -154,7 +154,16 @@ function normalizeSource(raw: WebSearchSource, index: number): WebSearchSource |
     snippet: sourceSnippet(raw, title, url),
     siteName: raw.siteName || raw.site_name || undefined,
     publishedAt: raw.publishedAt || raw.published_at || undefined,
-    faviconUrl: raw.faviconUrl || raw.favicon_url || undefined
+    faviconUrl: raw.faviconUrl || raw.favicon_url || undefined,
+    provider: raw.provider || undefined,
+    confidence: typeof raw.confidence === 'number' ? raw.confidence : undefined,
+    rerankStatus: raw.rerankStatus || raw.rerank_status || undefined,
+    sourceTier: raw.sourceTier || raw.source_tier || undefined,
+    matchedTerms: Array.isArray(raw.matchedTerms || raw.matched_terms) ? raw.matchedTerms || raw.matched_terms : undefined,
+    supportLevel: raw.supportLevel || raw.support_level || undefined,
+    searchDepth: raw.searchDepth || raw.search_depth || undefined,
+    degraded: Boolean(raw.degraded) || undefined,
+    filterReason: raw.filterReason || raw.filter_reason || undefined
   }
   const repo = githubRepoSource(raw, url)
   source.siteName = source.siteName || (repo ? 'GitHub' : sourceSiteName(source))

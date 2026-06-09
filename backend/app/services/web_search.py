@@ -355,7 +355,7 @@ _SEARCH_ENGINE_PRIORITY = ("bing", "baidu", "google")
 _SEARCH_PROVIDER_PRIORITY = ("bocha", "sougou", "jina", "searxng", "direct", "serper")
 _SEARCH_DEPTH_VALUES = {"auto", "fast", "deep"}
 _DEEP_MAX_ROUNDS_DEFAULT = 3
-_DEEP_MAX_ROUNDS_LIMIT = 5
+_DEEP_MAX_ROUNDS_LIMIT = 10
 _SEARCH_ENGINE_TIMEOUT_SECONDS = 5.0
 _DIRECT_SEARCH_TIMEOUT_SECONDS = 8.0
 _SEARCH_ENGINE_TIMEOUT_COOLDOWN_SECONDS = 120.0
@@ -767,6 +767,27 @@ def _result_matches_query_entity(query_terms: list[str], title: str, url: str, s
     return any(any(alias.lower() in haystack for alias in _TERM_ALIASES.get(term.lower(), (term,))) for term in entity_terms)
 
 
+def _result_is_clearly_unrelated(query_terms: list[str], title: str, url: str, snippet: str, config: WebSearchConfig | None = None) -> bool:
+    if _result_matches_query_entity(query_terms, title, url, snippet):
+        return False
+    if _source_tier(url, title, config) in {"official", "major_news"}:
+        return False
+    query_text = "".join(
+        term
+        for term in query_terms
+        if term.lower() not in _TIME_SENSITIVE_QUERY_TERMS
+        and term not in _QUERY_STOP_TERMS
+        and not re.fullmatch(r"(老师|是否|了吗|怎么|什么)", term)
+    )
+    query_chars = {char for char in query_text if re.match(r"[\u4e00-\u9fff]", char)}
+    if not query_chars:
+        return False
+    haystack_chars = {char for char in f"{title} {url} {snippet}" if re.match(r"[\u4e00-\u9fff]", char)}
+    if not haystack_chars:
+        return True
+    return not bool(query_chars & haystack_chars)
+
+
 def _query_contains_time_sensitive_term(query: str) -> bool:
     lowered = query.lower()
     return any(term in lowered for term in _TIME_SENSITIVE_QUERY_TERMS)
@@ -1049,7 +1070,7 @@ def _parse_candidate_rows(
         snippet = _compact_text(_first_item_value(item, "content", "snippet", "summary", "passage", "description"), 1000)
         if high_signal_query and _is_low_value_result(title, url):
             continue
-        if high_signal_query and not _result_matches_query_entity(query_terms, title, url, snippet):
+        if high_signal_query and _result_is_clearly_unrelated(query_terms, title, url, snippet):
             continue
         candidates.append(
             WebSearchCandidate(
@@ -1740,19 +1761,22 @@ async def search_web(
     result_limit = _normalize_search_result_count(result_count, config)
     query_terms = _query_relevance_terms(clean_query)
     high_signal_query = _is_high_signal_query(query_terms, clean_query)
-    raw_candidates, _, _ = await _collect_search_candidates(
+    raw_candidates, successful_response, last_error = await _collect_search_candidates(
         clean_query,
         config,
         language=language,
         time_range=time_range,
     )
+    if not successful_response:
+        if last_error is not None:
+            raise WebSearchError(f"Search providers failed: {str(last_error)[:300]}")
+        raise WebSearchError("No configured search provider was available")
     candidates = _dedupe_candidates(raw_candidates, query_terms, config)
     if high_signal_query:
         candidates = [
             candidate
             for candidate in candidates
-            if _result_matches_query_entity(query_terms, candidate.title, candidate.url, candidate.snippet)
-            or candidate.score >= max(config.min_relevance_score, 0.45)
+            if not _result_is_clearly_unrelated(query_terms, candidate.title, candidate.url, candidate.snippet, config)
         ]
     if not candidates:
         return []
@@ -1913,9 +1937,9 @@ def web_search_tools() -> list[dict[str, Any]]:
                         },
                         "max_rounds": {
                             "type": "integer",
-                            "description": "Optional maximum deep-search rounds. The server clamps this between 1 and 5.",
+                            "description": "Optional maximum deep-search rounds. The server clamps this between 1 and 10.",
                             "minimum": 1,
-                            "maximum": 5,
+                            "maximum": 10,
                         },
                     },
                     "required": ["query"],

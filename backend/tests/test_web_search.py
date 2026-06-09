@@ -465,7 +465,7 @@ def test_search_web_queries_direct_sources_concurrently(monkeypatch):
     asyncio.run(run())
 
 
-def test_search_web_returns_empty_results_when_providers_timeout(monkeypatch):
+def test_search_web_raises_clear_error_when_all_providers_timeout(monkeypatch):
     captured_engines = []
 
     class FakeClient:
@@ -490,10 +490,10 @@ def test_search_web_returns_empty_results_when_providers_timeout(monkeypatch):
             provider_order=["searxng"],
         )
 
-        results = await search_web("test", config)
+        with pytest.raises(WebSearchError, match="Search providers failed"):
+            await search_web("test", config)
 
         assert captured_engines == ["bing", "baidu"]
-        assert results == []
 
     asyncio.run(run())
 
@@ -989,11 +989,16 @@ def test_message_out_includes_web_search_sources():
                 "favicon_url": "https://example.com/favicon.ico",
             }
         ],
+        web_search_trace_json={
+            "mode": "deep",
+            "events": [{"type": "search", "round": 1, "query": "example"}],
+        },
     )
 
     result = MessageOut.from_message(message)
 
     assert result.web_search_sources[0].url == "https://example.com/news"
+    assert result.web_search_trace["mode"] == "deep"
 
 
 def test_web_search_mode_request_defaults_and_round_clamp():
@@ -1004,7 +1009,7 @@ def test_web_search_mode_request_defaults_and_round_clamp():
     assert create_payload.web_search_mode == "auto"
     assert create_payload.web_search_max_rounds == 3
     assert update_payload.web_search_mode == "deep"
-    assert update_payload.web_search_max_rounds == 5
+    assert update_payload.web_search_max_rounds == 10
     assert send_payload.web_search_mode == "fast"
     assert send_payload.web_search_max_rounds == 1
 
@@ -1039,7 +1044,7 @@ def test_sqlite_lightweight_migration_adds_web_search_sources_column(monkeypatch
             result = await conn.execute(text("PRAGMA table_info(conversations)"))
             conversation_columns = {row[1] for row in result.fetchall()}
         await engine.dispose()
-        assert "web_search_sources_json" in columns
+        assert {"web_search_sources_json", "web_search_trace_json"} <= columns
         assert {"web_search_mode", "web_search_max_rounds"} <= conversation_columns
 
     asyncio.run(run())
@@ -1429,7 +1434,7 @@ def test_tool_loop_reuses_duplicate_searches_and_fetches_without_extra_count(mon
         monkeypatch.setattr(chat, "publish_conversation_event", fake_publish)
         monkeypatch.setattr(chat, "run_web_search_tool", fake_run_web_search_tool)
 
-        sources, usage = await chat.run_web_search_tool_loop(
+        sources, usage, trace = await chat.run_web_search_tool_loop(
             provider=FakeProvider(),
             api_key="sk-test",
             model="gpt-5.5",
@@ -1446,6 +1451,8 @@ def test_tool_loop_reuses_duplicate_searches_and_fetches_without_extra_count(mon
         assert len([item for item in context if item.get("role") == "tool"]) == 4
         assert len(sources) == 2
         assert usage["total_tokens"] == 2
+        assert trace["events"][0]["type"] == "search"
+        assert any(event.get("cached") for event in trace["events"])
         assert any(event == "web_search_status" and data.get("query") == "latest ai news" for event, data in published_events)
         assert any(event == "web_search_status" and data.get("url") == "https://example.com/news" for event, data in published_events)
         assert any(event == "web_search_status" and data.get("source_count") == 1 for event, data in published_events)
@@ -1511,7 +1518,7 @@ def test_deep_tool_loop_runs_until_requested_rounds_when_evidence_is_weak(monkey
         monkeypatch.setattr(chat, "run_web_search_tool", fake_run_web_search_tool)
         monkeypatch.setattr(chat, "review_web_search_evidence", fake_review)
 
-        sources, usage = await chat.run_web_search_tool_loop(
+        sources, usage, trace = await chat.run_web_search_tool_loop(
             provider=FakeProvider(),
             api_key="sk-test",
             model="gpt-5.5",
@@ -1527,12 +1534,13 @@ def test_deep_tool_loop_runs_until_requested_rounds_when_evidence_is_weak(monkey
         assert executed[0][1]["search_depth"] == "deep"
         assert len(sources) == 3
         assert usage["total_tokens"] == 5
+        assert any(event.get("type") == "review" and event.get("evidence_gaps") for event in trace["events"])
         assert any(event == "web_search_status" and data.get("phase") == "deepening" for event, data in published_events)
 
     asyncio.run(run())
 
 
-def test_deep_tool_loop_stops_early_when_sources_are_enough(monkeypatch):
+def test_deep_tool_loop_stops_early_when_ai_review_says_enough(monkeypatch):
     async def run():
         executed = []
         context = [{"role": "user", "content": "?? AI ??"}]
@@ -1576,15 +1584,26 @@ def test_deep_tool_loop_stops_early_when_sources_are_enough(monkeypatch):
                 ],
             }
 
-        async def fail_review(**kwargs):
-            raise AssertionError("review should not run when evidence is already enough")
+        async def fake_review(**kwargs):
+            return (
+                {
+                    "needs_more": False,
+                    "new_queries": [],
+                    "urls_to_fetch": [],
+                    "evidence_gaps": [],
+                    "relevance_notes": ["sources are semantically relevant"],
+                    "accuracy_notes": ["official and major news support is enough"],
+                    "stop_reason": "证据已足够",
+                },
+                {"prompt_tokens": 1, "completion_tokens": 1, "total_tokens": 2},
+            )
 
         monkeypatch.setattr(chat, "effective_web_search_config", fake_config)
         monkeypatch.setattr(chat, "publish_conversation_event", lambda *args, **kwargs: asyncio.sleep(0))
         monkeypatch.setattr(chat, "run_web_search_tool", fake_run_web_search_tool)
-        monkeypatch.setattr(chat, "review_web_search_evidence", fail_review)
+        monkeypatch.setattr(chat, "review_web_search_evidence", fake_review)
 
-        sources, usage = await chat.run_web_search_tool_loop(
+        sources, usage, trace = await chat.run_web_search_tool_loop(
             provider=FakeProvider(),
             api_key="sk-test",
             model="gpt-5.5",
@@ -1598,7 +1617,11 @@ def test_deep_tool_loop_stops_early_when_sources_are_enough(monkeypatch):
 
         assert len(executed) == 1
         assert len(sources) == 2
-        assert usage["total_tokens"] == 1
+        assert usage["total_tokens"] == 3
+        assert trace["source_count"] == 2
+        assert trace["early_stop"] is True
+        assert trace["stop_reason"] == "证据已足够"
+        assert any(event.get("type") == "review" and event.get("accuracy_notes") for event in trace["events"])
 
     asyncio.run(run())
 
@@ -1671,7 +1694,7 @@ def test_tool_loop_stops_after_successful_search_results(monkeypatch):
         monkeypatch.setattr(chat, "publish_conversation_event", fake_publish)
         monkeypatch.setattr(chat, "run_web_search_tool", fake_run_web_search_tool)
 
-        sources, usage = await chat.run_web_search_tool_loop(
+        sources, usage, trace = await chat.run_web_search_tool_loop(
             provider=FakeProvider(),
             api_key="sk-test",
             model="gpt-5.5",
@@ -1685,6 +1708,7 @@ def test_tool_loop_stops_after_successful_search_results(monkeypatch):
         assert tool_turn_count["value"] == 1
         assert len(sources) == 1
         assert usage["total_tokens"] == 2
+        assert trace["events"][0]["query"] == "latest ai news"
 
     asyncio.run(run())
 
@@ -1813,12 +1837,15 @@ def test_chat_job_runs_web_search_tool_and_saves_structured_sources(monkeypatch)
                         "favicon_url": "https://example.com/favicon.ico",
                     }
                 ]
+                assert assistant.web_search_trace_json
+                assert assistant.web_search_trace_json["events"][0]["query"] == "latest ai news"
                 assert assistant.total_tokens == 12
 
             assert any(event == "web_search_status" for event, _ in published_events)
             assert any(
                 event == "message_completed"
                 and data.get("web_search_sources")
+                and data.get("web_search_trace")
                 and data["web_search_sources"][0]["url"] == "https://example.com/news"
                 and "[[1]]" not in data.get("content", "")
                 for event, data in published_events
@@ -1930,6 +1957,8 @@ def test_chat_job_fallback_searches_time_sensitive_prompt_when_model_skips_tool(
                 assert "### 来源" not in assistant.content
                 assert assistant.web_search_sources_json
                 assert assistant.web_search_sources_json[0]["url"] == "https://example.com/ai-news"
+                assert assistant.web_search_trace_json
+                assert assistant.web_search_trace_json["events"][0]["phase"] == "auto_fallback"
                 assert assistant.total_tokens == 11
 
             assert tool_queries == [("search_web", {"query": "今天 AI 新闻"})]

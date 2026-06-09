@@ -24,10 +24,13 @@ import type {
   WebSearchMode,
   WebSearchSettings,
   WebSearchSource,
-  WebSearchStatus
+  WebSearchStatus,
+  WebSearchTrace,
+  WebSearchTraceEvent,
+  WebSearchTraceSource
 } from '../types'
 import { copyText } from '../utils/clipboard'
-import { sourceOpenUrl, sourceSiteName } from '../utils/sources'
+import { messageWebSearchSources, sourceOpenUrl, sourceSiteName } from '../utils/sources'
 
 type ThemeMode = 'dark' | 'light'
 type SettingsTab = 'appearance' | 'image' | 'web' | 'api' | 'groups' | 'account'
@@ -76,6 +79,7 @@ const WELCOME_SIZE_STORAGE_KEY = 'private-gpt-welcome-font-size'
 const CURRENT_CONVERSATION_STORAGE_KEY = 'private-gpt-current-conversation'
 const FILE_TREE_PIN_STORAGE_KEY = 'private-gpt-file-tree-pinned'
 const IMAGE_FINALIZATION_MIN_MS = 800
+const WEB_SEARCH_MAX_ROUNDS = 10
 const ATTACHMENT_IMAGE_MAX_EDGE = 1920
 const ATTACHMENT_IMAGE_QUALITY = 0.82
 const ATTACHMENT_IMAGE_MIN_COMPRESS_BYTES = 450 * 1024
@@ -175,6 +179,8 @@ const reindexingAttachment = ref(false)
 const sourceDrawerOpen = ref(false)
 const sourceDrawerMessageId = ref<string | null>(null)
 const sourceDrawerSources = ref<WebSearchSource[]>([])
+const searchTraceOpen = ref(false)
+const searchTraceMessage = ref<Message | null>(null)
 const error = ref('')
 const contextStats = ref({
   promptTokensEstimated: 0,
@@ -378,7 +384,7 @@ const webSearchAvailable = computed(() => webSearchStatus.value.enabled && webSe
 const webSearchToggleDisabled = computed(() => currentConversationStreaming.value || (!webSearchEnabled.value && !webSearchAvailable.value))
 const webSearchToggleLabel = computed(() => {
   if (currentConversationStreaming.value) return '生成中无法切换联网搜索'
-  if (webSearchEnabled.value) return webSearchAvailable.value ? '关闭联网搜索' : '关闭联网搜索（当前全局不可用）'
+  if (webSearchEnabled.value) return webSearchAvailable.value ? '管理联网搜索' : '管理联网搜索（当前全局不可用）'
   return webSearchAvailable.value ? '开启联网搜索' : '联网搜索未配置'
 })
 const webSearchModeText = computed(() => {
@@ -490,6 +496,174 @@ function openWebSearchSources(message: Message, sources: WebSearchSource[]) {
 
 function closeWebSearchSources() {
   sourceDrawerOpen.value = false
+}
+
+function traceList(value: unknown): string[] {
+  if (!Array.isArray(value)) return []
+  return value
+    .map((item) => String(item || '').trim())
+    .filter(Boolean)
+    .slice(0, 8)
+}
+
+function traceNumber(value: unknown): number | null {
+  const numberValue = Number(value)
+  return Number.isFinite(numberValue) ? numberValue : null
+}
+
+function messageSearchTrace(message: Message | null): WebSearchTrace | null {
+  const trace = message?.webSearchTrace || message?.web_search_trace || null
+  if (trace?.events?.length) return trace
+  const sources = message ? messageWebSearchSources(message) : []
+  if (!sources.length) return trace
+  return {
+    mode: 'legacy',
+    source_count: sources.length,
+    stop_reason: '旧消息没有保存搜索过程，仅显示已保存的来源列表。',
+    events: [
+      {
+        round: 1,
+        phase: 'sources',
+        type: 'search',
+        ok: true,
+        result_count: sources.length,
+        sources: sources.map((source) => ({
+          title: source.title,
+          url: source.url,
+          provider: source.provider,
+          confidence: source.confidence,
+          sourceTier: source.sourceTier || source.source_tier,
+          supportLevel: source.supportLevel || source.support_level,
+          searchDepth: source.searchDepth || source.search_depth,
+          degraded: source.degraded,
+          filterReason: source.filterReason || source.filter_reason
+        }))
+      }
+    ]
+  }
+}
+
+const activeSearchTrace = computed(() => messageSearchTrace(searchTraceMessage.value))
+const activeSearchTraceEvents = computed(() => activeSearchTrace.value?.events || [])
+
+function syncMessageSearchTrace(message: Message, data: any) {
+  if (!Object.prototype.hasOwnProperty.call(data || {}, 'web_search_trace') && !Object.prototype.hasOwnProperty.call(data || {}, 'webSearchTrace')) return
+  const trace = data.web_search_trace ?? data.webSearchTrace ?? null
+  message.webSearchTrace = trace
+  message.web_search_trace = trace
+}
+
+function openWebSearchTrace(message: Message) {
+  searchTraceMessage.value = message
+  searchTraceOpen.value = true
+}
+
+function closeWebSearchTrace() {
+  searchTraceOpen.value = false
+}
+
+function webSearchTraceModeLabel(trace: WebSearchTrace | null) {
+  const mode = String(trace?.mode || '').toLowerCase()
+  if (mode === 'deep') return '深度优先'
+  if (mode === 'fast') return '快速回答'
+  if (mode === 'auto') return '自动'
+  if (mode === 'legacy') return '旧消息来源'
+  return mode || '联网搜索'
+}
+
+function webSearchTraceDepthLabel(trace: WebSearchTrace | null) {
+  const depth = String(trace?.effective_depth || trace?.effectiveDepth || '').toLowerCase()
+  if (depth === 'deep') return '深搜'
+  if (depth === 'fast') return '快搜'
+  return depth
+}
+
+function webSearchTraceSummary(trace: WebSearchTrace | null) {
+  if (!trace) return []
+  const items = [`模式：${webSearchTraceModeLabel(trace)}`]
+  const depth = webSearchTraceDepthLabel(trace)
+  if (depth) items.push(`实际策略：${depth}`)
+  const maxRounds = traceNumber(trace.max_rounds ?? trace.maxRounds)
+  if (maxRounds !== null) items.push(`最大轮数：${maxRounds}`)
+  const sourceCount = traceNumber(trace.source_count ?? trace.sourceCount)
+  if (sourceCount !== null) items.push(`来源：${sourceCount}`)
+  const earlyStop = Boolean(trace.early_stop ?? trace.earlyStop)
+  if (earlyStop) items.push('提前结束')
+  return items
+}
+
+function webSearchTraceStopReason(trace: WebSearchTrace | null) {
+  return String(trace?.stop_reason || trace?.stopReason || '').trim()
+}
+
+function traceEventTitle(event: WebSearchTraceEvent) {
+  if (event.type === 'review') return `第 ${event.round || 1} 轮证据审查`
+  if (event.type === 'read') return `第 ${event.round || 1} 轮读取页面`
+  return `第 ${event.round || 1} 轮搜索`
+}
+
+function traceEventStatus(event: WebSearchTraceEvent) {
+  if (event.type === 'review') {
+    const needsMore = event.needs_more ?? event.needsMore
+    if (needsMore === true) return '继续搜索'
+    if (needsMore === false) return '证据足够'
+    return '已审查'
+  }
+  if (event.cached) return '复用结果'
+  if (event.ok === false) return '失败'
+  if (event.ok === true) return '成功'
+  return event.phase || event.tool || ''
+}
+
+function traceEventMainText(event: WebSearchTraceEvent) {
+  return String(event.query || event.url || event.tool || event.phase || '').trim()
+}
+
+function traceEventResultCount(event: WebSearchTraceEvent) {
+  return traceNumber(event.result_count ?? event.resultCount)
+}
+
+function traceEventSources(event: WebSearchTraceEvent) {
+  return Array.isArray(event.sources) ? event.sources.slice(0, 6) : []
+}
+
+function traceEventLists(event: WebSearchTraceEvent) {
+  return [
+    { label: '证据缺口', values: traceList(event.evidence_gaps ?? event.evidenceGaps) },
+    { label: '相关性判断', values: traceList(event.relevance_notes ?? event.relevanceNotes) },
+    { label: '准确性判断', values: traceList(event.accuracy_notes ?? event.accuracyNotes) },
+    { label: '后续关键词', values: traceList(event.new_queries ?? event.newQueries) },
+    { label: '待读取 URL', values: traceList(event.urls_to_fetch ?? event.urlsToFetch) }
+  ].filter((item) => item.values.length > 0)
+}
+
+function traceEventStopReason(event: WebSearchTraceEvent) {
+  return String(event.stop_reason || event.stopReason || '').trim()
+}
+
+function traceSourceTitle(source: WebSearchTraceSource) {
+  return String(source.title || source.url || '').trim()
+}
+
+function traceSourceUrl(source: WebSearchTraceSource) {
+  return String(source.url || '').trim()
+}
+
+function traceSourceDiagnostics(source: WebSearchTraceSource) {
+  const parts: string[] = []
+  const confidence = typeof source.confidence === 'number' ? source.confidence : null
+  const tier = source.sourceTier || source.source_tier
+  const support = source.supportLevel || source.support_level
+  const depth = source.searchDepth || source.search_depth
+  const filterReason = source.filterReason || source.filter_reason
+  if (source.provider) parts.push(source.provider)
+  if (confidence !== null) parts.push(`${Math.round(confidence * 100)}%`)
+  if (tier) parts.push(`tier:${tier}`)
+  if (support) parts.push(`support:${support}`)
+  if (depth) parts.push(`mode:${depth}`)
+  if (source.degraded) parts.push('degraded')
+  if (filterReason) parts.push(filterReason)
+  return parts.join(' · ')
 }
 
 function openSourceUrl(source: WebSearchSource) {
@@ -778,6 +952,8 @@ function applyRuntimeProgress(message: Message, data: any = {}) {
 function normalizeLoadedMessage(message: Message): Message {
   message.webSearchSources = message.webSearchSources || message.web_search_sources || []
   message.web_search_sources = message.webSearchSources
+  message.webSearchTrace = message.webSearchTrace || message.web_search_trace || null
+  message.web_search_trace = message.webSearchTrace
   const progress = message.imageProgress || message.image_progress
   restoreCachedStreamProgress(message)
   if (message.status === 'streaming') {
@@ -1543,13 +1719,14 @@ function normalizeConversation(conversation: Conversation): Conversation {
   const rawMode = conversation.webSearchMode ?? conversation.web_search_mode
   const mode: WebSearchMode = rawMode === 'deep' || rawMode === 'fast' || rawMode === 'auto' ? rawMode : 'auto'
   const rounds = Number(conversation.webSearchMaxRounds ?? conversation.web_search_max_rounds ?? 3)
+  const normalizedRounds = Number.isFinite(rounds) ? Math.min(WEB_SEARCH_MAX_ROUNDS, Math.max(1, Math.round(rounds))) : 3
   return {
     ...conversation,
     webSearchEnabled: Boolean(conversation.webSearchEnabled ?? conversation.web_search_enabled),
     webSearchMode: mode,
     web_search_mode: mode,
-    webSearchMaxRounds: Number.isFinite(rounds) ? Math.min(5, Math.max(1, Math.round(rounds))) : 3,
-    web_search_max_rounds: Number.isFinite(rounds) ? Math.min(5, Math.max(1, Math.round(rounds))) : 3
+    webSearchMaxRounds: normalizedRounds,
+    web_search_max_rounds: normalizedRounds
   }
 }
 
@@ -2649,7 +2826,9 @@ function applyConversationEvent(event: string, data: any) {
     createdAt: data.created_at || data.createdAt || new Date().toISOString(),
     parentMessageId: data.user_message_id || data.userMessageId || data.parent_message_id || data.parentMessageId,
     webSearchSources: data.web_search_sources || data.webSearchSources || [],
-    web_search_sources: data.web_search_sources || data.webSearchSources || []
+    web_search_sources: data.web_search_sources || data.webSearchSources || [],
+    webSearchTrace: data.web_search_trace || data.webSearchTrace || null,
+    web_search_trace: data.web_search_trace || data.webSearchTrace || null
   }
   const message = findMessage(messageId) || findMessageForMerge(eventMessage)
   if (event === 'message_delta') {
@@ -2680,6 +2859,7 @@ function applyConversationEvent(event: string, data: any) {
       message.webSearchSources = data.web_search_sources || data.webSearchSources || []
       message.web_search_sources = message.webSearchSources
     }
+    syncMessageSearchTrace(message, data)
     applyRuntimeProgress(message, data)
     syncActiveRequestState()
     return
@@ -2784,6 +2964,7 @@ function applyConversationEvent(event: string, data: any) {
         message.webSearchSources = data.web_search_sources || data.webSearchSources || []
         message.web_search_sources = message.webSearchSources
       }
+      syncMessageSearchTrace(message, data)
       applyRuntimeProgress(message, { ...data, status: message.status })
       if (message.content.trim()) freezeFirstTokenSeconds(message, { ...data, status: message.status })
       if (event === 'message_failed' && !message.content.trim() && typeof data.message === 'string' && data.message.trim()) {
@@ -2948,19 +3129,15 @@ function syncImagePolling() {
 async function toggleWebSearch() {
   if (currentConversationStreaming.value) return
   if (!webSearchEnabled.value && !webSearchAvailable.value) return
-  if (!webSearchEnabled.value) {
-    webSearchModeDraft.value = webSearchMode.value || 'auto'
-    webSearchRoundDraft.value = webSearchMaxRounds.value || 3
-    webSearchModeDialogOpen.value = true
-    return
-  }
-  await applyWebSearchChoice(false, webSearchMode.value, webSearchMaxRounds.value)
+  webSearchModeDraft.value = webSearchMode.value || 'auto'
+  webSearchRoundDraft.value = Math.min(WEB_SEARCH_MAX_ROUNDS, Math.max(1, Math.round(Number(webSearchMaxRounds.value) || 3)))
+  webSearchModeDialogOpen.value = true
 }
 
 async function applyWebSearchChoice(enabled: boolean, mode: WebSearchMode, rounds: number) {
   const nextValue = enabled
   const nextMode: WebSearchMode = mode === 'deep' || mode === 'fast' ? mode : 'auto'
-  const nextRounds = Math.min(5, Math.max(1, Math.round(Number(rounds) || 3)))
+  const nextRounds = Math.min(WEB_SEARCH_MAX_ROUNDS, Math.max(1, Math.round(Number(rounds) || 3)))
   const previousEnabled = webSearchEnabled.value
   const previousMode = webSearchMode.value
   const previousRounds = webSearchMaxRounds.value
@@ -3944,6 +4121,7 @@ onUnmounted(() => {
               :message="message"
               @preview-attachment="openAttachmentPreview"
               @open-sources="openWebSearchSources"
+              @open-search-trace="openWebSearchTrace"
             />
           </div>
         </section>
@@ -3986,6 +4164,61 @@ onUnmounted(() => {
             </button>
           </div>
         </aside>
+
+        <Transition name="modal-fade">
+          <div v-if="searchTraceOpen" class="settings-modal-backdrop search-trace-backdrop" @click.self="closeWebSearchTrace">
+            <section class="search-trace-modal" role="dialog" aria-modal="true" aria-label="联网搜索过程">
+              <div class="source-drawer-header">
+                <div>
+                  <span>证据审查摘要</span>
+                  <strong>搜索过程</strong>
+                </div>
+                <button class="source-drawer-close" type="button" title="关闭" aria-label="关闭搜索过程" @click="closeWebSearchTrace">
+                  <X :size="18" />
+                </button>
+              </div>
+              <div v-if="activeSearchTrace" class="search-trace-body">
+                <div class="search-trace-summary">
+                  <span v-for="item in webSearchTraceSummary(activeSearchTrace)" :key="item" class="search-trace-chip">{{ item }}</span>
+                </div>
+                <p v-if="webSearchTraceStopReason(activeSearchTrace)" class="search-trace-stop">{{ webSearchTraceStopReason(activeSearchTrace) }}</p>
+                <div class="search-trace-list">
+                  <article v-for="(event, index) in activeSearchTraceEvents" :key="`${event.round || 0}-${event.type || 'event'}-${index}`" class="search-trace-event">
+                    <div class="search-trace-event-head">
+                      <div>
+                        <span>{{ traceEventTitle(event) }}</span>
+                        <strong v-if="traceEventMainText(event)">{{ traceEventMainText(event) }}</strong>
+                      </div>
+                      <em :class="{ failed: event.ok === false }">{{ traceEventStatus(event) }}</em>
+                    </div>
+                    <div class="search-trace-event-meta">
+                      <span v-if="event.tool">{{ event.tool }}</span>
+                      <span v-if="event.phase">{{ event.phase }}</span>
+                      <span v-if="traceEventResultCount(event) !== null">结果 {{ traceEventResultCount(event) }}</span>
+                      <span v-if="event.error">失败：{{ event.error }}</span>
+                    </div>
+                    <p v-if="traceEventStopReason(event)" class="search-trace-note">{{ traceEventStopReason(event) }}</p>
+                    <div v-if="traceEventLists(event).length" class="search-trace-review">
+                      <div v-for="group in traceEventLists(event)" :key="group.label" class="search-trace-review-group">
+                        <span>{{ group.label }}</span>
+                        <ul>
+                          <li v-for="item in group.values" :key="item">{{ item }}</li>
+                        </ul>
+                      </div>
+                    </div>
+                    <div v-if="traceEventSources(event).length" class="search-trace-sources">
+                      <a v-for="source in traceEventSources(event)" :key="traceSourceUrl(source)" :href="traceSourceUrl(source)" target="_blank" rel="noreferrer">
+                        <strong>{{ traceSourceTitle(source) }}</strong>
+                        <span v-if="traceSourceDiagnostics(source)">{{ traceSourceDiagnostics(source) }}</span>
+                      </a>
+                    </div>
+                  </article>
+                </div>
+              </div>
+              <div v-else class="search-trace-empty">这条消息没有保存搜索过程。</div>
+            </section>
+          </div>
+        </Transition>
 
         <aside
           v-if="userQuestionNavItems.length > 0"
@@ -4283,11 +4516,11 @@ onUnmounted(() => {
 
     <Transition name="modal-fade">
       <div v-if="webSearchModeDialogOpen" class="settings-modal-backdrop web-search-mode-backdrop" @click.self="webSearchModeDialogOpen = false">
-        <section class="web-search-mode-modal" role="dialog" aria-modal="true" aria-label="选择联网搜索模式">
+        <section class="web-search-mode-modal" role="dialog" aria-modal="true" :aria-label="webSearchEnabled ? '管理联网搜索' : '选择联网搜索模式'">
           <div class="web-search-mode-header">
             <div>
-              <strong>选择联网搜索模式</strong>
-              <span>本次会话会记住你的选择</span>
+              <strong>{{ webSearchEnabled ? '管理联网搜索' : '选择联网搜索模式' }}</strong>
+              <span>{{ webSearchEnabled ? '修改本会话的联网搜索设置，或关闭联网搜索' : '本次会话会记住你的选择' }}</span>
             </div>
             <button class="source-drawer-close" type="button" title="关闭" aria-label="关闭" @click="webSearchModeDialogOpen = false">
               <X :size="18" />
@@ -4309,12 +4542,20 @@ onUnmounted(() => {
           </div>
           <label v-if="webSearchModeDraft === 'deep'" class="web-search-round-field">
             <span>最大深搜轮数</span>
-            <input v-model.number="webSearchRoundDraft" type="number" min="1" max="5" />
+            <input v-model.number="webSearchRoundDraft" type="number" min="1" :max="WEB_SEARCH_MAX_ROUNDS" />
           </label>
           <div class="web-search-mode-actions">
+            <button
+              v-if="webSearchEnabled"
+              class="settings-secondary web-search-mode-danger"
+              type="button"
+              @click="applyWebSearchChoice(false, webSearchMode, webSearchMaxRounds)"
+            >
+              关闭联网搜索
+            </button>
             <button class="settings-secondary" type="button" @click="webSearchModeDialogOpen = false">取消</button>
             <button class="settings-primary" type="button" @click="applyWebSearchChoice(true, webSearchModeDraft, webSearchModeDraft === 'deep' ? webSearchRoundDraft : 3)">
-              开启联网搜索
+              {{ webSearchEnabled ? '保存设置' : '开启联网搜索' }}
             </button>
           </div>
         </section>

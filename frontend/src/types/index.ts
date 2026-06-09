@@ -56,6 +56,8 @@ export interface Message {
   progress_phase?: string
   webSearchSources?: WebSearchSource[]
   web_search_sources?: WebSearchSource[]
+  webSearchTrace?: WebSearchTrace | null
+  web_search_trace?: WebSearchTrace | null
 }
 
 export interface WebSearchSource {
@@ -91,6 +93,68 @@ export interface WebSearchSource {
 export interface WebSearchStatus {
   enabled: boolean
   configured: boolean
+}
+
+export interface WebSearchTraceSource {
+  title?: string
+  url?: string
+  provider?: string | null
+  confidence?: number | null
+  sourceTier?: string | null
+  source_tier?: string | null
+  supportLevel?: string | null
+  support_level?: string | null
+  searchDepth?: string | null
+  search_depth?: string | null
+  degraded?: boolean
+  filterReason?: string | null
+  filter_reason?: string | null
+}
+
+export interface WebSearchTraceEvent {
+  round?: number
+  phase?: string
+  type?: 'search' | 'read' | 'review' | string
+  tool?: string
+  ok?: boolean
+  cached?: boolean
+  query?: string
+  url?: string
+  result_count?: number
+  resultCount?: number
+  sources?: WebSearchTraceSource[]
+  needs_more?: boolean
+  needsMore?: boolean
+  new_queries?: string[]
+  newQueries?: string[]
+  urls_to_fetch?: string[]
+  urlsToFetch?: string[]
+  evidence_gaps?: string[]
+  evidenceGaps?: string[]
+  relevance_notes?: string[]
+  relevanceNotes?: string[]
+  accuracy_notes?: string[]
+  accuracyNotes?: string[]
+  reason_codes?: string[]
+  reasonCodes?: string[]
+  stop_reason?: string
+  stopReason?: string
+  error?: string
+}
+
+export interface WebSearchTrace {
+  mode?: WebSearchMode | string
+  effective_depth?: string
+  effectiveDepth?: string
+  max_rounds?: number
+  maxRounds?: number
+  source_count?: number
+  sourceCount?: number
+  early_stop?: boolean
+  earlyStop?: boolean
+  stop_reason?: string
+  stopReason?: string
+  events?: WebSearchTraceEvent[]
 }
 
 export interface WebSearchSettings {
