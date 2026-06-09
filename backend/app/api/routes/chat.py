@@ -286,6 +286,8 @@ async def create_conversation(
         user_id=user.id,
         title=payload.title or "新对话",
         web_search_enabled=payload.web_search_enabled,
+        web_search_mode=payload.web_search_mode,
+        web_search_max_rounds=max(1, min(5, int(payload.web_search_max_rounds or 3))),
     )
     db.add(conversation)
     await db.commit()
@@ -309,6 +311,10 @@ async def update_conversation(
         conversation.auto_compaction_enabled = payload.auto_compaction_enabled
     if payload.web_search_enabled is not None:
         conversation.web_search_enabled = payload.web_search_enabled
+    if payload.web_search_mode is not None:
+        conversation.web_search_mode = payload.web_search_mode
+    if payload.web_search_max_rounds is not None:
+        conversation.web_search_max_rounds = max(1, min(5, int(payload.web_search_max_rounds or 3)))
     await db.commit()
     await db.refresh(conversation)
     return conversation

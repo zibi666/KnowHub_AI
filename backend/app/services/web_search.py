@@ -9,7 +9,7 @@ import json
 import re
 import socket
 import time
-from dataclasses import asdict, dataclass, field
+from dataclasses import asdict, dataclass, field, replace
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any
@@ -40,7 +40,7 @@ class WebSearchConfig:
     fetch_timeout_seconds: int
     max_tool_calls: int
     fetch_max_chars: int
-    provider_order: list[str] = field(default_factory=lambda: ["searxng", "bocha", "sougou", "jina"])
+    provider_order: list[str] = field(default_factory=lambda: ["bocha", "sougou", "jina", "searxng", "serper"])
     searxng_engines: list[str] = field(default_factory=lambda: ["bing", "baidu"])
     candidate_count: int = 20
     fetch_top_n: int = 5
@@ -86,6 +86,12 @@ class WebSearchResult:
     confidence: float | None = None
     evidence: str = ""
     rerank_status: str | None = None
+    source_tier: str | None = None
+    matched_terms: list[str] = field(default_factory=list)
+    support_level: str | None = None
+    search_depth: str | None = None
+    degraded: bool = False
+    filter_reason: str | None = None
 
 
 @dataclass
@@ -100,6 +106,12 @@ class WebSearchSource:
     provider: str | None = None
     confidence: float | None = None
     rerank_status: str | None = None
+    source_tier: str | None = None
+    matched_terms: list[str] = field(default_factory=list)
+    support_level: str | None = None
+    search_depth: str | None = None
+    degraded: bool = False
+    filter_reason: str | None = None
 
 
 @dataclass
@@ -127,6 +139,7 @@ class EvidenceChunk:
     text: str
     score: float
     rerank_status: str
+    degraded: bool = False
 
 
 _HEADERS = {
@@ -230,19 +243,106 @@ _TIME_SENSITIVE_QUERY_TERMS = {
     "死了吗",
 }
 
+_DEEP_INTENT_TERMS = {
+    "news",
+    "latest",
+    "today",
+    "current",
+    "recent",
+    "breaking",
+    "policy",
+    "law",
+    "legal",
+    "medical",
+    "finance",
+    "stock",
+    "death",
+    "dead",
+    "rumor",
+    "新闻",
+    "最新",
+    "今天",
+    "今日",
+    "现在",
+    "当前",
+    "近期",
+    "最近",
+    "政策",
+    "法律",
+    "法规",
+    "医疗",
+    "医学",
+    "金融",
+    "股票",
+    "去世",
+    "逝世",
+    "死亡",
+    "死了",
+    "死了吗",
+    "辟谣",
+    "谣言",
+    "属实",
+}
+
 _TERM_ALIASES = {
     "ai": ("ai", "人工智能", "人工智慧"),
 }
 
 _TIME_RANGE_VALUES = {"day", "week", "month", "year"}
 _SEARCH_ENGINE_PRIORITY = ("bing", "baidu", "google")
-_SEARCH_PROVIDER_PRIORITY = ("searxng", "bocha", "sougou", "jina", "serper")
+_SEARCH_PROVIDER_PRIORITY = ("bocha", "sougou", "jina", "searxng", "serper")
+_SEARCH_DEPTH_VALUES = {"auto", "fast", "deep"}
+_DEEP_MAX_ROUNDS_DEFAULT = 3
+_DEEP_MAX_ROUNDS_LIMIT = 5
 _SEARCH_ENGINE_TIMEOUT_SECONDS = 5.0
 _SEARCH_ENGINE_TIMEOUT_COOLDOWN_SECONDS = 120.0
 _SEARCH_ENGINE_CAPTCHA_COOLDOWN_SECONDS = 3600.0
 _SEARCH_ENGINE_ERROR_COOLDOWN_SECONDS = 60.0
 _search_engine_cooldown_until: dict[str, float] = {}
 _reranker_cache: dict[str, Any] = {}
+
+_OFFICIAL_DOMAIN_SUFFIXES = (
+    ".gov.cn",
+    ".gov",
+    ".edu.cn",
+    ".edu",
+)
+_MAJOR_NEWS_DOMAINS = {
+    "xinhuanet.com",
+    "news.cn",
+    "people.com.cn",
+    "cctv.com",
+    "央视网",
+    "chinanews.com.cn",
+    "thepaper.cn",
+    "caixin.com",
+    "yicai.com",
+    "36kr.com",
+    "reuters.com",
+    "apnews.com",
+    "bbc.com",
+    "cnn.com",
+    "nytimes.com",
+    "wsj.com",
+    "bloomberg.com",
+}
+_UGC_LOW_DOMAINS = {
+    "zhihu.com",
+    "weibo.com",
+    "tieba.baidu.com",
+    "douban.com",
+    "bilibili.com",
+    "xiaohongshu.com",
+}
+_SPAM_LOW_TERMS = (
+    "站长之家",
+    "自媒体",
+    "转载",
+    "聚合",
+    "快照",
+    "广告",
+    "下载",
+)
 
 
 def _runtime_web_search_settings() -> dict[str, Any]:
@@ -307,6 +407,17 @@ def _split_domain_list(value: Any, *, limit: int = 100) -> list[str]:
     return domains
 
 
+def normalize_search_depth(value: Any, default: str = "auto") -> str:
+    candidate = str(value or "").strip().lower()
+    if candidate in _SEARCH_DEPTH_VALUES:
+        return candidate
+    return default if default in _SEARCH_DEPTH_VALUES else "auto"
+
+
+def normalize_max_rounds(value: Any, default: int = _DEEP_MAX_ROUNDS_DEFAULT) -> int:
+    return _coerce_int(value, default, minimum=1, maximum=_DEEP_MAX_ROUNDS_LIMIT)
+
+
 def normalize_web_search_settings(raw: dict[str, Any]) -> dict[str, Any]:
     base_url = str(raw.get("searxng_base_url") or "").strip() or None
     return {
@@ -319,7 +430,7 @@ def normalize_web_search_settings(raw: dict[str, Any]) -> dict[str, Any]:
         "fetch_timeout_seconds": _coerce_int(raw.get("fetch_timeout_seconds"), 20, minimum=3, maximum=60),
         "max_tool_calls": _coerce_int(raw.get("max_tool_calls"), 4, minimum=1, maximum=10),
         "fetch_max_chars": _coerce_int(raw.get("fetch_max_chars"), 12000, minimum=1000, maximum=50000),
-        "provider_order": _split_config_list(raw.get("provider_order"), ["searxng", "bocha", "sougou", "jina"], allowed=_SEARCH_PROVIDER_PRIORITY),
+        "provider_order": _split_config_list(raw.get("provider_order"), ["bocha", "sougou", "jina", "searxng", "serper"], allowed=_SEARCH_PROVIDER_PRIORITY),
         "searxng_engines": _split_config_list(raw.get("searxng_engines"), ["bing", "baidu"], allowed=_SEARCH_ENGINE_PRIORITY),
         "candidate_count": _coerce_int(raw.get("candidate_count"), 20, minimum=3, maximum=50),
         "fetch_top_n": _coerce_int(raw.get("fetch_top_n"), 5, minimum=0, maximum=10),
@@ -354,7 +465,7 @@ def effective_web_search_config() -> WebSearchConfig:
         "fetch_timeout_seconds": setting("web_search_fetch_timeout_seconds", 20),
         "max_tool_calls": setting("web_search_max_tool_calls", 4),
         "fetch_max_chars": setting("web_search_fetch_max_chars", 12000),
-        "provider_order": setting("web_search_provider_order", "searxng,bocha,sougou,jina"),
+        "provider_order": setting("web_search_provider_order", "bocha,sougou,jina,searxng,serper"),
         "searxng_engines": setting("web_search_searxng_engines", "bing,baidu"),
         "candidate_count": setting("web_search_candidate_count", 20),
         "fetch_top_n": setting("web_search_fetch_top_n", 5),
@@ -542,6 +653,15 @@ def _query_relevance_terms(query: str) -> list[str]:
     for item in re.findall(r"[a-z0-9][a-z0-9._-]{1,}", lowered):
         if item not in _QUERY_STOP_TERMS:
             terms.add(item)
+    try:
+        import jieba  # type: ignore
+
+        for token in jieba.cut(query):
+            piece = str(token or "").strip().lower()
+            if len(piece) >= 2 and piece not in _QUERY_STOP_TERMS:
+                terms.add(piece)
+    except Exception:
+        pass
     for chunk in re.findall(r"[\u4e00-\u9fff]{2,}", query):
         if chunk not in _QUERY_STOP_TERMS and len(chunk) <= 4:
             terms.add(chunk)
@@ -588,6 +708,40 @@ def _query_contains_time_sensitive_term(query: str) -> bool:
     return any(term in lowered for term in _TIME_SENSITIVE_QUERY_TERMS)
 
 
+def query_prefers_deep_search(query: str) -> bool:
+    lowered = query.lower()
+    return any(term.lower() in lowered for term in _DEEP_INTENT_TERMS)
+
+
+def effective_search_depth(query: str, requested_depth: Any = None) -> str:
+    requested = normalize_search_depth(requested_depth)
+    if requested != "auto":
+        return requested
+    return "deep" if query_prefers_deep_search(query) else "fast"
+
+
+def _config_for_search_depth(config: WebSearchConfig, depth: str) -> WebSearchConfig:
+    if depth == "fast":
+        return replace(
+            config,
+            timeout_seconds=min(config.timeout_seconds, 6),
+            fetch_timeout_seconds=min(config.fetch_timeout_seconds, 6),
+            candidate_count=min(config.candidate_count, 12),
+            fetch_top_n=min(config.fetch_top_n, 3),
+            max_evidence_chunks=min(config.max_evidence_chunks, 5),
+        )
+    if depth == "deep":
+        return replace(
+            config,
+            timeout_seconds=max(3, min(config.timeout_seconds, 18)),
+            fetch_timeout_seconds=max(3, min(config.fetch_timeout_seconds, 12)),
+            candidate_count=max(config.candidate_count, 24),
+            fetch_top_n=max(config.fetch_top_n, 6),
+            max_evidence_chunks=max(config.max_evidence_chunks, 10),
+        )
+    return config
+
+
 def _allow_unfiltered_fallback(query_terms: list[str], query: str) -> bool:
     if _query_contains_time_sensitive_term(query):
         return False
@@ -618,6 +772,47 @@ def _host_matches_domain(host: str, domains: list[str]) -> bool:
 
 def _source_domain(url: str) -> str:
     return (urlsplit(url).hostname or "").lower().strip(".")
+
+
+def _source_tier(url: str, title: str = "", config: WebSearchConfig | None = None) -> str:
+    host = _source_domain(url)
+    if config and config.trusted_domains and _host_matches_domain(host, config.trusted_domains):
+        return "official"
+    if any(host.endswith(suffix) for suffix in _OFFICIAL_DOMAIN_SUFFIXES):
+        return "official"
+    if _host_matches_domain(host, list(_MAJOR_NEWS_DOMAINS)):
+        return "major_news"
+    if _host_matches_domain(host, list(_UGC_LOW_DOMAINS)):
+        return "ugc_low"
+    lowered = f"{host} {title}".lower()
+    if any(term.lower() in lowered for term in _SPAM_LOW_TERMS):
+        return "spam_low"
+    return "normal"
+
+
+def _matched_query_terms(query_terms: list[str], text: str) -> list[str]:
+    lowered = text.lower()
+    matched: list[str] = []
+    for term in query_terms:
+        if term.lower() in _TIME_SENSITIVE_QUERY_TERMS or term in _QUERY_STOP_TERMS:
+            continue
+        aliases = _TERM_ALIASES.get(term.lower(), (term,))
+        if any(alias.lower() in lowered for alias in aliases) and term not in matched:
+            matched.append(term)
+        if len(matched) >= 8:
+            break
+    return matched
+
+
+def _support_level(confidence: float | None, source_tier: str | None) -> str:
+    value = float(confidence or 0.0)
+    if source_tier in {"ugc_low", "spam_low"}:
+        return "low" if value < 0.8 else "medium"
+    if value >= 0.68:
+        return "high"
+    if value >= 0.45:
+        return "medium"
+    return "low"
 
 
 def _raw_search_score(item: dict[str, Any]) -> float:
@@ -721,8 +916,14 @@ def _initial_candidate_score(candidate: WebSearchCandidate, query_terms: list[st
     raw_score = min(1.0, max(0.0, candidate.score / 10.0)) if candidate.score > 1 else max(0.0, candidate.score)
     domain = _source_domain(candidate.url)
     trusted_boost = 0.08 if config.trusted_domains and _host_matches_domain(domain, config.trusted_domains) else 0.0
+    tier = _source_tier(candidate.url, candidate.title, config)
+    tier_boost = 0.08 if tier == "official" else 0.04 if tier == "major_news" else 0.0
+    tier_penalty = 0.12 if tier == "ugc_low" else 0.22 if tier == "spam_low" else 0.0
     low_value_penalty = 0.2 if _is_low_value_result(candidate.title, candidate.url) else 0.0
-    return max(0.0, min(1.0, 0.42 * relevance + 0.28 * rank_score + 0.12 * raw_score + provider_boost + trusted_boost - low_value_penalty))
+    return max(
+        0.0,
+        min(1.0, 0.42 * relevance + 0.28 * rank_score + 0.12 * raw_score + provider_boost + trusted_boost + tier_boost - low_value_penalty - tier_penalty),
+    )
 
 
 def _dedupe_candidates(candidates: list[WebSearchCandidate], query_terms: list[str], config: WebSearchConfig) -> list[WebSearchCandidate]:
@@ -768,28 +969,35 @@ async def _search_searxng_candidates(
     engines = [engine for engine in config.searxng_engines if _search_engine_available(engine)]
     if not engines:
         engines = [config.searxng_engines[0] if config.searxng_engines else "bing"]
-    for engine in engines:
+
+    async def search_engine(engine: str) -> tuple[list[WebSearchCandidate], bool, httpx.HTTPError | None]:
         engine_params = {**params, "engines": engine}
         try:
             response = await client.get(config.searxng_base_url, headers=_HEADERS, params=engine_params)
             response.raise_for_status()
         except httpx.HTTPError as exc:
-            last_error = exc
-            continue
-        successful_response = True
+            return [], False, exc
         payload = response.json()
         if isinstance(payload, dict):
             _record_unresponsive_engines(payload)
         rows = payload.get("results") if isinstance(payload, dict) else []
-        candidates.extend(
+        return (
             _parse_candidate_rows(
                 rows,
                 provider="searxng",
                 query_terms=query_terms,
                 high_signal_query=high_signal_query,
                 blocked_domains=config.blocked_domains,
-            )
+            ),
+            True,
+            None,
         )
+
+    for provider_candidates, provider_success, provider_error in await asyncio.gather(*(search_engine(engine) for engine in engines)):
+        successful_response = successful_response or provider_success
+        if provider_error is not None:
+            last_error = provider_error
+        candidates.extend(provider_candidates)
     return candidates, successful_response, last_error
 
 
@@ -936,44 +1144,39 @@ async def _collect_search_candidates(
     candidates: list[WebSearchCandidate] = []
     successful_response = False
     last_error: httpx.HTTPError | None = None
+
+    async def search_provider(client: httpx.AsyncClient, provider: str) -> tuple[list[WebSearchCandidate], bool, httpx.HTTPError | None]:
+        try:
+            if provider == "searxng":
+                return await _search_searxng_candidates(
+                    client,
+                    query,
+                    config,
+                    language=language,
+                    time_range=time_range,
+                )
+            if provider == "bocha" and config.bocha_api_key:
+                return await _search_bocha_candidates(client, query, config), True, None
+            if provider == "sougou" and config.sougou_api_sid and config.sougou_api_sk:
+                return await _search_sougou_candidates(client, query, config), True, None
+            if provider == "jina" and config.jina_api_key:
+                return await _search_jina_candidates(client, query, config), True, None
+            if provider == "serper" and config.serper_api_key:
+                return await _search_serper_candidates(client, query, config), True, None
+            return [], False, None
+        except httpx.HTTPError as exc:
+            return [], False, exc
+        except Exception:
+            return [], False, None
+
     async with httpx.AsyncClient(timeout=_search_request_timeout(config)) as client:
-        for provider in config.provider_order:
-            try:
-                provider_candidates: list[WebSearchCandidate] = []
-                provider_success = False
-                if provider == "searxng":
-                    provider_candidates, provider_success, provider_error = await _search_searxng_candidates(
-                        client,
-                        query,
-                        config,
-                        language=language,
-                        time_range=time_range,
-                    )
-                    if provider_error is not None:
-                        last_error = provider_error
-                elif provider == "bocha":
-                    if config.bocha_api_key:
-                        provider_candidates = await _search_bocha_candidates(client, query, config)
-                        provider_success = True
-                elif provider == "sougou":
-                    if config.sougou_api_sid and config.sougou_api_sk:
-                        provider_candidates = await _search_sougou_candidates(client, query, config)
-                        provider_success = True
-                elif provider == "jina":
-                    if config.jina_api_key:
-                        provider_candidates = await _search_jina_candidates(client, query, config)
-                        provider_success = True
-                elif provider == "serper":
-                    if config.serper_api_key:
-                        provider_candidates = await _search_serper_candidates(client, query, config)
-                        provider_success = True
+        tasks = [search_provider(client, provider) for provider in config.provider_order]
+        if tasks:
+            for provider_candidates, provider_success, provider_error in await asyncio.gather(*tasks):
                 successful_response = successful_response or provider_success
+                if provider_error is not None:
+                    last_error = provider_error
                 candidates.extend(provider_candidates)
-            except httpx.HTTPError as exc:
-                last_error = exc
-                continue
-            except Exception:
-                continue
     return candidates, successful_response, last_error
 
 
@@ -997,6 +1200,25 @@ def _extract_readable_text(raw_text: str, content_type: str = "") -> tuple[str, 
             title, body = _strip_html(text)
             return title, body
     return title, re.sub(r"\s+", " ", text).strip()
+
+
+async def _fetch_with_jina_reader(candidate: WebSearchCandidate, config: WebSearchConfig) -> WebFetchResult | None:
+    reader_url = f"https://r.jina.ai/{candidate.url}"
+    headers = {"Accept": "text/plain,application/json;q=0.9,*/*;q=0.2"}
+    if config.jina_api_key:
+        headers["Authorization"] = config.jina_api_key
+    try:
+        async with httpx.AsyncClient(timeout=min(config.fetch_timeout_seconds, 10)) as client:
+            response = await client.get(reader_url, headers=headers)
+            response.raise_for_status()
+            content_type = response.headers.get("content-type", "").lower()
+            title, content = _extract_readable_text(response.text, content_type)
+            content = _compact_text(content, 200000)
+            if not content:
+                return None
+            return WebFetchResult(title=title or candidate.title, url=candidate.url, content=content)
+    except Exception:
+        return None
 
 
 async def _fetch_candidate_readable_text(candidate: WebSearchCandidate, config: WebSearchConfig) -> WebFetchResult | None:
@@ -1033,10 +1255,10 @@ async def _fetch_candidate_readable_text(candidate: WebSearchCandidate, config: 
                     encoding = response.encoding or "utf-8"
                     title, content = _extract_readable_text(raw.decode(encoding, errors="replace"), content_type)
                     if not content:
-                        return None
+                        return await _fetch_with_jina_reader(candidate, config)
                     return WebFetchResult(title=title or candidate.title, url=str(response.url), content=content)
     except Exception:
-        return None
+        return await _fetch_with_jina_reader(candidate, config)
     return None
 
 
@@ -1087,12 +1309,62 @@ async def _cross_encoder_scores(model_name: str, query: str, chunks: list[str]) 
         return None
 
 
+async def _jina_rerank_scores(query: str, chunks: list[str], config: WebSearchConfig) -> list[float] | None:
+    if not chunks or not config.jina_api_key:
+        return None
+    try:
+        async with httpx.AsyncClient(timeout=min(config.timeout_seconds, 10)) as client:
+            response = await client.post(
+                "https://api.jina.ai/v1/rerank",
+                headers={
+                    "Authorization": config.jina_api_key,
+                    "Content-Type": "application/json",
+                    "Accept": "application/json",
+                },
+                json={
+                    "model": "jina-reranker-v2-base-multilingual",
+                    "query": query,
+                    "documents": chunks,
+                    "top_n": len(chunks),
+                },
+            )
+            response.raise_for_status()
+            payload = response.json()
+    except Exception:
+        return None
+    rows = payload.get("results") if isinstance(payload, dict) else None
+    if not isinstance(rows, list):
+        rows = payload.get("data") if isinstance(payload, dict) else None
+    if not isinstance(rows, list):
+        return None
+    scores = [0.0 for _ in chunks]
+    seen = False
+    for row in rows:
+        if not isinstance(row, dict):
+            continue
+        try:
+            index = int(row.get("index"))
+            score = float(row.get("relevance_score", row.get("score", 0.0)) or 0.0)
+        except (TypeError, ValueError):
+            continue
+        if 0 <= index < len(scores):
+            scores[index] = max(0.0, min(1.0, score))
+            seen = True
+    return scores if seen else None
+
+
 async def _build_evidence_chunks(query: str, candidates: list[WebSearchCandidate], config: WebSearchConfig) -> list[EvidenceChunk]:
     query_terms = _query_relevance_terms(query)
     source_candidates = candidates[: max(0, config.fetch_top_n)]
     evidence: list[EvidenceChunk] = []
-    for candidate in source_candidates:
-        fetched = await _fetch_candidate_readable_text(candidate, config)
+    semaphore = asyncio.Semaphore(4)
+
+    async def fetch_candidate(candidate: WebSearchCandidate) -> tuple[WebSearchCandidate, WebFetchResult | None]:
+        async with semaphore:
+            return candidate, await _fetch_candidate_readable_text(candidate, config)
+
+    fetched_rows = await asyncio.gather(*(fetch_candidate(candidate) for candidate in source_candidates)) if source_candidates else []
+    for candidate, fetched in fetched_rows:
         text = fetched.content if fetched and fetched.content else candidate.snippet
         if fetched and fetched.title:
             candidate.title = canonical_source_title(fetched.title, candidate.url, candidate.url)
@@ -1107,6 +1379,7 @@ async def _build_evidence_chunks(query: str, candidates: list[WebSearchCandidate
                     text=chunk,
                     score=_lexical_chunk_score(query_terms, chunk, candidate.score),
                     rerank_status="lexical",
+                    degraded=fetched is None,
                 )
             )
     for candidate in candidates[max(0, config.fetch_top_n) :]:
@@ -1118,41 +1391,78 @@ async def _build_evidence_chunks(query: str, candidates: list[WebSearchCandidate
                 text=candidate.snippet,
                 score=_lexical_chunk_score(query_terms, candidate.snippet, candidate.score),
                 rerank_status="snippet",
+                degraded=False,
             )
         )
     if config.rerank_enabled and evidence:
-        model_scores = await _cross_encoder_scores(config.reranker_model, query, [item.text for item in evidence])
+        model_scores = await _jina_rerank_scores(query, [item.text for item in evidence], config)
         if model_scores is not None:
             for item, model_score in zip(evidence, model_scores):
                 item.score = max(0.0, min(1.0, 0.68 * model_score + 0.32 * item.candidate.score))
-                item.rerank_status = "local"
+                item.rerank_status = "jina"
         else:
-            for item in evidence:
-                item.rerank_status = "fallback"
+            model_scores = await _cross_encoder_scores(config.reranker_model, query, [item.text for item in evidence])
+            if model_scores is not None:
+                for item, model_score in zip(evidence, model_scores):
+                    item.score = max(0.0, min(1.0, 0.68 * model_score + 0.32 * item.candidate.score))
+                    item.rerank_status = "local"
+            else:
+                for item in evidence:
+                    item.rerank_status = "fallback"
+                    item.degraded = True
     return sorted(evidence, key=lambda item: (-item.score, -item.candidate.score, item.candidate.rank))
 
 
-def _results_from_evidence(evidence: list[EvidenceChunk], result_limit: int, config: WebSearchConfig) -> list[WebSearchResult]:
+def _quality_adjusted_confidence(score: float, source_tier: str) -> float:
+    if source_tier == "official":
+        return min(1.0, score + 0.08)
+    if source_tier == "major_news":
+        return min(1.0, score + 0.04)
+    if source_tier == "ugc_low":
+        return max(0.0, score - 0.12)
+    if source_tier == "spam_low":
+        return max(0.0, score - 0.22)
+    return score
+
+
+def _results_from_evidence(
+    evidence: list[EvidenceChunk],
+    result_limit: int,
+    config: WebSearchConfig,
+    *,
+    query_terms: list[str],
+    search_depth: str,
+) -> list[WebSearchResult]:
     results: list[WebSearchResult] = []
     seen: set[str] = set()
     for chunk in evidence:
-        if chunk.score < config.min_relevance_score:
-            continue
         candidate = chunk.candidate
         url = canonical_source_url(candidate.url)
         if not url or url in seen:
             continue
+        title = canonical_source_title(candidate.title, candidate.url, url)
+        source_tier = _source_tier(url, title, config)
+        confidence = _quality_adjusted_confidence(chunk.score, source_tier)
+        if confidence < config.min_relevance_score:
+            continue
         seen.add(url)
+        matched_terms = _matched_query_terms(query_terms, f"{title} {url} {candidate.snippet} {chunk.text}")
         results.append(
             WebSearchResult(
-                title=canonical_source_title(candidate.title, candidate.url, url),
+                title=title,
                 url=url,
                 snippet=_compact_text(candidate.snippet or chunk.text, 700),
                 provider=candidate.provider,
                 published_at=candidate.published_at,
-                confidence=round(float(chunk.score), 3),
+                confidence=round(float(confidence), 3),
                 evidence=_compact_text(chunk.text, 1200),
                 rerank_status=chunk.rerank_status,
+                source_tier=source_tier,
+                matched_terms=matched_terms,
+                support_level=_support_level(confidence, source_tier),
+                search_depth=search_depth,
+                degraded=chunk.degraded,
+                filter_reason="low_quality_source" if source_tier in {"ugc_low", "spam_low"} else None,
             )
         )
         if len(results) >= result_limit:
@@ -1167,6 +1477,7 @@ def _fallback_results_from_candidates(
     query_terms: list[str],
     query: str,
     config: WebSearchConfig,
+    search_depth: str,
 ) -> list[WebSearchResult]:
     if not _allow_unfiltered_fallback(query_terms, query):
         candidates = [
@@ -1183,10 +1494,14 @@ def _fallback_results_from_candidates(
         if candidate.score < config.min_relevance_score and not _allow_unfiltered_fallback(query_terms, query):
             continue
         seen.add(url)
+        title = canonical_source_title(candidate.title, candidate.url, url)
+        source_tier = _source_tier(url, title, config)
         confidence = max(config.min_relevance_score, candidate.score) if _allow_unfiltered_fallback(query_terms, query) else candidate.score
+        confidence = _quality_adjusted_confidence(confidence, source_tier)
+        matched_terms = _matched_query_terms(query_terms, f"{title} {url} {candidate.snippet}")
         results.append(
             WebSearchResult(
-                title=canonical_source_title(candidate.title, candidate.url, url),
+                title=title,
                 url=url,
                 snippet=_compact_text(candidate.snippet, 700),
                 provider=candidate.provider,
@@ -1194,6 +1509,12 @@ def _fallback_results_from_candidates(
                 confidence=round(float(confidence), 3),
                 evidence=_compact_text(candidate.snippet, 1200),
                 rerank_status="candidate",
+                source_tier=source_tier,
+                matched_terms=matched_terms,
+                support_level=_support_level(confidence, source_tier),
+                search_depth=search_depth,
+                degraded=False,
+                filter_reason="fallback_candidate" if not matched_terms else None,
             )
         )
         if len(results) >= result_limit:
@@ -1208,6 +1529,8 @@ async def search_web(
     result_count: Any = None,
     language: Any = None,
     time_range: Any = None,
+    search_depth: Any = None,
+    max_rounds: Any = None,
 ) -> list[WebSearchResult]:
     config = config or effective_web_search_config()
     if not config.configured:
@@ -1215,6 +1538,10 @@ async def search_web(
     clean_query = _compact_text(query, 300)
     if not clean_query:
         return []
+    depth = effective_search_depth(clean_query, search_depth)
+    max_rounds = normalize_max_rounds(max_rounds)
+    del max_rounds
+    config = _config_for_search_depth(config, depth)
     result_limit = _normalize_search_result_count(result_count, config)
     query_terms = _query_relevance_terms(clean_query)
     high_signal_query = _is_high_signal_query(query_terms, clean_query)
@@ -1235,7 +1562,13 @@ async def search_web(
     if not candidates:
         return []
     evidence = await _build_evidence_chunks(clean_query, candidates, config)
-    results = _results_from_evidence(evidence[: config.max_evidence_chunks], result_limit, config)
+    results = _results_from_evidence(
+        evidence[: config.max_evidence_chunks],
+        result_limit,
+        config,
+        query_terms=query_terms,
+        search_depth=depth,
+    )
     if results:
         return results
     return _fallback_results_from_candidates(
@@ -1244,6 +1577,7 @@ async def search_web(
         query_terms=query_terms,
         query=clean_query,
         config=config,
+        search_depth=depth,
     )
 
 
@@ -1377,6 +1711,17 @@ def web_search_tools() -> list[dict[str, Any]]:
                             "description": "Optional recency filter.",
                             "enum": ["day", "week", "month", "year"],
                         },
+                        "search_depth": {
+                            "type": "string",
+                            "description": "Optional search mode. auto lets the server choose fast or deep, fast prioritizes latency, deep prioritizes evidence quality.",
+                            "enum": ["auto", "fast", "deep"],
+                        },
+                        "max_rounds": {
+                            "type": "integer",
+                            "description": "Optional maximum deep-search rounds. The server clamps this between 1 and 5.",
+                            "minimum": 1,
+                            "maximum": 5,
+                        },
                     },
                     "required": ["query"],
                     "additionalProperties": False,
@@ -1420,6 +1765,8 @@ async def run_web_search_tool(name: str, arguments: dict[str, Any], config: WebS
                 result_count=argument_value(arguments, "result_count", "resultCount"),
                 language=argument_value(arguments, "language"),
                 time_range=argument_value(arguments, "time_range", "timeRange"),
+                search_depth=argument_value(arguments, "search_depth", "searchDepth"),
+                max_rounds=argument_value(arguments, "max_rounds", "maxRounds"),
             )
             return {"ok": True, "results": [asdict(item) for item in results]}
         if name == "fetch_url":
@@ -1453,6 +1800,16 @@ def tool_result_sources(payload: dict[str, Any]) -> list[WebSearchResult]:
                         confidence=float(item["confidence"]) if isinstance(item.get("confidence"), (int, float)) else None,
                         evidence=_compact_text(item.get("evidence"), 1200),
                         rerank_status=_compact_text(item.get("rerank_status") or item.get("rerankStatus"), 80) or None,
+                        source_tier=_compact_text(item.get("source_tier") or item.get("sourceTier"), 80) or None,
+                        matched_terms=[
+                            _compact_text(term, 80)
+                            for term in (item.get("matched_terms") or item.get("matchedTerms") or [])
+                            if _compact_text(term, 80)
+                        ][:8],
+                        support_level=_compact_text(item.get("support_level") or item.get("supportLevel"), 80) or None,
+                        search_depth=_compact_text(item.get("search_depth") or item.get("searchDepth"), 80) or None,
+                        degraded=bool(item.get("degraded", False)),
+                        filter_reason=_compact_text(item.get("filter_reason") or item.get("filterReason"), 160) or None,
                     )
                 )
     elif payload.get("url"):
@@ -1585,6 +1942,12 @@ def structured_web_search_sources(sources: list[WebSearchResult], *, limit: int 
                 provider=source.provider,
                 confidence=source.confidence,
                 rerank_status=source.rerank_status,
+                source_tier=source.source_tier,
+                matched_terms=source.matched_terms,
+                support_level=source.support_level,
+                search_depth=source.search_depth,
+                degraded=source.degraded,
+                filter_reason=source.filter_reason,
             )
         )
         if len(deduped) >= limit:
@@ -1592,9 +1955,13 @@ def structured_web_search_sources(sources: list[WebSearchResult], *, limit: int 
     rows: list[dict[str, Any]] = []
     for item in deduped:
         row = asdict(item)
-        for key in ("provider", "confidence", "rerank_status"):
+        for key in ("provider", "confidence", "rerank_status", "source_tier", "support_level", "search_depth", "filter_reason"):
             if row.get(key) is None:
                 row.pop(key, None)
+        if not row.get("matched_terms"):
+            row.pop("matched_terms", None)
+        if not row.get("degraded"):
+            row.pop("degraded", None)
         rows.append(row)
     return rows
 
@@ -1640,14 +2007,23 @@ def format_search_results_for_context(query: str, payload: dict[str, Any]) -> st
         snippet = _compact_text(item.get("evidence") or item.get("snippet") or item.get("content"), 700)
         confidence = item.get("confidence")
         provider = _compact_text(item.get("provider"), 80)
+        source_tier = _compact_text(item.get("source_tier") or item.get("sourceTier"), 80)
+        support_level = _compact_text(item.get("support_level") or item.get("supportLevel"), 80)
+        rerank_status = _compact_text(item.get("rerank_status") or item.get("rerankStatus"), 80)
         lines.append(f"{index}. {title}")
         lines.append(f"   URL: {url}")
-        if provider or isinstance(confidence, (int, float)):
+        if provider or source_tier or support_level or rerank_status or isinstance(confidence, (int, float)):
             meta = []
             if provider:
                 meta.append(f"provider={provider}")
             if isinstance(confidence, (int, float)):
                 meta.append(f"confidence={confidence:.2f}")
+            if source_tier:
+                meta.append(f"tier={source_tier}")
+            if support_level:
+                meta.append(f"support={support_level}")
+            if rerank_status:
+                meta.append(f"rerank={rerank_status}")
             lines.append(f"   Meta: {', '.join(meta)}")
         if snippet:
             lines.append(f"   Evidence: {snippet}")

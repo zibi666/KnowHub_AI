@@ -21,6 +21,7 @@ import type {
   ModelEndpoint,
   SendMessageResponse,
   User,
+  WebSearchMode,
   WebSearchSettings,
   WebSearchSource,
   WebSearchStatus
@@ -298,12 +299,37 @@ const imageSettings = ref<ImageGenerationSettings>({
   moderation: 'auto'
 })
 const webSearchEnabled = ref(false)
+const webSearchMode = ref<WebSearchMode>('auto')
+const webSearchMaxRounds = ref(3)
+const webSearchModeDialogOpen = ref(false)
+const webSearchModeDraft = ref<WebSearchMode>('auto')
+const webSearchRoundDraft = ref(3)
 const webSearchStatus = ref<WebSearchStatus>({ enabled: false, configured: false })
 const webSearchSettingsLoading = ref(false)
 const webSearchSettingsSaving = ref(false)
 const webSearchTesting = ref(false)
 const webSearchTestQuery = ref('')
-const webSearchTestResults = ref<Array<{ title: string; url: string; snippet?: string; evidence?: string; provider?: string; confidence?: number; rerankStatus?: string; rerank_status?: string }>>([])
+const webSearchTestResults = ref<Array<{
+  title: string
+  url: string
+  snippet?: string
+  evidence?: string
+  provider?: string
+  confidence?: number
+  rerankStatus?: string
+  rerank_status?: string
+  sourceTier?: string
+  source_tier?: string
+  matchedTerms?: string[]
+  matched_terms?: string[]
+  supportLevel?: string
+  support_level?: string
+  searchDepth?: string
+  search_depth?: string
+  degraded?: boolean
+  filterReason?: string
+  filter_reason?: string
+}>>([])
 const webSearchSettings = ref<WebSearchSettings>({
   enabled: false,
   searxngBaseUrl: '',
@@ -314,7 +340,7 @@ const webSearchSettings = ref<WebSearchSettings>({
   fetchTimeoutSeconds: 20,
   maxToolCalls: 4,
   fetchMaxChars: 12000,
-  providerOrder: ['searxng', 'bocha', 'sougou', 'jina'],
+  providerOrder: ['bocha', 'sougou', 'jina', 'searxng', 'serper'],
   searxngEngines: ['bing', 'baidu'],
   candidateCount: 20,
   fetchTopN: 5,
@@ -354,6 +380,12 @@ const webSearchToggleLabel = computed(() => {
   if (currentConversationStreaming.value) return '生成中无法切换联网搜索'
   if (webSearchEnabled.value) return webSearchAvailable.value ? '关闭联网搜索' : '关闭联网搜索（当前全局不可用）'
   return webSearchAvailable.value ? '开启联网搜索' : '联网搜索未配置'
+})
+const webSearchModeText = computed(() => {
+  if (!webSearchEnabled.value) return ''
+  if (webSearchMode.value === 'deep') return `深搜 ${webSearchMaxRounds.value}轮`
+  if (webSearchMode.value === 'fast') return '快速'
+  return '自动'
 })
 const activeFileTreeAttachments = computed(() => (currentId.value ? conversationAttachments.value : draftConversationAttachments.value))
 const selectedFileTreeAttachments = computed(() => activeFileTreeAttachments.value.filter((item) => item.selected))
@@ -499,6 +531,27 @@ function sourceSummaryText(source: WebSearchSource) {
   }
   if (!summary || summary === title) return ''
   return truncateSourceText(summary)
+}
+
+function sourceDiagnostics(source: WebSearchSource) {
+  const parts: string[] = []
+  const confidence = typeof source.confidence === 'number' ? source.confidence : null
+  const tier = source.sourceTier || source.source_tier
+  const support = source.supportLevel || source.support_level
+  const rerank = source.rerankStatus || source.rerank_status
+  const depth = source.searchDepth || source.search_depth
+  const filterReason = source.filterReason || source.filter_reason
+  const matched = source.matchedTerms || source.matched_terms || []
+  if (source.provider) parts.push(source.provider)
+  if (confidence !== null) parts.push(`${Math.round(confidence * 100)}%`)
+  if (tier) parts.push(`tier:${tier}`)
+  if (support) parts.push(`support:${support}`)
+  if (rerank) parts.push(`rerank:${rerank}`)
+  if (depth) parts.push(`mode:${depth}`)
+  if (source.degraded) parts.push('degraded')
+  if (matched.length) parts.push(`match:${matched.slice(0, 4).join(',')}`)
+  if (filterReason) parts.push(filterReason)
+  return parts.join(' · ')
 }
 
 function selectedModelSupportsVision() {
@@ -1487,9 +1540,16 @@ function conversationUpdatedAtMs(conversation: Conversation) {
 }
 
 function normalizeConversation(conversation: Conversation): Conversation {
+  const rawMode = conversation.webSearchMode ?? conversation.web_search_mode
+  const mode: WebSearchMode = rawMode === 'deep' || rawMode === 'fast' || rawMode === 'auto' ? rawMode : 'auto'
+  const rounds = Number(conversation.webSearchMaxRounds ?? conversation.web_search_max_rounds ?? 3)
   return {
     ...conversation,
-    webSearchEnabled: Boolean(conversation.webSearchEnabled ?? conversation.web_search_enabled)
+    webSearchEnabled: Boolean(conversation.webSearchEnabled ?? conversation.web_search_enabled),
+    webSearchMode: mode,
+    web_search_mode: mode,
+    webSearchMaxRounds: Number.isFinite(rounds) ? Math.min(5, Math.max(1, Math.round(rounds))) : 3,
+    web_search_max_rounds: Number.isFinite(rounds) ? Math.min(5, Math.max(1, Math.round(rounds))) : 3
   }
 }
 
@@ -1498,7 +1558,16 @@ function activeConversationWebSearchEnabled() {
 }
 
 function syncWebSearchToggleFromConversation() {
-  webSearchEnabled.value = currentId.value ? activeConversationWebSearchEnabled() : false
+  if (!currentId.value) {
+    webSearchEnabled.value = false
+    webSearchMode.value = 'auto'
+    webSearchMaxRounds.value = 3
+    return
+  }
+  const conversation = currentConversation.value ? normalizeConversation(currentConversation.value) : null
+  webSearchEnabled.value = Boolean(conversation?.webSearchEnabled ?? false)
+  webSearchMode.value = conversation?.webSearchMode || 'auto'
+  webSearchMaxRounds.value = conversation?.webSearchMaxRounds || 3
 }
 
 function sortConversationsByUpdatedAt(items: Conversation[]) {
@@ -2879,21 +2948,49 @@ function syncImagePolling() {
 async function toggleWebSearch() {
   if (currentConversationStreaming.value) return
   if (!webSearchEnabled.value && !webSearchAvailable.value) return
-  const nextValue = !webSearchEnabled.value
+  if (!webSearchEnabled.value) {
+    webSearchModeDraft.value = webSearchMode.value || 'auto'
+    webSearchRoundDraft.value = webSearchMaxRounds.value || 3
+    webSearchModeDialogOpen.value = true
+    return
+  }
+  await applyWebSearchChoice(false, webSearchMode.value, webSearchMaxRounds.value)
+}
+
+async function applyWebSearchChoice(enabled: boolean, mode: WebSearchMode, rounds: number) {
+  const nextValue = enabled
+  const nextMode: WebSearchMode = mode === 'deep' || mode === 'fast' ? mode : 'auto'
+  const nextRounds = Math.min(5, Math.max(1, Math.round(Number(rounds) || 3)))
+  const previousEnabled = webSearchEnabled.value
+  const previousMode = webSearchMode.value
+  const previousRounds = webSearchMaxRounds.value
   webSearchEnabled.value = nextValue
+  webSearchMode.value = nextMode
+  webSearchMaxRounds.value = nextRounds
+  webSearchModeDialogOpen.value = false
   const conversationId = currentId.value
   if (!conversationId) return
-  conversations.value = conversations.value.map((item) => (item.id === conversationId ? { ...item, webSearchEnabled: nextValue } : item))
+  conversations.value = conversations.value.map((item) =>
+    item.id === conversationId
+      ? { ...item, webSearchEnabled: nextValue, webSearchMode: nextMode, webSearchMaxRounds: nextRounds }
+      : item
+  )
   try {
     const updated = normalizeConversation(await apiFetch<Conversation>(`/conversations/${conversationId}`, {
       method: 'PATCH',
-      body: JSON.stringify({ webSearchEnabled: nextValue })
+      body: JSON.stringify({ webSearchEnabled: nextValue, webSearchMode: nextMode, webSearchMaxRounds: nextRounds })
     }))
     conversations.value = sortConversationsByUpdatedAt(conversations.value.map((item) => (item.id === updated.id ? { ...item, ...updated } : item)))
   } catch (err) {
-    webSearchEnabled.value = !nextValue
-    conversations.value = conversations.value.map((item) => (item.id === conversationId ? { ...item, webSearchEnabled: !nextValue } : item))
-    error.value = err instanceof Error ? err.message : '联网搜索开关保存失败'
+    webSearchEnabled.value = previousEnabled
+    webSearchMode.value = previousMode
+    webSearchMaxRounds.value = previousRounds
+    conversations.value = conversations.value.map((item) =>
+      item.id === conversationId
+        ? { ...item, webSearchEnabled: previousEnabled, webSearchMode: previousMode, webSearchMaxRounds: previousRounds }
+        : item
+    )
+    error.value = err instanceof Error ? err.message : '联网搜索设置保存失败'
   }
 }
 
@@ -2918,6 +3015,9 @@ function newChat() {
   error.value = ''
   streaming.value = false
   webSearchEnabled.value = false
+  webSearchMode.value = 'auto'
+  webSearchMaxRounds.value = 3
+  webSearchModeDialogOpen.value = false
 }
 
 async function loadConversations() {
@@ -3332,7 +3432,12 @@ async function send() {
     if (!targetConversationId && draftConversationAttachments.value.length) {
       const created = await apiFetch<Conversation>('/conversations', {
         method: 'POST',
-        body: JSON.stringify({ title: (userText.trim() || '新对话').slice(0, 30), webSearchEnabled: webSearchEnabled.value })
+        body: JSON.stringify({
+          title: (userText.trim() || '新对话').slice(0, 30),
+          webSearchEnabled: webSearchEnabled.value,
+          webSearchMode: webSearchMode.value,
+          webSearchMaxRounds: webSearchMaxRounds.value
+        })
       })
       targetConversationId = created.id
       currentId.value = created.id
@@ -3348,6 +3453,8 @@ async function send() {
         attachmentIds,
         referencedAttachmentIds,
         webSearchEnabled: webSearchEnabled.value,
+        webSearchMode: webSearchMode.value,
+        webSearchMaxRounds: webSearchMaxRounds.value,
         reasoningEffort: reasoningEffort.value
       })
     })
@@ -3871,6 +3978,7 @@ onUnmounted(() => {
                   <SourceIcon :source="source" />
                   <span class="source-result-site">{{ sourceSiteName(source) }}</span>
                   <span v-if="sourcePublishedLabel(source)" class="source-result-date">{{ sourcePublishedLabel(source) }}</span>
+                  <span v-if="sourceDiagnostics(source)" class="source-result-date">{{ sourceDiagnostics(source) }}</span>
                 </span>
                 <strong class="source-result-title">{{ source.title }}</strong>
                 <em v-if="sourceSummaryText(source)" class="source-result-summary">{{ sourceSummaryText(source) }}</em>
@@ -4156,6 +4264,7 @@ onUnmounted(() => {
                 @click="toggleWebSearch"
               >
                 <Globe :size="18" />
+                <span v-if="webSearchModeText" class="web-search-mode-text">{{ webSearchModeText }}</span>
               </button>
 
             </div>
@@ -4171,6 +4280,46 @@ onUnmounted(() => {
 
 
     </main>
+
+    <Transition name="modal-fade">
+      <div v-if="webSearchModeDialogOpen" class="settings-modal-backdrop web-search-mode-backdrop" @click.self="webSearchModeDialogOpen = false">
+        <section class="web-search-mode-modal" role="dialog" aria-modal="true" aria-label="选择联网搜索模式">
+          <div class="web-search-mode-header">
+            <div>
+              <strong>选择联网搜索模式</strong>
+              <span>本次会话会记住你的选择</span>
+            </div>
+            <button class="source-drawer-close" type="button" title="关闭" aria-label="关闭" @click="webSearchModeDialogOpen = false">
+              <X :size="18" />
+            </button>
+          </div>
+          <div class="web-search-mode-options">
+            <button type="button" class="web-search-mode-option" :class="{ active: webSearchModeDraft === 'auto' }" @click="webSearchModeDraft = 'auto'">
+              <strong>自动</strong>
+              <span>按问题自动选择快速或深搜</span>
+            </button>
+            <button type="button" class="web-search-mode-option" :class="{ active: webSearchModeDraft === 'deep' }" @click="webSearchModeDraft = 'deep'">
+              <strong>深度优先</strong>
+              <span>多轮读取页面并补充关键词</span>
+            </button>
+            <button type="button" class="web-search-mode-option" :class="{ active: webSearchModeDraft === 'fast' }" @click="webSearchModeDraft = 'fast'">
+              <strong>快速回答</strong>
+              <span>单轮低延迟搜索</span>
+            </button>
+          </div>
+          <label v-if="webSearchModeDraft === 'deep'" class="web-search-round-field">
+            <span>最大深搜轮数</span>
+            <input v-model.number="webSearchRoundDraft" type="number" min="1" max="5" />
+          </label>
+          <div class="web-search-mode-actions">
+            <button class="settings-secondary" type="button" @click="webSearchModeDialogOpen = false">取消</button>
+            <button class="settings-primary" type="button" @click="applyWebSearchChoice(true, webSearchModeDraft, webSearchModeDraft === 'deep' ? webSearchRoundDraft : 3)">
+              开启联网搜索
+            </button>
+          </div>
+        </section>
+      </div>
+    </Transition>
 
     <Transition name="modal-fade">
       <div v-if="settingsOpen" class="settings-modal-backdrop" @click.self="settingsOpen = false">
@@ -4379,7 +4528,7 @@ onUnmounted(() => {
                     </label>
                     <label class="settings-field settings-field-wide">
                       <span>搜索源顺序</span>
-                      <input :value="listSettingText(webSearchSettings.providerOrder)" class="settings-input" placeholder="searxng, bocha, sougou, jina" @input="webSearchSettings.providerOrder = normalizeListSetting(($event.target as HTMLInputElement).value)" />
+                      <input :value="listSettingText(webSearchSettings.providerOrder)" class="settings-input" placeholder="bocha, sougou, jina, searxng, serper" @input="webSearchSettings.providerOrder = normalizeListSetting(($event.target as HTMLInputElement).value)" />
                     </label>
                     <label class="settings-field settings-field-wide">
                       <span>SearXNG 引擎</span>
@@ -4487,7 +4636,13 @@ onUnmounted(() => {
                       <small>
                         {{ item.provider || 'source' }}
                         <template v-if="typeof item.confidence === 'number'"> · {{ Math.round(item.confidence * 100) }}%</template>
+                        <template v-if="item.sourceTier || item.source_tier"> · tier:{{ item.sourceTier || item.source_tier }}</template>
+                        <template v-if="item.supportLevel || item.support_level"> · support:{{ item.supportLevel || item.support_level }}</template>
+                        <template v-if="item.searchDepth || item.search_depth"> · mode:{{ item.searchDepth || item.search_depth }}</template>
                         <template v-if="item.rerankStatus || item.rerank_status"> · {{ item.rerankStatus || item.rerank_status }}</template>
+                        <template v-if="item.degraded"> · degraded</template>
+                        <template v-if="(item.matchedTerms || item.matched_terms)?.length"> · match:{{ (item.matchedTerms || item.matched_terms || []).slice(0, 4).join(',') }}</template>
+                        <template v-if="item.filterReason || item.filter_reason"> · {{ item.filterReason || item.filter_reason }}</template>
                       </small>
                       <span>{{ item.evidence || item.snippet || item.url }}</span>
                     </a>

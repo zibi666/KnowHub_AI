@@ -6019,8 +6019,114 @@ body,
 }
 
 .web-search-toggle.active {
+  width: auto;
+  gap: 0.38rem;
+  padding: 0 0.72rem;
   background: color-mix(in srgb, var(--bubble-bg) 18%, transparent);
   color: var(--bubble-bg);
+}
+
+.web-search-mode-text {
+  max-width: 5.5rem;
+  overflow: hidden;
+  font-size: 0.78rem;
+  font-weight: 700;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.web-search-mode-backdrop {
+  z-index: 90;
+}
+
+.web-search-mode-modal {
+  width: min(520px, calc(100vw - 2rem));
+  border: 1px solid var(--input-border);
+  border-radius: 14px;
+  background: var(--panel-bg);
+  color: var(--text);
+  box-shadow: 0 24px 90px rgba(0, 0, 0, 0.46);
+  padding: 1rem;
+}
+
+.web-search-mode-header,
+.web-search-mode-actions {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 0.8rem;
+}
+
+.web-search-mode-header strong {
+  display: block;
+  font-size: 1rem;
+}
+
+.web-search-mode-header span {
+  display: block;
+  margin-top: 0.2rem;
+  color: var(--muted);
+  font-size: 0.82rem;
+}
+
+.web-search-mode-options {
+  display: grid;
+  gap: 0.65rem;
+  margin: 1rem 0;
+}
+
+.web-search-mode-option {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 0.8rem;
+  width: 100%;
+  border: 1px solid var(--input-border);
+  border-radius: 10px;
+  background: var(--control-bg);
+  color: var(--text);
+  cursor: pointer;
+  padding: 0.82rem 0.9rem;
+  text-align: left;
+  transition: background 150ms ease, border-color 150ms ease, transform 150ms ease;
+}
+
+.web-search-mode-option:hover,
+.web-search-mode-option.active {
+  border-color: color-mix(in srgb, var(--bubble-bg) 52%, var(--input-border));
+  background: color-mix(in srgb, var(--bubble-bg) 13%, var(--control-bg));
+}
+
+.web-search-mode-option strong {
+  flex: 0 0 auto;
+  font-size: 0.92rem;
+}
+
+.web-search-mode-option span {
+  min-width: 0;
+  color: var(--muted);
+  font-size: 0.8rem;
+  overflow-wrap: anywhere;
+  text-align: right;
+}
+
+.web-search-round-field {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 0.8rem;
+  margin-bottom: 1rem;
+  color: var(--muted);
+  font-size: 0.86rem;
+}
+
+.web-search-round-field input {
+  width: 5rem;
+  border: 1px solid var(--input-border);
+  border-radius: 8px;
+  background: var(--input-bg);
+  color: var(--text);
+  padding: 0.5rem 0.6rem;
 }
 
 .composer-input {

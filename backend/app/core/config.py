@@ -101,7 +101,7 @@ class Settings(BaseSettings):
     web_search_fetch_timeout_seconds: int = 20
     web_search_max_tool_calls: int = 4
     web_search_fetch_max_chars: int = 12000
-    web_search_provider_order: str = "searxng,bocha,sougou,jina"
+    web_search_provider_order: str = "bocha,sougou,jina,searxng,serper"
     web_search_searxng_engines: str = "bing,baidu"
     web_search_candidate_count: int = 20
     web_search_fetch_top_n: int = 5

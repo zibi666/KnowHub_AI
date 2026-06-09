@@ -77,6 +77,12 @@ async def ensure_lightweight_migrations(conn) -> None:
         result = await conn.execute(text("SHOW COLUMNS FROM conversations LIKE 'web_search_enabled'"))
         if result.first() is None:
             await conn.execute(text("ALTER TABLE conversations ADD COLUMN web_search_enabled BOOLEAN NOT NULL DEFAULT FALSE"))
+        result = await conn.execute(text("SHOW COLUMNS FROM conversations LIKE 'web_search_mode'"))
+        if result.first() is None:
+            await conn.execute(text("ALTER TABLE conversations ADD COLUMN web_search_mode VARCHAR(20) NOT NULL DEFAULT 'auto'"))
+        result = await conn.execute(text("SHOW COLUMNS FROM conversations LIKE 'web_search_max_rounds'"))
+        if result.first() is None:
+            await conn.execute(text("ALTER TABLE conversations ADD COLUMN web_search_max_rounds INT NOT NULL DEFAULT 3"))
         return
 
     if settings.database_url.startswith("sqlite"):
@@ -114,3 +120,7 @@ async def ensure_lightweight_migrations(conn) -> None:
         existing_conversations = {row[1] for row in result.fetchall()}
         if "web_search_enabled" not in existing_conversations:
             await conn.execute(text("ALTER TABLE conversations ADD COLUMN web_search_enabled BOOLEAN NOT NULL DEFAULT 0"))
+        if "web_search_mode" not in existing_conversations:
+            await conn.execute(text("ALTER TABLE conversations ADD COLUMN web_search_mode VARCHAR(20) NOT NULL DEFAULT 'auto'"))
+        if "web_search_max_rounds" not in existing_conversations:
+            await conn.execute(text("ALTER TABLE conversations ADD COLUMN web_search_max_rounds INTEGER NOT NULL DEFAULT 3"))

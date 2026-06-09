@@ -14,9 +14,15 @@ export interface Conversation {
   autoCompactionEnabled: boolean
   webSearchEnabled?: boolean
   web_search_enabled?: boolean
+  webSearchMode?: WebSearchMode
+  web_search_mode?: WebSearchMode
+  webSearchMaxRounds?: number
+  web_search_max_rounds?: number
   createdAt: string
   updatedAt: string
 }
+
+export type WebSearchMode = 'auto' | 'deep' | 'fast'
 
 export interface Message {
   id: string
@@ -65,6 +71,21 @@ export interface WebSearchSource {
   favicon_url?: string | null
   displayUrl?: string
   display_url?: string
+  provider?: string | null
+  confidence?: number | null
+  rerankStatus?: string | null
+  rerank_status?: string | null
+  sourceTier?: string | null
+  source_tier?: string | null
+  matchedTerms?: string[]
+  matched_terms?: string[]
+  supportLevel?: string | null
+  support_level?: string | null
+  searchDepth?: string | null
+  search_depth?: string | null
+  degraded?: boolean
+  filterReason?: string | null
+  filter_reason?: string | null
 }
 
 export interface WebSearchStatus {

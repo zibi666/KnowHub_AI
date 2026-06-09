@@ -38,7 +38,7 @@ class WebSearchSettings(ApiModel):
     fetch_timeout_seconds: int = 20
     max_tool_calls: int = 4
     fetch_max_chars: int = 12000
-    provider_order: list[str] = Field(default_factory=lambda: ["searxng", "bocha", "sougou", "jina"])
+    provider_order: list[str] = Field(default_factory=lambda: ["bocha", "sougou", "jina", "searxng", "serper"])
     searxng_engines: list[str] = Field(default_factory=lambda: ["bing", "baidu"])
     candidate_count: int = 20
     fetch_top_n: int = 5

@@ -11,7 +11,7 @@ from app.core import db as core_db
 from app.core.db import Base
 from app.models.entities import ApiKeyGroup, Conversation, Message, User, UserApiKey, UserQuota
 from app.providers.openai_compatible import OpenAICompatibleProvider, StreamEvent, ToolCall, ToolCallTurnResult
-from app.schemas.chat import MessageOut
+from app.schemas.chat import CreateConversationRequest, MessageOut, SendMessageRequest, UpdateConversationRequest
 from app.security.crypto import encrypt_api_key
 from app.services import api_keys, chat
 from app.services import web_search
@@ -710,6 +710,19 @@ def test_message_out_includes_web_search_sources():
     assert result.web_search_sources[0].url == "https://example.com/news"
 
 
+def test_web_search_mode_request_defaults_and_round_clamp():
+    create_payload = CreateConversationRequest()
+    update_payload = UpdateConversationRequest(web_search_mode="deep", web_search_max_rounds=99)
+    send_payload = SendMessageRequest(content="search", web_search_mode="fast", web_search_max_rounds=0)
+
+    assert create_payload.web_search_mode == "auto"
+    assert create_payload.web_search_max_rounds == 3
+    assert update_payload.web_search_mode == "deep"
+    assert update_payload.web_search_max_rounds == 5
+    assert send_payload.web_search_mode == "fast"
+    assert send_payload.web_search_max_rounds == 1
+
+
 def test_sqlite_lightweight_migration_adds_web_search_sources_column(monkeypatch):
     async def run():
         engine = create_async_engine("sqlite+aiosqlite:///:memory:")
@@ -737,8 +750,11 @@ def test_sqlite_lightweight_migration_adds_web_search_sources_column(monkeypatch
             await core_db.ensure_lightweight_migrations(conn)
             result = await conn.execute(text("PRAGMA table_info(messages)"))
             columns = {row[1] for row in result.fetchall()}
+            result = await conn.execute(text("PRAGMA table_info(conversations)"))
+            conversation_columns = {row[1] for row in result.fetchall()}
         await engine.dispose()
         assert "web_search_sources_json" in columns
+        assert {"web_search_mode", "web_search_max_rounds"} <= conversation_columns
 
     asyncio.run(run())
 
@@ -1133,6 +1149,156 @@ def test_tool_loop_reuses_duplicate_searches_and_fetches_without_extra_count(mon
         assert any(event == "web_search_status" and data.get("query") == "latest ai news" for event, data in published_events)
         assert any(event == "web_search_status" and data.get("url") == "https://example.com/news" for event, data in published_events)
         assert any(event == "web_search_status" and data.get("source_count") == 1 for event, data in published_events)
+
+    asyncio.run(run())
+
+
+def test_deep_tool_loop_runs_until_requested_rounds_when_evidence_is_weak(monkeypatch):
+    async def run():
+        published_events = []
+        executed = []
+        context = [{"role": "user", "content": "张雪峰老师死了吗"}]
+
+        class FakeProvider:
+            async def tool_call_turn(self, **kwargs):
+                return ToolCallTurnResult(tool_calls=[], usage={"prompt_tokens": 1, "completion_tokens": 0, "total_tokens": 1})
+
+        def fake_config():
+            return WebSearchConfig(
+                enabled=True,
+                searxng_base_url="https://search.example.com/search",
+                result_count=3,
+                language="all",
+                safesearch="1",
+                timeout_seconds=5,
+                fetch_timeout_seconds=5,
+                max_tool_calls=3,
+                fetch_max_chars=4000,
+            )
+
+        async def fake_publish(conversation_id, event, data):
+            published_events.append((event, data))
+
+        async def fake_run_web_search_tool(name, arguments, config):
+            executed.append((name, arguments))
+            return {
+                "ok": True,
+                "results": [
+                    {
+                        "title": "Weak Source",
+                        "url": f"https://example.com/{len(executed)}",
+                        "snippet": "unconfirmed",
+                        "confidence": 0.3,
+                        "source_tier": "normal",
+                    }
+                ],
+            }
+
+        async def fake_review(**kwargs):
+            return (
+                {
+                    "needs_more": True,
+                    "new_queries": [f"张雪峰 死亡 辟谣 第{kwargs['round_index']}轮"],
+                    "urls_to_fetch": [],
+                    "evidence_gaps": ["no strong sources"],
+                    "reason_codes": ["weak_sources"],
+                },
+                {"prompt_tokens": 1, "completion_tokens": 1, "total_tokens": 2},
+            )
+
+        monkeypatch.setattr(chat, "effective_web_search_config", fake_config)
+        monkeypatch.setattr(chat, "publish_conversation_event", fake_publish)
+        monkeypatch.setattr(chat, "run_web_search_tool", fake_run_web_search_tool)
+        monkeypatch.setattr(chat, "review_web_search_evidence", fake_review)
+
+        sources, usage = await chat.run_web_search_tool_loop(
+            provider=FakeProvider(),
+            api_key="sk-test",
+            model="gpt-5.5",
+            context=context,
+            conversation_id="conv-1",
+            assistant_message_id="msg-assistant",
+            reasoning_effort=None,
+            search_mode="deep",
+            max_rounds=3,
+        )
+
+        assert [item[0] for item in executed] == ["search_web", "search_web", "search_web"]
+        assert executed[0][1]["search_depth"] == "deep"
+        assert len(sources) == 3
+        assert usage["total_tokens"] == 5
+        assert any(event == "web_search_status" and data.get("phase") == "deepening" for event, data in published_events)
+
+    asyncio.run(run())
+
+
+def test_deep_tool_loop_stops_early_when_sources_are_enough(monkeypatch):
+    async def run():
+        executed = []
+        context = [{"role": "user", "content": "今天 AI 新闻"}]
+
+        class FakeProvider:
+            async def tool_call_turn(self, **kwargs):
+                return ToolCallTurnResult(tool_calls=[], usage={"prompt_tokens": 1, "completion_tokens": 0, "total_tokens": 1})
+
+        def fake_config():
+            return WebSearchConfig(
+                enabled=True,
+                searxng_base_url="https://search.example.com/search",
+                result_count=3,
+                language="all",
+                safesearch="1",
+                timeout_seconds=5,
+                fetch_timeout_seconds=5,
+                max_tool_calls=3,
+                fetch_max_chars=4000,
+            )
+
+        async def fake_run_web_search_tool(name, arguments, config):
+            executed.append((name, arguments))
+            return {
+                "ok": True,
+                "results": [
+                    {
+                        "title": "Official AI News",
+                        "url": "https://gov.example.com/ai",
+                        "snippet": "official",
+                        "confidence": 0.8,
+                        "source_tier": "official",
+                    },
+                    {
+                        "title": "Major AI News",
+                        "url": "https://news.example.com/ai",
+                        "snippet": "news",
+                        "confidence": 0.75,
+                        "source_tier": "major_news",
+                    },
+                ],
+            }
+
+        async def fail_review(**kwargs):
+            raise AssertionError("review should not run when evidence is already enough")
+
+        monkeypatch.setattr(chat, "effective_web_search_config", fake_config)
+        monkeypatch.setattr(chat, "publish_conversation_event", lambda *args, **kwargs: asyncio.sleep(0))
+        monkeypatch.setattr(chat, "run_web_search_tool", fake_run_web_search_tool)
+        monkeypatch.setattr(chat, "review_web_search_evidence", fail_review)
+
+        sources, usage = await chat.run_web_search_tool_loop(
+            provider=FakeProvider(),
+            api_key="sk-test",
+            model="gpt-5.5",
+            context=context,
+            conversation_id="conv-1",
+            assistant_message_id="msg-assistant",
+            reasoning_effort=None,
+            search_mode="deep",
+            max_rounds=5,
+        )
+
+        assert len(executed) == 1
+        assert len(sources) == 2
+        assert usage["total_tokens"] == 1
 
     asyncio.run(run())
 
