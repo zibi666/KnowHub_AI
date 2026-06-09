@@ -985,7 +985,7 @@ async def review_web_search_evidence(
         },
     ]
     review_model = preferred_web_search_review_model(model, available_models)
-    timeout_seconds = float(min(12, max(6, int(config_timeout or 0))))
+    timeout_seconds = float(min(18, max(10, int(config_timeout or 0))))
     payload_chars = sum(len(str(item)) for item in messages)
     started = time.perf_counter()
     perf_logger.info(

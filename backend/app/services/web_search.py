@@ -87,6 +87,7 @@ class WebSearchSource:
     title: str
     url: str
     snippet: str = ""
+    evidence: str = ""
     site_name: str | None = None
     published_at: str | None = None
     favicon_url: str | None = None
@@ -2117,6 +2118,27 @@ def _source_favicon_url(url: str) -> str | None:
     return urlunsplit((parsed.scheme, parsed.netloc, "/favicon.ico", "", ""))
 
 
+def _display_source_snippet(source: WebSearchResult) -> str:
+    text = _compact_text(source.snippet, 360)
+    if not text:
+        text = _compact_text(source.evidence, 360)
+    if not text:
+        return ""
+    title = _compact_text(source.title, 180)
+    if title and text.lower().startswith(title.lower()):
+        text = text[len(title):].lstrip(" \t\r\n:：,，。.-")
+    if not text or text == title:
+        return ""
+    original_text = text
+    match = re.search(r"^(.+?[。！？!?]|.+?[.;；])", text)
+    if match:
+        text = match.group(1).strip()
+    text = _compact_text(text, 180)
+    if len(text) < len(original_text):
+        text = f"{text.rstrip('.。！？!?;；')}..."
+    return text
+
+
 def favicon_cache_dir() -> Path:
     return Path(get_settings().local_cache_root) / "favicons"
 
@@ -2213,7 +2235,8 @@ def structured_web_search_sources(sources: list[WebSearchResult], *, limit: int 
                 index=len(deduped) + 1,
                 title=title,
                 url=url,
-                snippet=_compact_text(source.evidence or source.snippet, 700),
+                snippet=_display_source_snippet(source),
+                evidence=_compact_text(source.evidence or source.snippet, 700),
                 site_name=_source_site_name(url),
                 published_at=source.published_at,
                 favicon_url=_source_favicon_url(url),
@@ -2236,6 +2259,8 @@ def structured_web_search_sources(sources: list[WebSearchResult], *, limit: int 
         for key in ("provider", "confidence", "rerank_status", "source_tier", "support_level", "search_depth", "filter_reason"):
             if row.get(key) is None:
                 row.pop(key, None)
+        if not row.get("evidence") or row.get("evidence") == row.get("snippet"):
+            row.pop("evidence", None)
         if not row.get("matched_terms"):
             row.pop("matched_terms", None)
         if not row.get("degraded"):

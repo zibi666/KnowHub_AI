@@ -707,7 +707,13 @@ function sourceSummaryText(source: WebSearchSource) {
     summary = summary.slice(title.length).replace(/^[\s:：,，。.-]+/u, '').trim()
   }
   if (!summary || summary === title) return ''
-  return summary
+  const sentence = summary.match(/^.+?[。！？!?]|^.+?[.;；]/u)?.[0]?.trim()
+  let compact = sentence || summary
+  const limit = 96
+  if (sentence && sentence.length < summary.length) {
+    compact = `${sentence.replace(/[.。！？!?;；]+$/u, '').trim()}...`
+  }
+  return compact.length > limit ? `${compact.slice(0, limit).trim()}...` : compact
 }
 
 function sourceDiagnostics(source: WebSearchSource) {

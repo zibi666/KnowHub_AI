@@ -123,6 +123,22 @@ def test_structured_sources_canonicalize_github_readme_urls():
     ]
 
 
+def test_structured_sources_use_short_display_snippet_before_evidence():
+    sources = structured_web_search_sources(
+        [
+            web_search.WebSearchResult(
+                title="Taiwan Strait Update",
+                url="https://news.example.com/taiwan",
+                snippet="台海局势最新消息显示，相关部门发布了新的公开说明。第二句话不应撑开来源卡片。",
+                evidence='var allData = {"large":"json"}; ' * 30,
+            )
+        ]
+    )
+
+    assert sources[0]["snippet"] == "台海局势最新消息显示，相关部门发布了新的公开说明..."
+    assert sources[0]["evidence"].startswith("var allData")
+
+
 def test_cached_favicon_downloads_and_reuses_cache(monkeypatch, tmp_path):
     calls = {"count": 0}
 
@@ -1767,6 +1783,13 @@ def test_review_web_search_evidence_uses_lightweight_low_reasoning_and_timeout(m
             "get_settings",
             lambda: SimpleNamespace(preferred_compaction_models=["gpt-5.4-mini", "gpt-4.1-mini"]),
         )
+        original_wait_for = chat.asyncio.wait_for
+
+        async def capture_wait_for(awaitable, timeout):
+            captured["timeout"] = timeout
+            return await original_wait_for(awaitable, timeout=timeout)
+
+        monkeypatch.setattr(chat.asyncio, "wait_for", capture_wait_for)
 
         payload, usage = await chat.review_web_search_evidence(
             provider=FakeProvider(),
@@ -1786,6 +1809,7 @@ def test_review_web_search_evidence_uses_lightweight_low_reasoning_and_timeout(m
         assert captured["model"] == "gpt-5.4-mini"
         assert captured["reasoning_effort"] == "low"
         assert captured["max_completion_tokens"] == 300
+        assert captured["timeout"] == 18
 
     asyncio.run(run())
 

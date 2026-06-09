@@ -86,7 +86,7 @@
 - 来源抽屉和搜索过程弹窗中的 URL、provider 诊断串、失败原因等长文本必须设置 `min-width: 0`、自适应换行和长词断行，避免右侧卡片或弹窗被横向撑开。
 - 聊天页启动逻辑不要把 localStorage 里的历史对话 ID 当作默认入口，也不要在无当前对话时 fallback 到最后一个历史对话；否则刷新或重新进入会违背“新对话优先”的预期。
 - 修来源抽屉溢出时不能把标题、站点图标、序号和正文摘要挤没；provider、置信度、rerank 等诊断信息应降级为辅助小字，标题和正文摘要必须保持主视觉层级。
-- 来源抽屉里的标题、正文摘要和诊断信息不应使用 JS 字符截断或 CSS line-clamp 截断；应该完整换行展示，让卡片自然增高，只防横向溢出。
+- 来源抽屉里的正文摘要不是完整 evidence，也不是抓取脚本/JSON/诊断串；应优先使用干净 snippet 或正文第一句话，超过一两行时以 `...` 结尾，诊断信息只做辅助单行展示。
 - 深搜证据审查超时、失败或不可解析时，不能把 `needs_more` 兜底为 true，也不能塞回原始 query 伪装成继续搜索；应停止补充搜索、用已有证据回答，并在 trace/UI 中显示为已停止。
 
 ## 好的方法
@@ -99,6 +99,6 @@
 - 对 composer 空态布局，优先用 CSS 变量统一管理左右工具区预留空间，修改工具按钮宽度后同时验证输入文本起点。
 - 对联网搜索回答链路，区分“给用户审计看的 trace/来源”和“给模型生成看的压缩证据”；后者要有来源数、单条证据长度和总字符数上限。
 - 对联网搜索来源 UI，优先保留后端结构化来源里的原始 `index`，让引用按钮、来源抽屉编号和模型生成的 `[[n]]` 一一对应；前端去重或展示截断不能重新编号导致引用错位。
-- 对深搜审查链路排查，要先看 `web_search_review_start/done/timeout/failed` 的 `round`、`elapsed_ms`、`payload_chars` 和上游 `responses_first_delta`；如果先收到 HTTP 200/first_delta 后再 timeout，问题是审查总超时切断了未完成 JSON，不是网页抓取失败。
+- 对深搜审查链路排查，要先看 `web_search_review_start/done/timeout/failed` 的 `round`、`elapsed_ms`、`payload_chars` 和上游 `responses_first_delta`；如果先收到 HTTP 200/first_delta 后再 timeout，问题是审查总超时切断了未完成 JSON，不是网页抓取失败，审查超时窗口不能短到误杀已开始流式返回的轻量审查。
 - 做前端弹窗层级验证时，要看实际截图和 `scrollWidth/clientWidth`、父子层叠上下文、footer/sidebar 是否遮挡，不能只看组件内部没有横向溢出。
 - 每次完成后用编译、测试、前端 build、Docker 8090 可用性检查形成闭环。
