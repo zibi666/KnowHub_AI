@@ -285,10 +285,23 @@ def chat_generation_error_message(exc: HTTPException) -> str:
         return message or "当前模型不可用，请切换模型或联系管理员。"
     if code == "KEY_REQUIRED":
         return message or "请先绑定模型 API Key。"
+    if code in {"UPSTREAM_TRANSPORT_ERROR", "UPSTREAM_ERROR"}:
+        lowered = message.lower()
+        if (
+            "server disconnected" in lowered
+            or "without sending a response" in lowered
+            or "remote protocol" in lowered
+            or "connection reset" in lowered
+        ):
+            return "上游模型连接在生成回答前中断。可能是模型服务或代理临时断开，也可能是联网搜索证据上下文过长；系统已保留本次搜索过程，请重试或降低深搜轮数。"
     return message or code or "回复生成失败，请稍后重试。"
 
 
 def is_transient_image_generation_error(exc: Exception | None) -> bool:
+    return isinstance(exc, (httpx.RemoteProtocolError, httpx.ReadError, httpx.ConnectError, httpx.TimeoutException))
+
+
+def is_transient_chat_generation_error(exc: Exception | None) -> bool:
     return isinstance(exc, (httpx.RemoteProtocolError, httpx.ReadError, httpx.ConnectError, httpx.TimeoutException))
 
 
@@ -525,7 +538,13 @@ def inject_web_search_policy(context: list[dict]) -> None:
     context.insert(insert_at, {"role": "system", "content": WEB_SEARCH_TOOL_POLICY})
 
 
-def inject_web_search_final_answer_context(context: list[dict], sources: list[dict]) -> None:
+def inject_web_search_final_answer_context(
+    context: list[dict],
+    sources: list[dict],
+    *,
+    max_sources: int = 14,
+    max_total_chars: int = 12000,
+) -> None:
     if not sources:
         context.append(
             {
@@ -557,17 +576,17 @@ def inject_web_search_final_answer_context(context: list[dict], sources: list[di
         lines.append("Fewer than two high-confidence sources were found; avoid definitive conclusions for contested or time-sensitive claims.")
     if len({domain for domain in independent_domains if domain}) < 2 or quality_count < 1:
         lines.append("The independent-source gate was not fully satisfied; if the answer depends on a contested or current claim, state that evidence is insufficient.")
-    for source in sources[:30]:
+    used_chars = sum(len(line) for line in lines)
+    for source in sources[:max_sources]:
         index = int(source.get("index") or 0)
         title = str(source.get("title") or source.get("url") or "").strip()
         url = str(source.get("url") or "").strip()
         snippet = str(source.get("snippet") or "").strip()
         if not index or not url:
             continue
-        lines.append(f"[[{index}]] {title}")
-        lines.append(f"URL: {url}")
+        source_lines = [f"[[{index}]] {title[:180]}", f"URL: {url[:500]}"]
         if source.get("provider") or source.get("confidence") is not None:
-            lines.append(
+            source_lines.append(
                 "Meta: "
                 f"provider={source.get('provider') or 'unknown'}, "
                 f"confidence={source.get('confidence') or 'unknown'}, "
@@ -578,8 +597,77 @@ def inject_web_search_final_answer_context(context: list[dict], sources: list[di
                 f"degraded={bool(source.get('degraded'))}"
             )
         if snippet:
-            lines.append(f"Evidence: {snippet[:700]}")
+            source_lines.append(f"Evidence: {snippet[:300]}")
+        next_chars = sum(len(line) for line in source_lines)
+        if used_chars + next_chars > max_total_chars:
+            lines.append("Additional search evidence was saved in the source panel but omitted from this prompt to keep generation stable.")
+            break
+        lines.extend(source_lines)
+        used_chars += next_chars
     context.append({"role": "system", "content": "\n".join(lines)})
+
+
+def compact_web_search_tool_context(query: str, payload: dict, *, max_results: int = 8, max_chars: int = 6000) -> str:
+    text = format_search_results_for_context(query, payload)
+    if len(text) <= max_chars:
+        return text
+    lines = text.splitlines()
+    compact_lines: list[str] = []
+    current_result = 0
+    for line in lines:
+        if re.match(r"^\d+\. ", line):
+            current_result += 1
+            if current_result > max_results:
+                break
+        if line.strip().startswith("Evidence:"):
+            line = line[:260]
+        compact_lines.append(line)
+        if sum(len(item) for item in compact_lines) >= max_chars:
+            compact_lines.append("Results truncated to keep the final model request stable; use saved source metadata for auditing.")
+            break
+    return "\n".join(compact_lines)
+
+
+def compact_web_search_payload_for_model(payload: dict, *, max_results: int = 8) -> dict:
+    if not isinstance(payload, dict):
+        return {"ok": False, "error": "Invalid web search payload"}
+    compact: dict = {"ok": bool(payload.get("ok"))}
+    if payload.get("error"):
+        compact["error"] = str(payload.get("error") or "")[:300]
+    if payload.get("title"):
+        compact["title"] = str(payload.get("title") or "")[:180]
+    if payload.get("url"):
+        compact["url"] = str(payload.get("url") or "")[:500]
+    if payload.get("content"):
+        compact["content"] = str(payload.get("content") or "")[:1800]
+    results = payload.get("results")
+    if isinstance(results, list):
+        compact_results: list[dict] = []
+        for item in results[:max_results]:
+            if not isinstance(item, dict):
+                continue
+            row: dict = {
+                "title": str(item.get("title") or item.get("url") or "")[:180],
+                "url": str(item.get("url") or "")[:500],
+            }
+            text = str(item.get("evidence") or item.get("snippet") or item.get("content") or "")
+            if text:
+                row["evidence"] = text[:420]
+            aliases = {
+                "source_tier": "sourceTier",
+                "support_level": "supportLevel",
+                "search_depth": "searchDepth",
+                "rerank_status": "rerankStatus",
+            }
+            for key in ("provider", "confidence", "source_tier", "support_level", "search_depth", "rerank_status", "degraded"):
+                value = item.get(key) if key in item else item.get(aliases.get(key, key))
+                if value is not None:
+                    row[key] = value
+            compact_results.append(row)
+        compact["results"] = compact_results
+        if len(results) > len(compact_results):
+            compact["truncated_results"] = len(results) - len(compact_results)
+    return compact
 
 
 def web_search_cache_key(tool_name: str, arguments: dict) -> tuple[str, str] | None:
@@ -1002,7 +1090,7 @@ async def run_web_search_tool_loop(
                     "role": "tool",
                     "tool_call_id": call.id,
                     "name": call.name,
-                    "content": json_tool_output(payload),
+                    "content": json_tool_output(compact_web_search_payload_for_model(payload)),
                 }
             )
         if should_stop_after_batch or executed_calls >= config.max_tool_calls:
@@ -1060,7 +1148,7 @@ async def run_web_search_tool_loop(
                     "content": (
                         "Web search was enabled and the model did not call tools, so the backend ran search_web automatically. "
                         "Use the formatted results below only if relevant; if they are weak or unrelated, say so.\n\n"
-                        f"{format_search_results_for_context(query, payload)}"
+                        f"{compact_web_search_tool_context(query, payload)}"
                     ),
                 }
             )
@@ -1170,7 +1258,7 @@ async def run_web_search_tool_loop(
                         "content": (
                             f"Deep web search round {round_index} used {tool_name} with arguments {json.dumps(arguments, ensure_ascii=False)}. "
                             "Use the formatted results only if relevant.\n\n"
-                            f"{format_search_results_for_context(str(arguments.get('query') or arguments.get('url') or user_query), payload)}"
+                            f"{compact_web_search_tool_context(str(arguments.get('query') or arguments.get('url') or user_query), payload)}"
                         ),
                     }
                 )
@@ -3155,7 +3243,10 @@ async def run_chat_generation_job(
     except Exception as exc:
         logger.exception("chat_generation unexpected error user=%s conv=%s msg=%s", user_id, conversation_id, assistant_message_id)
         content = "".join(buffer)
-        message = str(exc)[:500] or "回复生成失败，请稍后重试。"
+        if is_transient_chat_generation_error(exc):
+            message = "上游模型连接在生成回答前中断。系统已保留本次搜索过程和来源，请重试；如果仍失败，可以降低深搜轮数或切换模型。"
+        else:
+            message = str(exc)[:500] or "回复生成失败，请稍后重试。"
         failed_content = content or message
         await _persist_assistant_partial(
             assistant_message_id,

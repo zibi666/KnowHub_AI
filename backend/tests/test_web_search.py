@@ -4,6 +4,7 @@ from datetime import datetime
 from types import SimpleNamespace
 
 import pytest
+from fastapi import HTTPException
 from sqlalchemy import text
 from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine
 
@@ -1012,6 +1013,45 @@ def test_web_search_mode_request_defaults_and_round_clamp():
     assert update_payload.web_search_max_rounds == 10
     assert send_payload.web_search_mode == "fast"
     assert send_payload.web_search_max_rounds == 1
+
+
+def test_web_search_final_answer_context_is_compacted():
+    sources = [
+        {
+            "index": index,
+            "title": f"Source {index}",
+            "url": f"https://example.com/{index}",
+            "snippet": "证据正文" * 200,
+            "provider": "direct",
+            "confidence": 0.8,
+            "source_tier": "major_news",
+            "support_level": "medium",
+            "search_depth": "deep",
+            "rerank_status": "fallback",
+        }
+        for index in range(1, 31)
+    ]
+    context: list[dict] = []
+
+    chat.inject_web_search_final_answer_context(context, sources, max_sources=3, max_total_chars=3200)
+
+    injected = context[-1]["content"]
+    assert "[[1]] Source 1" in injected
+    assert "[[3]] Source 3" in injected
+    assert "[[4]]" not in injected
+    assert len(injected) < 2200
+
+
+def test_chat_generation_error_message_hides_remote_protocol_details():
+    exc = HTTPException(
+        status_code=502,
+        detail={"code": "UPSTREAM_ERROR", "message": "Server disconnected without sending a response."},
+    )
+
+    message = chat.chat_generation_error_message(exc)
+
+    assert "Server disconnected" not in message
+    assert "上游模型连接" in message
 
 
 def test_sqlite_lightweight_migration_adds_web_search_sources_column(monkeypatch):

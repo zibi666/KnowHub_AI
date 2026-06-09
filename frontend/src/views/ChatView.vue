@@ -4047,7 +4047,7 @@ onUnmounted(() => {
 
     <main
       class="chat-main flex flex-col min-w-0 min-h-0 overflow-hidden"
-      :class="{ 'has-messages': hasConversationFrame, 'is-empty-chat': isEmptyChat, 'composer-open': composerExpanded, 'sources-open': sourceDrawerOpen }"
+      :class="{ 'has-messages': hasConversationFrame, 'is-empty-chat': isEmptyChat, 'composer-open': composerExpanded, 'sources-open': sourceDrawerOpen, 'search-trace-open': searchTraceOpen }"
     >
       <header class="chat-header" :class="{ 'sources-open': sourceDrawerOpen }">
         <div class="top-model-controls" @click.stop>
@@ -4182,35 +4182,39 @@ onUnmounted(() => {
                   <span v-for="item in webSearchTraceSummary(activeSearchTrace)" :key="item" class="search-trace-chip">{{ item }}</span>
                 </div>
                 <p v-if="webSearchTraceStopReason(activeSearchTrace)" class="search-trace-stop">{{ webSearchTraceStopReason(activeSearchTrace) }}</p>
-                <div class="search-trace-list">
+                <div class="search-trace-list" role="list">
                   <article v-for="(event, index) in activeSearchTraceEvents" :key="`${event.round || 0}-${event.type || 'event'}-${index}`" class="search-trace-event">
-                    <div class="search-trace-event-head">
-                      <div>
-                        <span>{{ traceEventTitle(event) }}</span>
-                        <strong v-if="traceEventMainText(event)">{{ traceEventMainText(event) }}</strong>
+                    <div class="search-trace-event-main">
+                      <div class="search-trace-event-head">
+                        <div>
+                          <span>{{ traceEventTitle(event) }}</span>
+                          <strong v-if="traceEventMainText(event)">{{ traceEventMainText(event) }}</strong>
+                        </div>
+                        <em :class="{ failed: event.ok === false }">{{ traceEventStatus(event) }}</em>
                       </div>
-                      <em :class="{ failed: event.ok === false }">{{ traceEventStatus(event) }}</em>
-                    </div>
-                    <div class="search-trace-event-meta">
-                      <span v-if="event.tool">{{ event.tool }}</span>
-                      <span v-if="event.phase">{{ event.phase }}</span>
-                      <span v-if="traceEventResultCount(event) !== null">结果 {{ traceEventResultCount(event) }}</span>
-                      <span v-if="event.error">失败：{{ event.error }}</span>
-                    </div>
-                    <p v-if="traceEventStopReason(event)" class="search-trace-note">{{ traceEventStopReason(event) }}</p>
-                    <div v-if="traceEventLists(event).length" class="search-trace-review">
-                      <div v-for="group in traceEventLists(event)" :key="group.label" class="search-trace-review-group">
-                        <span>{{ group.label }}</span>
-                        <ul>
-                          <li v-for="item in group.values" :key="item">{{ item }}</li>
-                        </ul>
+                      <div class="search-trace-event-meta">
+                        <span v-if="event.tool">{{ event.tool }}</span>
+                        <span v-if="event.phase">{{ event.phase }}</span>
+                        <span v-if="traceEventResultCount(event) !== null">结果 {{ traceEventResultCount(event) }}</span>
+                        <span v-if="event.error" class="search-trace-error">失败：{{ event.error }}</span>
                       </div>
+                      <p v-if="traceEventStopReason(event)" class="search-trace-note">{{ traceEventStopReason(event) }}</p>
                     </div>
-                    <div v-if="traceEventSources(event).length" class="search-trace-sources">
-                      <a v-for="source in traceEventSources(event)" :key="traceSourceUrl(source)" :href="traceSourceUrl(source)" target="_blank" rel="noreferrer">
-                        <strong>{{ traceSourceTitle(source) }}</strong>
-                        <span v-if="traceSourceDiagnostics(source)">{{ traceSourceDiagnostics(source) }}</span>
-                      </a>
+                    <div v-if="traceEventLists(event).length || traceEventSources(event).length" class="search-trace-event-detail">
+                      <div v-if="traceEventLists(event).length" class="search-trace-review">
+                        <div v-for="group in traceEventLists(event)" :key="group.label" class="search-trace-review-group">
+                          <span>{{ group.label }}</span>
+                          <ul>
+                            <li v-for="item in group.values" :key="item">{{ item }}</li>
+                          </ul>
+                        </div>
+                      </div>
+                      <div v-if="traceEventSources(event).length" class="search-trace-sources">
+                        <a v-for="source in traceEventSources(event)" :key="traceSourceUrl(source)" :href="traceSourceUrl(source)" target="_blank" rel="noreferrer">
+                          <strong>{{ traceSourceTitle(source) }}</strong>
+                          <span v-if="traceSourceDiagnostics(source)">{{ traceSourceDiagnostics(source) }}</span>
+                        </a>
+                      </div>
                     </div>
                   </article>
                 </div>
