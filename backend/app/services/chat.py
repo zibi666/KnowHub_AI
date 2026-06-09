@@ -118,9 +118,17 @@ WEB_SEARCH_DEEP_REVIEW_POLICY = (
     "Do not include hidden reasoning or prose. Ask for more only when the current evidence is weak, stale, "
     "contradictory, clearly unrelated, or missing primary/major-news support."
 )
+WEB_SEARCH_KEYWORD_PLAN_POLICY = (
+    "You are planning the first web-search queries for KnowHub. Return JSON only, with key: "
+    "queries (array of 1 to 3 strings). Convert the user's natural-language question into concise, searchable "
+    "keywords. Preserve important entities, time words, locations, and source-quality hints. For Chinese questions, "
+    "prefer Chinese keywords unless English source terms are clearly useful. Do not answer the question, do not "
+    "include hidden reasoning, and do not call tools."
+)
 WEB_SEARCH_REVIEW_MAX_QUERIES_PER_ROUND = 2
 WEB_SEARCH_REVIEW_MAX_URLS_PER_ROUND = 2
 WEB_SEARCH_REVIEW_MAX_ACTIONS_PER_ROUND = 3
+WEB_SEARCH_INITIAL_MAX_QUERIES = 3
 _STREAM_END = object()
 EMPTY_CHAT_RESPONSE_MESSAGE = (
     "模型返回了空回复：上游接口请求已完成，但没有返回任何可显示的文本。"
@@ -1114,6 +1122,118 @@ def _trace_review_event(round_index: int, review_payload: dict, search_history: 
     return {key: value for key, value in event.items() if value not in (None, "", [])}
 
 
+def _trace_keyword_plan_event(
+    *,
+    round_index: int,
+    user_query: str,
+    search_mode: str,
+    effective_depth: str,
+    queries: list[str],
+    ok: bool,
+    reason: str | None = None,
+    error: str | None = None,
+) -> dict:
+    event: dict = {
+        "round": round_index,
+        "phase": "planning_queries",
+        "type": "planning",
+        "ok": ok,
+        "query": _compact_trace_text(user_query, 220),
+        "search_mode": _compact_trace_text(search_mode, 40),
+        "effective_depth": _compact_trace_text(effective_depth, 40),
+        "new_queries": [_compact_trace_text(query, 180) for query in queries if _compact_trace_text(query, 180)],
+    }
+    if reason:
+        event["reason_codes"] = [_compact_trace_text(reason, 80)]
+    if error:
+        event["error"] = _compact_trace_text(error, 300)
+    return {key: value for key, value in event.items() if value not in (None, "", [])}
+
+
+async def _keyword_plan_stream_json(
+    provider: OpenAICompatibleProvider,
+    *,
+    api_key: str,
+    model: str,
+    messages: list[dict],
+) -> tuple[dict, dict | None]:
+    content_parts: list[str] = []
+    usage: dict | None = None
+    async for event in provider.chat_stream(
+        api_key=api_key,
+        model=model,
+        messages=messages,
+        include_usage=True,
+        max_completion_tokens=180,
+        reasoning_effort="low",
+    ):
+        if event.event == "token":
+            content_parts.append(str(event.data.get("text") or ""))
+        elif event.event == "completed_text":
+            content_parts = [str(event.data.get("text") or "")]
+        elif event.event == "usage":
+            usage = event.data
+    content = "".join(content_parts)
+    return _parse_search_review_json(content), usage
+
+
+async def plan_initial_web_search_queries(
+    *,
+    provider: OpenAICompatibleProvider,
+    api_key: str,
+    model: str,
+    user_query: str,
+    search_mode: str,
+    effective_depth: str,
+    config_timeout: int,
+) -> tuple[list[str], dict | None, str | None]:
+    messages = [
+        {"role": "system", "content": WEB_SEARCH_KEYWORD_PLAN_POLICY},
+        {
+            "role": "user",
+            "content": (
+                f"User question: {user_query}\n"
+                f"Search mode: {search_mode}\n"
+                f"Effective depth: {effective_depth}\n"
+                "Generate first-round search keywords. If the question is broad or conversational, make the queries "
+                "specific enough for search engines. Include recency terms when the user asks for latest/current facts."
+            ),
+        },
+    ]
+    timeout_seconds = float(min(10, max(6, int(config_timeout or 0))))
+    started = time.perf_counter()
+    try:
+        payload, usage = await asyncio.wait_for(
+            _keyword_plan_stream_json(provider, api_key=api_key, model=model, messages=messages),
+            timeout=timeout_seconds,
+        )
+        elapsed_ms = int((time.perf_counter() - started) * 1000)
+        queries = _clean_search_queries(payload.get("queries"), limit=WEB_SEARCH_INITIAL_MAX_QUERIES)
+        if not queries:
+            perf_logger.warning(
+                "web_search_keyword_plan_empty model=%s elapsed_ms=%d user_query_chars=%d",
+                model,
+                elapsed_ms,
+                len(user_query),
+            )
+            return [], usage, "keyword_plan_empty"
+        perf_logger.info(
+            "web_search_keyword_plan_done model=%s elapsed_ms=%d queries=%d",
+            model,
+            elapsed_ms,
+            len(queries),
+        )
+        return queries, usage, None
+    except asyncio.TimeoutError:
+        elapsed_ms = int((time.perf_counter() - started) * 1000)
+        perf_logger.warning("web_search_keyword_plan_timeout model=%s elapsed_ms=%d", model, elapsed_ms)
+        return [], None, "keyword_plan_timeout"
+    except Exception as exc:
+        elapsed_ms = int((time.perf_counter() - started) * 1000)
+        perf_logger.warning("web_search_keyword_plan_failed model=%s elapsed_ms=%d error=%s", model, elapsed_ms, str(exc)[:300])
+        return [], None, "keyword_plan_failed"
+
+
 async def _review_stream_json(
     provider: OpenAICompatibleProvider,
     *,
@@ -1423,8 +1543,43 @@ async def run_web_search_tool_loop(
         if should_stop_after_batch or executed_calls >= config.max_tool_calls:
             break
     if not saw_tool_calls and should_force_search:
-        query = base_user_query
-        if query:
+        query_plan: list[str] = []
+        fallback_reason: str | None = None
+        if base_user_query:
+            await publish_conversation_event(
+                conversation_id,
+                "web_search_status",
+                web_search_status_payload(
+                    conversation_id=conversation_id,
+                    assistant_message_id=assistant_message_id,
+                    phase="planning_queries",
+                    detail="正在生成首轮搜索关键词。",
+                ),
+            )
+            query_plan, plan_usage, fallback_reason = await plan_initial_web_search_queries(
+                provider=provider,
+                api_key=api_key,
+                model=model,
+                user_query=base_user_query,
+                search_mode=search_mode,
+                effective_depth=effective_depth,
+                config_timeout=config.timeout_seconds,
+            )
+            usage_total = add_usage_totals(usage_total, plan_usage)
+            trace["events"].append(
+                _trace_keyword_plan_event(
+                    round_index=1,
+                    user_query=base_user_query,
+                    search_mode=search_mode,
+                    effective_depth=effective_depth,
+                    queries=query_plan,
+                    ok=not fallback_reason,
+                    reason=fallback_reason,
+                )
+            )
+        if not query_plan and base_user_query:
+            query_plan = [base_user_query]
+        for query in query_plan:
             arguments = {"query": query}
             arguments["search_depth"] = effective_depth
             if effective_depth == "deep":
@@ -1445,7 +1600,7 @@ async def run_web_search_tool_loop(
             trace["events"].append(
                 _trace_tool_event(
                     round_index=1,
-                    phase="auto_fallback",
+                    phase="auto_fallback" if fallback_reason else "keyword_plan",
                     tool="search_web",
                     arguments=arguments,
                     payload=payload,
@@ -1470,6 +1625,8 @@ async def run_web_search_tool_loop(
                     )
             else:
                 had_tool_error = True
+            if executed_calls >= config.max_tool_calls:
+                break
     if iterative_deep_search and max_rounds > 1:
         user_query = base_user_query
         failed_urls: set[str] = set()

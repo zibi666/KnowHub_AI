@@ -2032,6 +2032,138 @@ def test_fast_tool_loop_does_not_enter_iterative_review(monkeypatch):
     asyncio.run(run())
 
 
+def test_tool_loop_plans_initial_queries_when_model_skips_tool(monkeypatch):
+    async def run():
+        executed = []
+        published_events = []
+        context = [{"role": "user", "content": "你怎么看待中东爆发的各种冲突"}]
+
+        class FakeProvider:
+            async def tool_call_turn(self, **kwargs):
+                return ToolCallTurnResult(tool_calls=[], usage={"prompt_tokens": 1, "completion_tokens": 0, "total_tokens": 1})
+
+            async def chat_stream(self, **kwargs):
+                assert kwargs["model"] == "gpt-5.5"
+                assert kwargs["reasoning_effort"] == "low"
+                prompt = "\n".join(str(message.get("content") or "") for message in kwargs["messages"])
+                assert "Generate first-round search keywords" in prompt
+                assert "你怎么看待中东爆发的各种冲突" in prompt
+                yield StreamEvent("completed_text", {"text": '{"queries":["中东冲突 最新 局势","以色列 伊朗 冲突 最新"]}'})
+                yield StreamEvent("usage", {"prompt_tokens": 4, "completion_tokens": 2, "total_tokens": 6})
+
+        def fake_config():
+            return WebSearchConfig(
+                enabled=True,
+                searxng_base_url="https://search.example.com/search",
+                result_count=3,
+                language="all",
+                safesearch="1",
+                timeout_seconds=5,
+                fetch_timeout_seconds=5,
+                max_tool_calls=3,
+                fetch_max_chars=4000,
+            )
+
+        async def fake_run_web_search_tool(name, arguments, config):
+            executed.append((name, dict(arguments)))
+            return {
+                "ok": True,
+                "results": [{"title": "Middle East", "url": f"https://example.com/{len(executed)}", "snippet": "news"}],
+            }
+
+        async def fake_publish(conversation_id, event, data):
+            published_events.append((event, data))
+
+        monkeypatch.setattr(chat, "effective_web_search_config", fake_config)
+        monkeypatch.setattr(chat, "publish_conversation_event", fake_publish)
+        monkeypatch.setattr(chat, "run_web_search_tool", fake_run_web_search_tool)
+
+        sources, usage, trace = await chat.run_web_search_tool_loop(
+            provider=FakeProvider(),
+            api_key="sk-test",
+            model="gpt-5.5",
+            context=context,
+            conversation_id="conv-1",
+            assistant_message_id="msg-assistant",
+            reasoning_effort=None,
+            search_mode="fast",
+            max_rounds=3,
+        )
+
+        assert executed == [
+            ("search_web", {"query": "中东冲突 最新 局势", "search_depth": "fast"}),
+            ("search_web", {"query": "以色列 伊朗 冲突 最新", "search_depth": "fast"}),
+        ]
+        assert all(item[1]["query"] != "你怎么看待中东爆发的各种冲突" for item in executed)
+        assert usage["total_tokens"] == 7
+        assert len(sources) == 2
+        assert trace["events"][0]["phase"] == "planning_queries"
+        assert trace["events"][0]["new_queries"] == ["中东冲突 最新 局势", "以色列 伊朗 冲突 最新"]
+        assert trace["events"][1]["phase"] == "keyword_plan"
+        assert any(event == "web_search_status" and data.get("phase") == "planning_queries" for event, data in published_events)
+
+    asyncio.run(run())
+
+
+def test_tool_loop_falls_back_to_user_query_when_initial_keyword_plan_is_empty(monkeypatch):
+    async def run():
+        executed = []
+        context = [{"role": "user", "content": "今天 AI 新闻"}]
+
+        class FakeProvider:
+            async def tool_call_turn(self, **kwargs):
+                return ToolCallTurnResult(tool_calls=[], usage={"prompt_tokens": 1, "completion_tokens": 0, "total_tokens": 1})
+
+            async def chat_stream(self, **kwargs):
+                yield StreamEvent("completed_text", {"text": '{"queries":[]}'})
+                yield StreamEvent("usage", {"prompt_tokens": 2, "completion_tokens": 1, "total_tokens": 3})
+
+        def fake_config():
+            return WebSearchConfig(
+                enabled=True,
+                searxng_base_url="https://search.example.com/search",
+                result_count=3,
+                language="all",
+                safesearch="1",
+                timeout_seconds=5,
+                fetch_timeout_seconds=5,
+                max_tool_calls=3,
+                fetch_max_chars=4000,
+            )
+
+        async def fake_run_web_search_tool(name, arguments, config):
+            executed.append((name, dict(arguments)))
+            return {
+                "ok": True,
+                "results": [{"title": "AI News", "url": "https://example.com/ai", "snippet": "news"}],
+            }
+
+        monkeypatch.setattr(chat, "effective_web_search_config", fake_config)
+        monkeypatch.setattr(chat, "publish_conversation_event", lambda *args, **kwargs: asyncio.sleep(0))
+        monkeypatch.setattr(chat, "run_web_search_tool", fake_run_web_search_tool)
+
+        sources, usage, trace = await chat.run_web_search_tool_loop(
+            provider=FakeProvider(),
+            api_key="sk-test",
+            model="gpt-5.5",
+            context=context,
+            conversation_id="conv-1",
+            assistant_message_id="msg-assistant",
+            reasoning_effort=None,
+            search_mode="fast",
+            max_rounds=3,
+        )
+
+        assert executed == [("search_web", {"query": "今天 AI 新闻", "search_depth": "fast"})]
+        assert usage["total_tokens"] == 4
+        assert len(sources) == 1
+        assert trace["events"][0]["phase"] == "planning_queries"
+        assert trace["events"][0]["reason_codes"] == ["keyword_plan_empty"]
+        assert trace["events"][1]["phase"] == "auto_fallback"
+
+    asyncio.run(run())
+
+
 def test_deep_tool_loop_stops_early_when_ai_review_says_enough(monkeypatch):
     async def run():
         executed = []
@@ -2790,6 +2922,7 @@ def test_chat_job_fallback_searches_time_sensitive_prompt_when_model_skips_tool(
         published_events = []
         final_messages = {}
         tool_queries = []
+        chat_stream_calls = {"value": 0}
 
         monkeypatch.setattr(chat, "SessionLocal", session_maker)
 
@@ -2832,6 +2965,16 @@ def test_chat_job_fallback_searches_time_sensitive_prompt_when_model_skips_tool(
             return ToolCallTurnResult(tool_calls=[], usage={"prompt_tokens": 2, "completion_tokens": 0, "total_tokens": 2})
 
         async def fake_chat_stream(self, **kwargs):
+            chat_stream_calls["value"] += 1
+            if chat_stream_calls["value"] == 1:
+                assert kwargs["model"] == "gpt-5.5"
+                assert kwargs["reasoning_effort"] == "low"
+                prompt = "\n".join(str(message.get("content") or "") for message in kwargs["messages"])
+                assert "Generate first-round search keywords" in prompt
+                assert "今天 AI 新闻" in prompt
+                yield StreamEvent("completed_text", {"text": '{"queries":["今天 AI 新闻 最新"]}'})
+                yield StreamEvent("usage", {"prompt_tokens": 3, "completion_tokens": 2, "total_tokens": 5})
+                return
             final_messages["messages"] = kwargs["messages"]
             yield StreamEvent("token", {"text": "Here is the current answer."})
             yield StreamEvent("usage", {"prompt_tokens": 5, "completion_tokens": 4, "total_tokens": 9})
@@ -2890,11 +3033,14 @@ def test_chat_job_fallback_searches_time_sensitive_prompt_when_model_skips_tool(
                 assert assistant.web_search_sources_json
                 assert assistant.web_search_sources_json[0]["url"] == "https://example.com/ai-news"
                 assert assistant.web_search_trace_json
-                assert assistant.web_search_trace_json["events"][0]["phase"] == "auto_fallback"
-                assert assistant.total_tokens == 11
+                assert assistant.web_search_trace_json["events"][0]["phase"] == "planning_queries"
+                assert assistant.web_search_trace_json["events"][0]["new_queries"] == ["今天 AI 新闻 最新"]
+                assert assistant.web_search_trace_json["events"][1]["phase"] == "keyword_plan"
+                assert assistant.total_tokens == 16
 
-            assert tool_queries == [("search_web", {"query": "今天 AI 新闻", "search_depth": "fast"})]
-            assert any(event == "web_search_status" and data.get("phase") == "searching" for event, data in published_events)
+            assert tool_queries == [("search_web", {"query": "今天 AI 新闻 最新", "search_depth": "fast"})]
+            assert any(event == "web_search_status" and data.get("phase") == "planning_queries" for event, data in published_events)
+            assert any(event == "web_search_status" and data.get("phase") == "searching" and data.get("query") == "今天 AI 新闻 最新" for event, data in published_events)
             assert not any("search_web" in str(item.get("content")) for item in final_messages["messages"] if item.get("role") == "user")
             system_context = "\n".join(str(item.get("content")) for item in final_messages["messages"] if item.get("role") == "system")
             assert '<source id="1"' in system_context
