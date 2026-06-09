@@ -5843,6 +5843,8 @@ body,
 
 .composer-card {
   --composer-radius: 2rem;
+  --composer-empty-left-inset: 12.75rem;
+  --composer-empty-right-inset: 5.6rem;
   pointer-events: auto;
   position: relative;
   width: 100%;
@@ -6424,8 +6426,7 @@ body,
 .composer-card.is-empty-composer .composer-input {
   min-height: 4rem;
   max-height: min(30vh, 14rem);
-  padding: 1.28rem 5.6rem;
-  padding-left: 6rem;
+  padding: 1.28rem var(--composer-empty-right-inset) 1.28rem var(--composer-empty-left-inset);
   overflow-y: auto;
   line-height: 1.45;
   white-space: pre-wrap;
@@ -7179,11 +7180,21 @@ body,
 
   .composer-card.is-empty-composer {
     min-height: 4rem;
+    --composer-empty-left-inset: 6rem;
   }
 
   .composer-card.is-empty-composer .composer-input {
-    padding-left: 6rem;
+    padding-left: var(--composer-empty-left-inset);
     padding-right: 5.25rem;
+  }
+
+  .composer-card.is-empty-composer .web-search-mode-text {
+    display: none;
+  }
+
+  .composer-card.is-empty-composer .web-search-toggle.active {
+    width: 34px;
+    padding: 0;
   }
 
   .composer-left-tools,
