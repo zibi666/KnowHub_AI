@@ -2118,7 +2118,7 @@ def test_deep_tool_loop_stops_early_when_ai_review_says_enough(monkeypatch):
     asyncio.run(run())
 
 
-def test_review_web_search_evidence_uses_lightweight_low_reasoning_and_timeout(monkeypatch):
+def test_review_web_search_evidence_uses_current_model_low_reasoning_and_timeout(monkeypatch):
     async def run():
         captured = {}
 
@@ -2171,16 +2171,17 @@ def test_review_web_search_evidence_uses_lightweight_low_reasoning_and_timeout(m
 
         assert payload["needs_more"] is False
         assert usage["total_tokens"] == 4
-        assert captured["model"] == "gpt-5.4-mini"
+        assert captured["model"] == "gpt-5.5"
         assert captured["reasoning_effort"] == "low"
         assert captured["max_completion_tokens"] == 300
         assert captured["timeout"] == 18
         prompt = "\n".join(str(message.get("content") or "") for message in captured["messages"])
         assert "Search history so far:" in prompt
+        assert "Review reasoning effort: low" in prompt
         assert "today AI news" in prompt
         assert "https://example.com/ai" in prompt
         assert "https://bad.example/ai" in prompt
-        assert "repeating a query is allowed" in prompt
+        assert "You may repeat or slightly vary a searched query" in prompt
 
     asyncio.run(run())
 
@@ -2306,6 +2307,81 @@ def test_deep_tool_loop_review_timeout_stops_without_duplicate_fallback_query(mo
     asyncio.run(run())
 
 
+def test_deep_tool_loop_needs_more_without_actions_stops_without_fallback_query(monkeypatch):
+    async def run():
+        executed = []
+        context = [{"role": "user", "content": "taiwan strait latest"}]
+
+        class FakeProvider:
+            async def tool_call_turn(self, **kwargs):
+                return ToolCallTurnResult(tool_calls=[], usage={"prompt_tokens": 1, "completion_tokens": 0, "total_tokens": 1})
+
+        def fake_config():
+            return WebSearchConfig(
+                enabled=True,
+                searxng_base_url="https://search.example.com/search",
+                result_count=3,
+                language="all",
+                safesearch="1",
+                timeout_seconds=5,
+                fetch_timeout_seconds=5,
+                max_tool_calls=4,
+                fetch_max_chars=4000,
+            )
+
+        async def fake_run_web_search_tool(name, arguments, config):
+            executed.append((name, dict(arguments)))
+            return {
+                "ok": True,
+                "results": [
+                    {
+                        "title": "Source 1",
+                        "url": "https://example.com/1",
+                        "snippet": "existing evidence",
+                    }
+                ],
+            }
+
+        async def fake_review(**kwargs):
+            return (
+                {
+                    "needs_more": True,
+                    "new_queries": [],
+                    "urls_to_fetch": [],
+                    "evidence_gaps": ["needs better evidence"],
+                    "reason_codes": ["weak_sources"],
+                },
+                {"prompt_tokens": 1, "completion_tokens": 1, "total_tokens": 2},
+            )
+
+        monkeypatch.setattr(chat, "effective_web_search_config", fake_config)
+        monkeypatch.setattr(chat, "publish_conversation_event", lambda *args, **kwargs: asyncio.sleep(0))
+        monkeypatch.setattr(chat, "run_web_search_tool", fake_run_web_search_tool)
+        monkeypatch.setattr(chat, "review_web_search_evidence", fake_review)
+
+        sources, usage, trace = await chat.run_web_search_tool_loop(
+            provider=FakeProvider(),
+            api_key="sk-test",
+            model="gpt-5.5",
+            context=context,
+            conversation_id="conv-1",
+            assistant_message_id="msg-assistant",
+            reasoning_effort=None,
+            search_mode="deep",
+            max_rounds=3,
+        )
+
+        assert [item[0] for item in executed] == ["search_web"]
+        assert usage["total_tokens"] == 3
+        assert len(sources) == 1
+        assert trace["stop_reason"] == "模型未提出新的搜索关键词或读取 URL，深搜已停止。"
+        review_event = next(event for event in trace["events"] if event.get("type") == "review")
+        assert review_event["needs_more"] is True
+        assert "new_queries" not in review_event
+
+    asyncio.run(run())
+
+
 def test_deep_tool_loop_allows_repeated_review_query(monkeypatch):
     async def run():
         executed = []
@@ -2366,7 +2442,7 @@ def test_deep_tool_loop_allows_repeated_review_query(monkeypatch):
             context=context,
             conversation_id="conv-1",
             assistant_message_id="msg-assistant",
-            reasoning_effort=None,
+            reasoning_effort="high",
             search_mode="deep",
             max_rounds=2,
         )

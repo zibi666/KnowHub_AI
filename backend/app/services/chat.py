@@ -1153,7 +1153,7 @@ async def review_web_search_evidence(
     config_timeout: int,
     available_models: list[str] | None = None,
 ) -> tuple[dict, dict | None]:
-    del reasoning_effort
+    review_reasoning_effort = "low"
     evidence_lines = []
     for index, source in enumerate(sources[:8], start=1):
         evidence_lines.append(
@@ -1167,6 +1167,20 @@ async def review_web_search_evidence(
             )
         )
     history_lines = _search_history_lines(search_history)
+    if review_reasoning_effort == "low":
+        action_policy = (
+            "The user's current reasoning effort is LOW. Be conservative and cheap: prefer stopping with the "
+            "current evidence unless there is a clear evidence gap. You may repeat or slightly vary a searched "
+            "query when the latest search for that direction was weak, noisy, stale, or lacked body-level evidence. "
+            "If more work is required, propose at most one high-value query or one unread authoritative URL."
+        )
+    else:
+        action_policy = (
+            "The user's current reasoning effort is not LOW. Repeating or slightly varying a previous query is "
+            "allowed only when the same information direction is still under-evidenced; name the missing body-level, "
+            "independent, official, or major-news support in evidence_gaps or relevance_notes. Prefer clearly new "
+            "angles and unread authoritative URLs."
+        )
     messages = [
         {"role": "system", "content": WEB_SEARCH_DEEP_REVIEW_POLICY},
         {
@@ -1174,18 +1188,18 @@ async def review_web_search_evidence(
             "content": (
                 f"User query: {user_query}\n"
                 f"Round: {round_index}/{max_rounds}\n"
+                f"Review reasoning effort: {review_reasoning_effort}\n"
                 "Search history so far:\n"
                 + ("\n".join(history_lines) if history_lines else "No search history was recorded yet.")
                 + "\n\n"
-                "When proposing more work, use the history above: repeating a query is allowed when the same "
-                "information direction is under-evidenced, but do not repeat it blindly. Prefer more independent "
-                "or authoritative coverage, and avoid URLs already listed as failed.\n"
+                + action_policy
+                + " Avoid URLs already listed as failed.\n"
                 "Current evidence:\n"
                 + ("\n\n".join(evidence_lines) if evidence_lines else "No evidence yet.")
             ),
         },
     ]
-    review_model = preferred_web_search_review_model(model, available_models)
+    review_model = model
     timeout_seconds = float(min(18, max(10, int(config_timeout or 0))))
     payload_chars = sum(len(str(item)) for item in messages)
     started = time.perf_counter()
@@ -1301,6 +1315,7 @@ async def run_web_search_tool_loop(
         "mode": search_mode,
         "effective_depth": effective_depth,
         "max_rounds": max_rounds,
+        "review_reasoning_effort": "low",
         "events": [],
     }
     inject_web_search_policy(context)
@@ -1483,11 +1498,11 @@ async def run_web_search_tool_loop(
             )
             usage_total = add_usage_totals(usage_total, review_usage)
             needs_more = bool(review_payload.get("needs_more", True))
-            trace["events"].append(_trace_review_event(round_index - 1, review_payload, search_history))
             new_queries = _clean_search_queries(
                 review_payload.get("new_queries"),
                 limit=WEB_SEARCH_REVIEW_MAX_QUERIES_PER_ROUND,
             )
+            trace["events"].append(_trace_review_event(round_index - 1, review_payload, search_history))
             urls_to_fetch = _clean_fetch_urls(
                 review_payload.get("urls_to_fetch"),
                 limit=WEB_SEARCH_REVIEW_MAX_URLS_PER_ROUND,
@@ -1496,8 +1511,6 @@ async def run_web_search_tool_loop(
                 trace["early_stop"] = True
                 trace["stop_reason"] = _compact_trace_text(review_payload.get("stop_reason"), 220) or f"模型判断第 {round_index - 1} 轮证据已足够。"
                 break
-            if not new_queries and user_query:
-                new_queries = [user_query]
             new_queries = new_queries[:WEB_SEARCH_REVIEW_MAX_QUERIES_PER_ROUND]
             remaining_actions = max(0, WEB_SEARCH_REVIEW_MAX_ACTIONS_PER_ROUND - len(new_queries))
             urls_to_fetch = [
