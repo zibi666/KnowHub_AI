@@ -65,6 +65,7 @@ export interface WebSearchSource {
   title: string
   url: string
   snippet?: string
+  evidence?: string
   siteName?: string | null
   site_name?: string | null
   publishedAt?: string | null
@@ -129,6 +130,14 @@ export interface WebSearchTraceEvent {
   newQueries?: string[]
   urls_to_fetch?: string[]
   urlsToFetch?: string[]
+  searched_queries?: string[]
+  searchedQueries?: string[]
+  read_urls?: string[]
+  readUrls?: string[]
+  failed_urls?: string[]
+  failedUrls?: string[]
+  source_domains?: string[]
+  sourceDomains?: string[]
   evidence_gaps?: string[]
   evidenceGaps?: string[]
   relevance_notes?: string[]

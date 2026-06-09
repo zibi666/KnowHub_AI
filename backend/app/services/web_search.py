@@ -2158,12 +2158,26 @@ def _clean_source_summary_candidate(text: str, title: str) -> str:
     return _compact_text(value, 500)
 
 
+def _source_summary_looks_diagnostic(text: str) -> bool:
+    value = _compact_text(text, 500)
+    if not value:
+        return True
+    if re.search(r"\b(?:tier|support|rerank|confidence|provider|mode):", value, flags=re.I):
+        return True
+    if re.search(r"(?:^|[·|,，\s])\d{1,3}%\s*(?:[·|,，\s]|$)", value):
+        return True
+    diagnostic_parts = re.split(r"\s*[·|]\s*", value)
+    if len(diagnostic_parts) >= 3 and any(re.fullmatch(r"[a-z][a-z0-9_-]{2,}", part, flags=re.I) for part in diagnostic_parts):
+        return True
+    return False
+
+
 def _display_source_snippet(source: WebSearchResult, title: str | None = None) -> str:
     title = _compact_text(title or source.title, 180)
     text = ""
     for candidate in (source.snippet, source.evidence):
         candidate_text = _clean_source_summary_candidate(candidate, title)
-        if not _source_summary_is_bad(candidate_text, title):
+        if not _source_summary_looks_diagnostic(candidate_text) and not _source_summary_is_bad(candidate_text, title):
             text = candidate_text
             break
     if not text:

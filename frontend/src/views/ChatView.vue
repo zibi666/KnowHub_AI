@@ -643,6 +643,10 @@ function traceEventLists(event: WebSearchTraceEvent) {
     { label: '证据缺口', values: traceList(event.evidence_gaps ?? event.evidenceGaps) },
     { label: '相关性判断', values: traceList(event.relevance_notes ?? event.relevanceNotes) },
     { label: '准确性判断', values: traceList(event.accuracy_notes ?? event.accuracyNotes) },
+    { label: '已搜索关键词', values: traceList(event.searched_queries ?? event.searchedQueries) },
+    { label: '已读取 URL', values: traceList(event.read_urls ?? event.readUrls) },
+    { label: '失败 URL', values: traceList(event.failed_urls ?? event.failedUrls) },
+    { label: '来源域名', values: traceList(event.source_domains ?? event.sourceDomains) },
     { label: '后续关键词', values: traceList(event.new_queries ?? event.newQueries) },
     { label: '待读取 URL', values: traceList(event.urls_to_fetch ?? event.urlsToFetch) }
   ].filter((item) => item.values.length > 0)
@@ -698,11 +702,28 @@ function isBadSourceSummary(value: string, title: string) {
   if (cjkCount > 0 && cjkCount < 8) return true
   if (/^\s*(?:var|let|const|function|window\.|document\.|return\b|[={\[])/iu.test(value)) return true
   if (/(rightconfig|alldata|noffhflag|__next_data__|window\.__)/iu.test(value)) return true
-  if (/\b(?:tier|support|rerank|confidence|mode):/iu.test(value)) return true
+  if (/\b(?:tier|support|rerank|confidence|provider|mode):/iu.test(value)) return true
+  if (/(?:^|[·|,，\s])\d{1,3}%\s*(?:[·|,，\s]|$)/u.test(value)) return true
+  const diagnosticParts = value.split(/\s*[·|]\s*/u).filter(Boolean)
+  if (diagnosticParts.length >= 3 && diagnosticParts.some((part) => /^[a-z][a-z0-9_-]{2,}$/iu.test(part))) return true
   if (/(节目官网|播放列表|正在播放|热播榜|新闻频道\s*>|政府信息公开|欢迎你@|收藏\s+播放)/u.test(value)) return true
   const normalizedValue = value.toLowerCase().replace(/[\W_]+/gu, '')
   const normalizedTitle = title.toLowerCase().replace(/[\W_]+/gu, '')
   return Boolean(normalizedValue && normalizedTitle && normalizedTitle.includes(normalizedValue))
+}
+
+function normalizeSourceSummaryCandidate(value: unknown, title: string) {
+  let summary = cleanSourceText(value)
+  if (!summary) return ''
+  if (summary.includes('>')) {
+    const tail = summary.split('>').pop()?.trim() || ''
+    if ((tail.match(/[\u4e00-\u9fff]/gu) || []).length >= 8) summary = tail
+  }
+  if (title && summary.toLowerCase().startsWith(title.toLowerCase())) {
+    summary = summary.slice(title.length).replace(/^[\s:：,，。.-]+/u, '').trim()
+  }
+  if (!summary || summary === title) return ''
+  return isBadSourceSummary(summary, title) ? '' : summary
 }
 
 function sourcePublishedLabel(source: WebSearchSource) {
@@ -717,17 +738,9 @@ function sourcePublishedLabel(source: WebSearchSource) {
 
 function sourceSummaryText(source: WebSearchSource) {
   const title = cleanSourceText(source.title)
-  let summary = cleanSourceText(source.snippet)
+  let summary = normalizeSourceSummaryCandidate(source.snippet, title)
+  if (!summary) summary = normalizeSourceSummaryCandidate(source.evidence, title)
   if (!summary) return ''
-  if (summary.includes('>')) {
-    const tail = summary.split('>').pop()?.trim() || ''
-    if ((tail.match(/[\u4e00-\u9fff]/gu) || []).length >= 8) summary = tail
-  }
-  if (title && summary.toLowerCase().startsWith(title.toLowerCase())) {
-    summary = summary.slice(title.length).replace(/^[\s:：,，。.-]+/u, '').trim()
-  }
-  if (!summary || summary === title) return ''
-  if (isBadSourceSummary(summary, title)) return ''
   const sentence = summary.match(/^.+?[。！？!?]|^.+?[.;；]/u)?.[0]?.trim()
   let compact = sentence || summary
   const limit = 96

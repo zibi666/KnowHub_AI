@@ -178,6 +178,27 @@ def test_structured_sources_drop_script_navigation_and_diagnostic_summaries():
     assert all(not item.get("snippet") for item in sources)
 
 
+def test_structured_sources_fallback_to_evidence_for_display_summary():
+    sources = structured_web_search_sources(
+        [
+            web_search.WebSearchResult(
+                title="台海局势观察",
+                url="https://news.example.com/taiwan",
+                snippet="searxng · 70% · tier:normal · support:high · rerank:fallback · ...",
+                evidence="台海相关部门发布最新通报，称当日周边海空动态仍在持续监测。第二句话不应完整展示。",
+                provider="searxng",
+                confidence=0.7,
+                rerank_status="fallback",
+                source_tier="normal",
+                support_level="high",
+            )
+        ]
+    )
+
+    assert sources[0]["snippet"] == "台海相关部门发布最新通报，称当日周边海空动态仍在持续监测..."
+    assert sources[0]["provider"] == "searxng"
+
+
 def test_cached_favicon_downloads_and_reuses_cache(monkeypatch, tmp_path):
     calls = {"count": 0}
 
@@ -1097,6 +1118,41 @@ def test_web_search_final_answer_context_is_compacted():
     assert len(injected) < 2200
 
 
+def test_web_search_final_answer_context_prefers_evidence_and_history():
+    context: list[dict] = []
+    sources = [
+        {
+            "index": 1,
+            "title": "Short UI Source",
+            "url": "https://example.com/news",
+            "snippet": "短摘要",
+            "evidence": "这是给最终回答模型使用的正文级证据，应该优先于短摘要进入上下文。",
+            "provider": "direct",
+            "confidence": 0.8,
+            "source_tier": "major_news",
+        }
+    ]
+
+    chat.inject_web_search_final_answer_context(
+        context,
+        sources,
+        search_history={
+            "searched_queries": ["台海局势 最新"],
+            "read_urls": ["https://example.com/news"],
+            "failed_urls": ["https://bad.example/a"],
+            "source_domains": ["example.com"],
+            "source_titles": ["Short UI Source"],
+        },
+    )
+
+    injected = context[-1]["content"]
+    assert "这是给最终回答模型使用的正文级证据" in injected
+    assert "Evidence: 短摘要" not in injected
+    assert "Searched queries:" in injected
+    assert "台海局势 最新" in injected
+    assert "Failed URLs to avoid:" in injected
+
+
 def test_chat_generation_error_message_hides_remote_protocol_details():
     exc = HTTPException(
         status_code=502,
@@ -1984,6 +2040,13 @@ def test_review_web_search_evidence_uses_lightweight_low_reasoning_and_timeout(m
             model="gpt-5.5",
             user_query="today AI news",
             sources=[],
+            search_history={
+                "searched_queries": ["today AI news"],
+                "read_urls": ["https://example.com/ai"],
+                "failed_urls": ["https://bad.example/ai"],
+                "source_domains": ["example.com"],
+                "source_titles": ["AI News"],
+            },
             round_index=1,
             max_rounds=3,
             reasoning_effort="high",
@@ -1997,6 +2060,12 @@ def test_review_web_search_evidence_uses_lightweight_low_reasoning_and_timeout(m
         assert captured["reasoning_effort"] == "low"
         assert captured["max_completion_tokens"] == 300
         assert captured["timeout"] == 18
+        prompt = "\n".join(str(message.get("content") or "") for message in captured["messages"])
+        assert "Search history so far:" in prompt
+        assert "today AI news" in prompt
+        assert "https://example.com/ai" in prompt
+        assert "https://bad.example/ai" in prompt
+        assert "repeating a query is allowed" in prompt
 
     asyncio.run(run())
 
@@ -2122,9 +2191,89 @@ def test_deep_tool_loop_review_timeout_stops_without_duplicate_fallback_query(mo
     asyncio.run(run())
 
 
-def test_deep_tool_loop_limits_review_actions_and_dedupes_failed_urls(monkeypatch):
+def test_deep_tool_loop_allows_repeated_review_query(monkeypatch):
     async def run():
         executed = []
+        review_histories = []
+        context = [{"role": "user", "content": "taiwan strait latest"}]
+
+        class FakeProvider:
+            async def tool_call_turn(self, **kwargs):
+                return ToolCallTurnResult(tool_calls=[], usage={"prompt_tokens": 1, "completion_tokens": 0, "total_tokens": 1})
+
+        def fake_config():
+            return WebSearchConfig(
+                enabled=True,
+                searxng_base_url="https://search.example.com/search",
+                result_count=3,
+                language="all",
+                safesearch="1",
+                timeout_seconds=5,
+                fetch_timeout_seconds=5,
+                max_tool_calls=4,
+                fetch_max_chars=4000,
+            )
+
+        async def fake_run_web_search_tool(name, arguments, config):
+            executed.append((name, dict(arguments)))
+            return {
+                "ok": True,
+                "results": [
+                    {
+                        "title": f"Source {len(executed)}",
+                        "url": f"https://example.com/{len(executed)}",
+                        "snippet": "still weak",
+                    }
+                ],
+            }
+
+        async def fake_review(**kwargs):
+            review_histories.append(kwargs["search_history"])
+            return (
+                {
+                    "needs_more": True,
+                    "new_queries": ["taiwan strait latest"],
+                    "urls_to_fetch": [],
+                    "evidence_gaps": ["same direction still has too little body evidence"],
+                },
+                {"prompt_tokens": 1, "completion_tokens": 1, "total_tokens": 2},
+            )
+
+        monkeypatch.setattr(chat, "effective_web_search_config", fake_config)
+        monkeypatch.setattr(chat, "publish_conversation_event", lambda *args, **kwargs: asyncio.sleep(0))
+        monkeypatch.setattr(chat, "run_web_search_tool", fake_run_web_search_tool)
+        monkeypatch.setattr(chat, "review_web_search_evidence", fake_review)
+
+        sources, usage, trace = await chat.run_web_search_tool_loop(
+            provider=FakeProvider(),
+            api_key="sk-test",
+            model="gpt-5.5",
+            context=context,
+            conversation_id="conv-1",
+            assistant_message_id="msg-assistant",
+            reasoning_effort=None,
+            search_mode="deep",
+            max_rounds=2,
+        )
+
+        assert [item for item in executed if item[0] == "search_web"] == [
+            ("search_web", {"query": "taiwan strait latest", "search_depth": "deep", "max_rounds": 2}),
+            ("search_web", {"query": "taiwan strait latest", "search_depth": "deep", "max_rounds": 2}),
+        ]
+        assert review_histories[0]["searched_queries"] == ["taiwan strait latest"]
+        review_event = next(event for event in trace["events"] if event.get("type") == "review")
+        assert review_event["searched_queries"] == ["taiwan strait latest"]
+        assert trace["search_history"]["searched_queries"] == ["taiwan strait latest"]
+        assert len(sources) == 2
+        assert usage["total_tokens"] == 3
+
+    asyncio.run(run())
+
+
+def test_deep_tool_loop_limits_review_actions_and_skips_failed_urls_next_round(monkeypatch):
+    async def run():
+        executed = []
+        review_count = {"value": 0}
         context = [{"role": "user", "content": "taiwan strait latest"}]
 
         class FakeProvider:
@@ -2160,10 +2309,11 @@ def test_deep_tool_loop_limits_review_actions_and_dedupes_failed_urls(monkeypatc
             }
 
         async def fake_review(**kwargs):
+            review_count["value"] += 1
             return (
                 {
                     "needs_more": True,
-                    "new_queries": ["q1", "q2", "q3"],
+                    "new_queries": [f"q{review_count['value']}-1", f"q{review_count['value']}-2", f"q{review_count['value']}-3"],
                     "urls_to_fetch": [
                         "https://bad.example/a",
                         "https://bad.example/a",
@@ -2192,13 +2342,14 @@ def test_deep_tool_loop_limits_review_actions_and_dedupes_failed_urls(monkeypatc
         )
 
         deepening_calls = executed[1:]
-        assert len([item for item in deepening_calls if item[0] == "search_web"]) == 2
+        assert len([item for item in deepening_calls if item[0] == "search_web"]) == 4
         assert len([item for item in deepening_calls if item[0] == "fetch_url"]) == 2
         assert ("fetch_url", {"url": "https://bad.example/a", "focus": "taiwan strait latest"}) in deepening_calls
         assert ("fetch_url", {"url": "https://bad.example/b", "focus": "taiwan strait latest"}) in deepening_calls
+        assert deepening_calls.count(("fetch_url", {"url": "https://bad.example/a", "focus": "taiwan strait latest"})) == 1
         assert usage["total_tokens"] == 5
         assert any(event.get("error") == "DNS resolution failed" for event in trace["events"])
-        assert len(sources) == 3
+        assert len(sources) == 5
 
     asyncio.run(run())
 

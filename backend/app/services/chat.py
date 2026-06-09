@@ -109,6 +109,9 @@ WEB_SEARCH_DEEP_REVIEW_POLICY = (
     "evidence_gaps (array of short strings), relevance_notes (array of short public notes), "
     "accuracy_notes (array of short public notes), stop_reason (short string), reason_codes (array of short strings). "
     "Judge Chinese relevance semantically; allow synonyms, abbreviations, translations, and headline rewrites. "
+    "You may repeat or slightly vary a previous query only when that direction still lacks enough independent, "
+    "body-level, official, or major-news evidence; explain that gap in evidence_gaps or relevance_notes. "
+    "Prefer new URLs over refetching pages already read successfully, and do not retry URLs listed as failed. "
     "Do not include hidden reasoning or prose. Ask for more only when the current evidence is weak, stale, "
     "contradictory, clearly unrelated, or missing primary/major-news support."
 )
@@ -557,6 +560,7 @@ def inject_web_search_final_answer_context(
     context: list[dict],
     sources: list[dict],
     *,
+    search_history: dict | None = None,
     max_sources: int = 14,
     max_total_chars: int = 12000,
 ) -> None:
@@ -587,6 +591,15 @@ def inject_web_search_final_answer_context(
         "Never add a citation marker just to satisfy formatting.",
         "Do not append a separate markdown source list.",
     ]
+    history_lines = _search_history_lines(search_history)
+    if history_lines:
+        lines.append(
+            "Search coverage summary: use this to understand what was attempted, but cite only numbered sources below."
+        )
+        lines.extend(history_lines)
+        lines.append(
+            "If multiple numbered sources support a time-sensitive factual claim, use citations broadly instead of relying on only one or two sources."
+        )
     if high_confidence_count < 2:
         lines.append("Fewer than two high-confidence sources were found; avoid definitive conclusions for contested or time-sensitive claims.")
     if len({domain for domain in independent_domains if domain}) < 2 or quality_count < 1:
@@ -611,8 +624,9 @@ def inject_web_search_final_answer_context(
                 f"rerank={source.get('rerank_status') or 'unknown'}, "
                 f"degraded={bool(source.get('degraded'))}"
             )
-        if snippet:
-            source_lines.append(f"Evidence: {snippet[:300]}")
+        evidence = str(source.get("evidence") or source.get("snippet") or "").strip()
+        if evidence:
+            source_lines.append(f"Evidence: {evidence[:340]}")
         next_chars = sum(len(line) for line in source_lines)
         if used_chars + next_chars > max_total_chars:
             lines.append("Additional search evidence was saved in the source panel but omitted from this prompt to keep generation stable.")
@@ -821,6 +835,77 @@ def _clean_review_notes(values: object, *, limit: int = 6, item_limit: int = 220
     return notes
 
 
+def _append_unique_compact(items: list[str], value: object, *, limit: int) -> None:
+    text = _compact_trace_text(value, limit)
+    if text and text not in items:
+        items.append(text)
+
+
+def _search_history_from_trace(trace: dict | None, sources: list | None = None) -> dict:
+    history: dict[str, list] = {
+        "searched_queries": [],
+        "read_urls": [],
+        "failed_urls": [],
+        "source_domains": [],
+        "source_titles": [],
+    }
+    if isinstance(trace, dict):
+        for event in trace.get("events") or []:
+            if not isinstance(event, dict):
+                continue
+            query = event.get("query")
+            url = event.get("url")
+            ok = event.get("ok")
+            if query:
+                _append_unique_compact(history["searched_queries"], query, limit=180)
+            if url:
+                target = history["failed_urls"] if ok is False else history["read_urls"]
+                _append_unique_compact(target, url, limit=500)
+            for source in event.get("sources") or []:
+                if not isinstance(source, dict):
+                    continue
+                source_url = _compact_trace_text(source.get("url"), 500)
+                if source_url:
+                    _append_unique_compact(history["read_urls"], source_url, limit=500)
+                    domain = urlparse(source_url).hostname
+                    if domain:
+                        _append_unique_compact(history["source_domains"], domain, limit=120)
+                _append_unique_compact(history["source_titles"], source.get("title"), limit=160)
+    for source in sources or []:
+        source_url = _compact_trace_text(getattr(source, "url", ""), 500)
+        if source_url:
+            _append_unique_compact(history["read_urls"], source_url, limit=500)
+            domain = urlparse(source_url).hostname
+            if domain:
+                _append_unique_compact(history["source_domains"], domain, limit=120)
+        _append_unique_compact(history["source_titles"], getattr(source, "title", ""), limit=160)
+    history["searched_queries"] = history["searched_queries"][:12]
+    history["read_urls"] = history["read_urls"][:16]
+    history["failed_urls"] = history["failed_urls"][:12]
+    history["source_domains"] = history["source_domains"][:12]
+    history["source_titles"] = history["source_titles"][:12]
+    return history
+
+
+def _search_history_lines(history: dict | None) -> list[str]:
+    if not history:
+        return []
+    sections = [
+        ("Searched queries", history.get("searched_queries") or []),
+        ("Read or discovered URLs", history.get("read_urls") or []),
+        ("Failed URLs to avoid", history.get("failed_urls") or []),
+        ("Current source domains", history.get("source_domains") or []),
+        ("Current source titles", history.get("source_titles") or []),
+    ]
+    lines: list[str] = []
+    for label, values in sections:
+        clean_values = [_compact_trace_text(value, 500) for value in values if _compact_trace_text(value, 500)]
+        if clean_values:
+            lines.append(f"{label}:")
+            lines.extend(f"- {value}" for value in clean_values[:16])
+    return lines
+
+
 def _public_search_result(item: object) -> dict | None:
     if not isinstance(item, dict):
         return None
@@ -901,7 +986,7 @@ def _trace_tool_event(
     return event
 
 
-def _trace_review_event(round_index: int, review_payload: dict) -> dict:
+def _trace_review_event(round_index: int, review_payload: dict, search_history: dict | None = None) -> dict:
     needs_more_value = review_payload.get("needs_more")
     event = {
         "round": round_index,
@@ -916,6 +1001,27 @@ def _trace_review_event(round_index: int, review_payload: dict) -> dict:
         "reason_codes": _clean_review_notes(review_payload.get("reason_codes"), item_limit=80),
         "stop_reason": _compact_trace_text(review_payload.get("stop_reason"), 220),
     }
+    if search_history:
+        event["searched_queries"] = [
+            _compact_trace_text(query, 180)
+            for query in (search_history.get("searched_queries") or [])[:8]
+            if _compact_trace_text(query, 180)
+        ]
+        event["read_urls"] = [
+            _compact_trace_text(url, 500)
+            for url in (search_history.get("read_urls") or [])[:8]
+            if _compact_trace_text(url, 500)
+        ]
+        event["failed_urls"] = [
+            _compact_trace_text(url, 500)
+            for url in (search_history.get("failed_urls") or [])[:6]
+            if _compact_trace_text(url, 500)
+        ]
+        event["source_domains"] = [
+            _compact_trace_text(domain, 120)
+            for domain in (search_history.get("source_domains") or [])[:8]
+            if _compact_trace_text(domain, 120)
+        ]
     return {key: value for key, value in event.items() if value not in (None, "", [])}
 
 
@@ -953,6 +1059,7 @@ async def review_web_search_evidence(
     model: str,
     user_query: str,
     sources: list,
+    search_history: dict | None = None,
     round_index: int,
     max_rounds: int,
     reasoning_effort: str | None,
@@ -972,6 +1079,7 @@ async def review_web_search_evidence(
                 ]
             )
         )
+    history_lines = _search_history_lines(search_history)
     messages = [
         {"role": "system", "content": WEB_SEARCH_DEEP_REVIEW_POLICY},
         {
@@ -979,6 +1087,12 @@ async def review_web_search_evidence(
             "content": (
                 f"User query: {user_query}\n"
                 f"Round: {round_index}/{max_rounds}\n"
+                "Search history so far:\n"
+                + ("\n".join(history_lines) if history_lines else "No search history was recorded yet.")
+                + "\n\n"
+                "When proposing more work, use the history above: repeating a query is allowed when the same "
+                "information direction is under-evidenced, but do not repeat it blindly. Prefer more independent "
+                "or authoritative coverage, and avoid URLs already listed as failed.\n"
                 "Current evidence:\n"
                 + ("\n\n".join(evidence_lines) if evidence_lines else "No evidence yet.")
             ),
@@ -1263,9 +1377,10 @@ async def run_web_search_tool_loop(
             )
     if iterative_deep_search and max_rounds > 1:
         user_query = base_user_query
-        seen_queries = {user_query.strip().lower()} if user_query else set()
-        seen_urls = {str(getattr(source, "url", "") or "").strip() for source in sources if getattr(source, "url", "")}
+        failed_urls: set[str] = set()
         for round_index in range(2, max_rounds + 1):
+            search_history = _search_history_from_trace(trace, sources)
+            failed_urls.update(str(url) for url in search_history.get("failed_urls") or [])
             await publish_conversation_event(
                 conversation_id,
                 "web_search_status",
@@ -1282,6 +1397,7 @@ async def run_web_search_tool_loop(
                 model=model,
                 user_query=user_query,
                 sources=sources,
+                search_history=search_history,
                 round_index=round_index - 1,
                 max_rounds=max_rounds,
                 reasoning_effort=reasoning_effort,
@@ -1290,7 +1406,7 @@ async def run_web_search_tool_loop(
             )
             usage_total = add_usage_totals(usage_total, review_usage)
             needs_more = bool(review_payload.get("needs_more", True))
-            trace["events"].append(_trace_review_event(round_index - 1, review_payload))
+            trace["events"].append(_trace_review_event(round_index - 1, review_payload, search_history))
             new_queries = _clean_search_queries(
                 review_payload.get("new_queries"),
                 limit=WEB_SEARCH_REVIEW_MAX_QUERIES_PER_ROUND,
@@ -1305,10 +1421,10 @@ async def run_web_search_tool_loop(
                 break
             if not new_queries and user_query:
                 new_queries = [user_query]
-            new_queries = [query for query in new_queries if query.lower() not in seen_queries][:WEB_SEARCH_REVIEW_MAX_QUERIES_PER_ROUND]
+            new_queries = new_queries[:WEB_SEARCH_REVIEW_MAX_QUERIES_PER_ROUND]
             remaining_actions = max(0, WEB_SEARCH_REVIEW_MAX_ACTIONS_PER_ROUND - len(new_queries))
             urls_to_fetch = [
-                url for url in urls_to_fetch if url not in seen_urls
+                url for url in urls_to_fetch if url not in failed_urls
             ][: min(WEB_SEARCH_REVIEW_MAX_URLS_PER_ROUND, remaining_actions)]
             if not new_queries and not urls_to_fetch:
                 trace["stop_reason"] = "模型未提出新的搜索关键词或读取 URL，深搜已停止。"
@@ -1340,7 +1456,6 @@ async def run_web_search_tool_loop(
                 )
                 payload = await run_web_search_tool("search_web", arguments, config)
                 round_payloads.append(("search_web", arguments, payload))
-                seen_queries.add(query.lower())
             for url in urls_to_fetch:
                 arguments = {"url": url, "focus": user_query}
                 await publish_conversation_event(
@@ -1357,7 +1472,8 @@ async def run_web_search_tool_loop(
                 )
                 payload = await run_web_search_tool("fetch_url", arguments, config)
                 round_payloads.append(("fetch_url", arguments, payload))
-                seen_urls.add(url)
+                if not payload.get("ok"):
+                    failed_urls.add(url)
             for tool_name, arguments, payload in round_payloads:
                 executed_calls += 1
                 if payload.get("ok"):
@@ -1396,6 +1512,7 @@ async def run_web_search_tool_loop(
             ),
         )
     trace["source_count"] = len({getattr(source, "url", "") for source in sources if getattr(source, "url", "")})
+    trace["search_history"] = _search_history_from_trace(trace, sources)
     trace["executed_rounds"] = max((int(event.get("round") or 0) for event in trace["events"]), default=0)
     if "early_stop" not in trace:
         trace["early_stop"] = False
@@ -3061,7 +3178,11 @@ async def run_chat_generation_job(
                 available_models=api_key_row.available_models_json,
             )
             structured_sources = structured_web_search_sources(web_search_sources)
-            inject_web_search_final_answer_context(context, structured_sources)
+            inject_web_search_final_answer_context(
+                context,
+                structured_sources,
+                search_history=(web_search_trace or {}).get("search_history") if web_search_trace else None,
+            )
             await _persist_assistant_partial(
                 assistant_message_id,
                 "".join(buffer),
