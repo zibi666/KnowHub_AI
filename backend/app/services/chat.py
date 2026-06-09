@@ -1464,9 +1464,10 @@ async def run_web_search_tool_loop(
             context.append(turn.assistant_message)
         for call in turn.tool_calls:
             effective_arguments = dict(call.arguments)
-            if call.name == "search_web" and search_mode in {"fast", "deep"}:
+            if call.name == "search_web":
                 effective_arguments.setdefault("search_depth", effective_depth)
-                effective_arguments.setdefault("max_rounds", hard_max_rounds)
+                if effective_depth == "deep":
+                    effective_arguments.setdefault("max_rounds", hard_max_rounds)
             cache_key = web_search_cache_key(call.name, effective_arguments)
             cached_payload = False
             if cache_key and cache_key in tool_cache:

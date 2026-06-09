@@ -1091,6 +1091,13 @@ def test_web_search_mode_request_defaults_and_round_clamp():
     assert send_payload.web_search_max_rounds == 1
 
 
+def test_auto_search_depth_prefers_deep_for_current_conflict_topics():
+    assert web_search.effective_search_depth("你怎么看待中东爆发的各种冲突", "auto") == "deep"
+    assert web_search.effective_search_depth("台海局势怎么看", "auto") == "deep"
+    assert web_search.effective_search_depth("Python list 怎么排序", "auto") == "fast"
+    assert web_search.effective_search_depth("你怎么看待中东爆发的各种冲突", "fast") == "fast"
+
+
 def test_web_search_final_answer_context_is_compacted():
     sources = [
         {
@@ -1714,7 +1721,7 @@ def test_tool_loop_reuses_duplicate_searches_and_fetches_without_extra_count(mon
         )
 
         assert executed == [
-            ("search_web", {"query": "latest ai news"}),
+            ("search_web", {"query": "latest ai news", "search_depth": "deep", "max_rounds": 10}),
             ("fetch_url", {"url": "https://example.com/news"}),
         ]
         assert len([item for item in context if item.get("role") == "tool"]) == 4
@@ -1913,6 +1920,89 @@ def test_auto_tool_loop_uses_effective_deep_strategy_for_iterative_search(monkey
         assert len(sources) == 3
         assert trace["stop_code"] == "evidence_enough"
         assert any(event.get("type") == "review" for event in trace["events"])
+
+    asyncio.run(run())
+
+
+def test_auto_tool_loop_adds_effective_depth_to_model_search_call(monkeypatch):
+    async def run():
+        executed = []
+        context = [{"role": "user", "content": "你怎么看待中东爆发的各种冲突"}]
+
+        class FakeProvider:
+            async def tool_call_turn(self, **kwargs):
+                return ToolCallTurnResult(
+                    tool_calls=[ToolCall(id="call-1", name="search_web", arguments={"query": "中东冲突 局势"})],
+                    usage={"prompt_tokens": 1, "completion_tokens": 0, "total_tokens": 1},
+                )
+
+        def fake_config():
+            return WebSearchConfig(
+                enabled=True,
+                searxng_base_url="https://search.example.com/search",
+                result_count=3,
+                language="all",
+                safesearch="1",
+                timeout_seconds=5,
+                fetch_timeout_seconds=5,
+                max_tool_calls=3,
+                fetch_max_chars=4000,
+            )
+
+        async def fake_run_web_search_tool(name, arguments, config):
+            executed.append((name, dict(arguments)))
+            return {
+                "ok": True,
+                "results": [
+                    {
+                        "title": "Middle East conflict analysis",
+                        "url": "https://example.com/middle-east",
+                        "snippet": "conflict update",
+                        "confidence": 0.7,
+                        "source_tier": "major_news",
+                    }
+                ],
+            }
+
+        async def fake_review(**kwargs):
+            return (
+                {
+                    "needs_more": False,
+                    "new_queries": [],
+                    "urls_to_fetch": [],
+                    "evidence_gaps": [],
+                    "reason_codes": ["enough"],
+                    "stop_reason": "证据已足够",
+                },
+                {"prompt_tokens": 1, "completion_tokens": 1, "total_tokens": 2},
+            )
+
+        monkeypatch.setattr(chat, "effective_web_search_config", fake_config)
+        monkeypatch.setattr(chat, "publish_conversation_event", lambda *args, **kwargs: asyncio.sleep(0))
+        monkeypatch.setattr(chat, "run_web_search_tool", fake_run_web_search_tool)
+        monkeypatch.setattr(chat, "review_web_search_evidence", fake_review)
+
+        sources, usage, trace = await chat.run_web_search_tool_loop(
+            provider=FakeProvider(),
+            api_key="sk-test",
+            model="gpt-5.5",
+            context=context,
+            conversation_id="conv-1",
+            assistant_message_id="msg-assistant",
+            reasoning_effort=None,
+            search_mode="auto",
+            max_rounds=3,
+        )
+
+        assert executed == [
+            ("search_web", {"query": "中东冲突 局势", "search_depth": "deep", "max_rounds": 10})
+        ]
+        assert trace["mode"] == "auto"
+        assert trace["effective_depth"] == "deep"
+        assert trace["executed_rounds"] == 1
+        assert trace["stop_code"] == "evidence_enough"
+        assert usage["total_tokens"] == 3
+        assert len(sources) == 1
 
     asyncio.run(run())
 
@@ -2896,7 +2986,9 @@ def test_tool_loop_stops_after_successful_search_results(monkeypatch):
             reasoning_effort=None,
         )
 
-        assert executed == [("search_web", {"query": "latest ai news"})]
+        assert executed == [
+            ("search_web", {"query": "latest ai news", "search_depth": "deep", "max_rounds": 10})
+        ]
         assert tool_turn_count["value"] == 1
         assert len(sources) == 1
         assert usage["total_tokens"] == 2
