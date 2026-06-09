@@ -21,6 +21,7 @@ from app.services.chat import (
     message_progress_event_data,
     model_supports_vision,
     remaining_completed_text,
+    strip_visible_tool_call_markup,
 )
 from app.services import attachments as attachment_service
 from app.services.attachments import cosine_similarity, split_attachment_text
@@ -333,6 +334,20 @@ def test_remaining_completed_text_keeps_suffix_after_partial_delta():
     assert remaining_completed_text("abcdef", "abc") == "def"
     assert remaining_completed_text("abcdef", "abcdef") == ""
     assert remaining_completed_text("cdefgh", "abcd") == "efgh"
+
+
+def test_strip_visible_tool_call_markup_removes_pseudo_tool_output():
+    text = (
+        "前文 <tool_call code>{\"query\":\"site:mnd.gov.tw 台海\"}</tool_call> "
+        "中间 <tool_call>{\"query\":\"台湾 国防部\"}</tool_call> 后文"
+    )
+
+    cleaned = strip_visible_tool_call_markup(text)
+
+    assert "tool_call" not in cleaned
+    assert "query" not in cleaned
+    assert "前文" in cleaned
+    assert "后文" in cleaned
 
 
 def test_model_supports_vision_by_configured_patterns():

@@ -452,6 +452,14 @@ def remaining_completed_text(completed_text: str, streamed_text: str) -> str:
     return completed_text
 
 
+def strip_visible_tool_call_markup(text: str) -> str:
+    if not text:
+        return ""
+    cleaned = re.sub(r"<tool_call(?:\s+code)?\s*>.*?</tool_call\s*>", "", text, flags=re.I | re.S)
+    cleaned = re.sub(r"</?tool_call(?:\s+code)?\s*>", "", cleaned, flags=re.I)
+    return cleaned
+
+
 def preferred_model(models: list[str], configured: str | None) -> str:
     if configured and image_model_is_available(configured, models):
         return configured
@@ -665,6 +673,7 @@ def inject_web_search_final_answer_context(
         f"User question: {_compact_trace_text(user_query, 500) or latest_user_text(context)}",
         "What the user needs: synthesize the relevant websites below into a direct answer to the user question.",
         "Citation rules: cite factual claims with the exact source marker like [[1]]. Cite only sources that directly support the claim. Do not output a separate source list.",
+        "Do not call tools or output tool-call markup. Never write <tool_call>, <tool_call code>, JSON tool arguments, or search queries in the final answer.",
         "Relevant sources:",
     ]
     if high_confidence_count < 2:
@@ -2263,7 +2272,9 @@ async def stream_chat(user_id: str, payload: SendMessageRequest, conversation_id
                 pending_next = asyncio.ensure_future(_safe_anext(stream))
 
                 if event.event == "token":
-                    text = event.data["text"]
+                    text = strip_visible_tool_call_markup(event.data["text"])
+                    if not text:
+                        continue
                     buffer.append(text)
                     if not first_token_logged:
                         first_token_logged = True
@@ -2283,7 +2294,7 @@ async def stream_chat(user_id: str, payload: SendMessageRequest, conversation_id
                         },
                     )
                 elif event.event == "completed_text":
-                    text = event.data.get("text") or ""
+                    text = strip_visible_tool_call_markup(event.data.get("text") or "")
                     current = "".join(buffer)
                     remaining = remaining_completed_text(text, current)
                     if remaining:
@@ -3289,7 +3300,9 @@ async def run_chat_generation_job(
                 pending_next = asyncio.ensure_future(_safe_anext(stream))
 
                 if event.event == "token":
-                    text = event.data["text"]
+                    text = strip_visible_tool_call_markup(event.data["text"])
+                    if not text:
+                        continue
                     if first_token_seconds is None:
                         first_token_seconds = int(time.perf_counter() - request_started)
                     buffer.append(text)
@@ -3316,7 +3329,7 @@ async def run_chat_generation_job(
                         },
                     )
                 elif event.event == "completed_text":
-                    text = event.data.get("text") or ""
+                    text = strip_visible_tool_call_markup(event.data.get("text") or "")
                     current = "".join(buffer)
                     remaining = remaining_completed_text(text, current)
                     if remaining:

@@ -1144,6 +1144,7 @@ def test_web_search_final_answer_context_prefers_evidence_and_omits_history():
     assert ">短摘要<" not in injected
     assert "User question: 台海现在怎么样" in injected
     assert "<source" in injected
+    assert "Never write <tool_call>" in injected
     assert "Searched queries:" not in injected
     assert "Failed URLs to avoid:" not in injected
     assert "https://bad.example/a" not in injected

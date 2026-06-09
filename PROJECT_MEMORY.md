@@ -95,6 +95,8 @@
 - 来源摘要 UI 绝不能把 `searxng · 70% · tier:normal · support:high · rerank:fallback` 这类 provider/置信度/诊断串当正文摘要；snippet 不合格时从 evidence 抽正文第一句，仍不合格就不显示摘要。
 - 联网搜索最终回答模型只应接收精选 source brief：用户问题、可引用网站 URL、每个网站正文摘要和简短综合回答要求；不要把搜索关键词、失败 URL、审查 JSON 或每轮工具结果日志传给最终回答模型。
 - 多轮深搜来源超过 10 个时，最终 prompt 只选全部轮次合并后的 Top 8-10 个高质量独立来源；完整来源和搜索过程保留在 UI trace/source panel。
+- 联网搜索最终回答如果上游模型输出 `<tool_call>`、`<tool_call code>` 或 JSON 工具参数，必须在后端清洗掉，不能让伪工具调用作为正文展示给用户。
+- 来源抽屉卡片不要展示 provider/confidence/tier/support/rerank 诊断串；这些诊断信息只能留在搜索过程 trace 或调试日志中，不能出现在正文摘要区域。
 
 ## 好的方法
 
