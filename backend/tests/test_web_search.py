@@ -1729,7 +1729,7 @@ def test_tool_loop_reuses_duplicate_searches_and_fetches_without_extra_count(mon
     asyncio.run(run())
 
 
-def test_deep_tool_loop_runs_until_requested_rounds_when_evidence_is_weak(monkeypatch):
+def test_deep_tool_loop_runs_until_model_says_evidence_is_enough(monkeypatch):
     async def run():
         published_events = []
         executed = []
@@ -1771,6 +1771,18 @@ def test_deep_tool_loop_runs_until_requested_rounds_when_evidence_is_weak(monkey
             }
 
         async def fake_review(**kwargs):
+            if kwargs["round_index"] >= 3:
+                return (
+                    {
+                        "needs_more": False,
+                        "new_queries": [],
+                        "urls_to_fetch": [],
+                        "evidence_gaps": [],
+                        "reason_codes": ["enough"],
+                        "stop_reason": "证据已足够",
+                    },
+                    {"prompt_tokens": 1, "completion_tokens": 1, "total_tokens": 2},
+                )
             return (
                 {
                     "needs_more": True,
@@ -1802,7 +1814,10 @@ def test_deep_tool_loop_runs_until_requested_rounds_when_evidence_is_weak(monkey
         assert [item[0] for item in executed] == ["search_web", "search_web", "search_web"]
         assert executed[0][1]["search_depth"] == "deep"
         assert len(sources) == 3
-        assert usage["total_tokens"] == 5
+        assert usage["total_tokens"] == 7
+        assert trace["early_stop"] is True
+        assert trace["stop_code"] == "evidence_enough"
+        assert trace["stop_reason"] == "证据已足够"
         assert any(event.get("type") == "review" and event.get("evidence_gaps") for event in trace["events"])
         assert any(event == "web_search_status" and data.get("phase") == "deepening" for event, data in published_events)
 
@@ -1847,6 +1862,18 @@ def test_auto_tool_loop_uses_effective_deep_strategy_for_iterative_search(monkey
             }
 
         async def fake_review(**kwargs):
+            if kwargs["round_index"] >= 3:
+                return (
+                    {
+                        "needs_more": False,
+                        "new_queries": [],
+                        "urls_to_fetch": [],
+                        "evidence_gaps": [],
+                        "reason_codes": ["enough"],
+                        "stop_reason": "证据已足够",
+                    },
+                    {"prompt_tokens": 1, "completion_tokens": 1, "total_tokens": 2},
+                )
             return (
                 {
                     "needs_more": True,
@@ -1878,12 +1905,13 @@ def test_auto_tool_loop_uses_effective_deep_strategy_for_iterative_search(monkey
 
         assert [item[0] for item in executed] == ["search_web", "search_web", "search_web"]
         assert executed[0][1]["search_depth"] == "deep"
-        assert executed[0][1]["max_rounds"] == 3
+        assert executed[0][1]["max_rounds"] == 10
         assert trace["mode"] == "auto"
         assert trace["effective_depth"] == "deep"
         assert trace["executed_rounds"] == 3
-        assert usage["total_tokens"] == 5
+        assert usage["total_tokens"] == 7
         assert len(sources) == 3
+        assert trace["stop_code"] == "evidence_enough"
         assert any(event.get("type") == "review" for event in trace["events"])
 
     asyncio.run(run())
@@ -1925,6 +1953,17 @@ def test_auto_deep_tool_loop_keeps_final_context_free_of_round_result_logs(monke
             }
 
         async def fake_review(**kwargs):
+            if kwargs["round_index"] >= 3:
+                return (
+                    {
+                        "needs_more": False,
+                        "new_queries": [],
+                        "urls_to_fetch": [],
+                        "evidence_gaps": [],
+                        "stop_reason": "证据已足够",
+                    },
+                    {"prompt_tokens": 1, "completion_tokens": 1, "total_tokens": 2},
+                )
             return (
                 {
                     "needs_more": True,
@@ -1959,7 +1998,8 @@ def test_auto_deep_tool_loop_keeps_final_context_free_of_round_result_logs(monke
         assert "Web search was enabled and the model did not call tools" not in context_text
         assert len(sources) == 3
         assert trace["executed_rounds"] == 3
-        assert usage["total_tokens"] == 5
+        assert usage["total_tokens"] == 7
+        assert trace["stop_code"] == "evidence_enough"
 
     asyncio.run(run())
 
@@ -2507,10 +2547,86 @@ def test_deep_tool_loop_needs_more_without_actions_stops_without_fallback_query(
         assert [item[0] for item in executed] == ["search_web"]
         assert usage["total_tokens"] == 3
         assert len(sources) == 1
-        assert trace["stop_reason"] == "模型未提出新的搜索关键词或读取 URL，深搜已停止。"
+        assert trace["stop_code"] == "review_no_actions"
+        assert trace["stop_reason"] == "模型判断仍需更多证据，但未提出新的搜索关键词或读取 URL，深搜已停止。"
         review_event = next(event for event in trace["events"] if event.get("type") == "review")
         assert review_event["needs_more"] is True
         assert "new_queries" not in review_event
+
+    asyncio.run(run())
+
+
+def test_deep_tool_loop_continues_until_hard_limit_when_model_keeps_requesting_more(monkeypatch):
+    async def run():
+        executed = []
+        context = [{"role": "user", "content": "taiwan strait latest"}]
+
+        class FakeProvider:
+            async def tool_call_turn(self, **kwargs):
+                return ToolCallTurnResult(tool_calls=[], usage={"prompt_tokens": 1, "completion_tokens": 0, "total_tokens": 1})
+
+        def fake_config():
+            return WebSearchConfig(
+                enabled=True,
+                searxng_base_url="https://search.example.com/search",
+                result_count=3,
+                language="all",
+                safesearch="1",
+                timeout_seconds=5,
+                fetch_timeout_seconds=5,
+                max_tool_calls=4,
+                fetch_max_chars=4000,
+            )
+
+        async def fake_run_web_search_tool(name, arguments, config):
+            executed.append((name, dict(arguments)))
+            return {
+                "ok": True,
+                "results": [
+                    {
+                        "title": f"Source {len(executed)}",
+                        "url": f"https://example.com/{len(executed)}",
+                        "snippet": "still weak",
+                    }
+                ],
+            }
+
+        async def fake_review(**kwargs):
+            return (
+                {
+                    "needs_more": True,
+                    "new_queries": [f"taiwan strait latest round {kwargs['round_index']}"],
+                    "urls_to_fetch": [],
+                    "evidence_gaps": ["still weak"],
+                    "reason_codes": ["weak_sources"],
+                },
+                {"prompt_tokens": 1, "completion_tokens": 1, "total_tokens": 2},
+            )
+
+        monkeypatch.setattr(chat, "effective_web_search_config", fake_config)
+        monkeypatch.setattr(chat, "publish_conversation_event", lambda *args, **kwargs: asyncio.sleep(0))
+        monkeypatch.setattr(chat, "run_web_search_tool", fake_run_web_search_tool)
+        monkeypatch.setattr(chat, "review_web_search_evidence", fake_review)
+
+        sources, usage, trace = await chat.run_web_search_tool_loop(
+            provider=FakeProvider(),
+            api_key="sk-test",
+            model="gpt-5.5",
+            context=context,
+            conversation_id="conv-1",
+            assistant_message_id="msg-assistant",
+            reasoning_effort=None,
+            search_mode="deep",
+            max_rounds=3,
+        )
+
+        assert len([item for item in executed if item[0] == "search_web"]) == 10
+        assert executed[0][1]["max_rounds"] == 10
+        assert trace["executed_rounds"] == 10
+        assert trace["stop_code"] == "max_deep_rounds_reached"
+        assert trace["stop_reason"] == "已达到深搜硬上限 10 轮，使用现有证据回答。"
+        assert len(sources) == 10
+        assert usage["total_tokens"] == 19
 
     asyncio.run(run())
 
@@ -2553,6 +2669,17 @@ def test_deep_tool_loop_allows_repeated_review_query(monkeypatch):
 
         async def fake_review(**kwargs):
             review_histories.append(kwargs["search_history"])
+            if kwargs["round_index"] >= 2:
+                return (
+                    {
+                        "needs_more": False,
+                        "new_queries": [],
+                        "urls_to_fetch": [],
+                        "evidence_gaps": [],
+                        "stop_reason": "证据已足够",
+                    },
+                    {"prompt_tokens": 1, "completion_tokens": 1, "total_tokens": 2},
+                )
             return (
                 {
                     "needs_more": True,
@@ -2581,15 +2708,16 @@ def test_deep_tool_loop_allows_repeated_review_query(monkeypatch):
         )
 
         assert [item for item in executed if item[0] == "search_web"] == [
-            ("search_web", {"query": "taiwan strait latest", "search_depth": "deep", "max_rounds": 2}),
-            ("search_web", {"query": "taiwan strait latest", "search_depth": "deep", "max_rounds": 2}),
+            ("search_web", {"query": "taiwan strait latest", "search_depth": "deep", "max_rounds": 10}),
+            ("search_web", {"query": "taiwan strait latest", "search_depth": "deep", "max_rounds": 10}),
         ]
         assert review_histories[0]["searched_queries"] == ["taiwan strait latest"]
         review_event = next(event for event in trace["events"] if event.get("type") == "review")
         assert review_event["searched_queries"] == ["taiwan strait latest"]
         assert trace["search_history"]["searched_queries"] == ["taiwan strait latest"]
         assert len(sources) == 2
-        assert usage["total_tokens"] == 3
+        assert usage["total_tokens"] == 5
+        assert trace["stop_code"] == "evidence_enough"
 
     asyncio.run(run())
 
@@ -2634,6 +2762,17 @@ def test_deep_tool_loop_limits_review_actions_and_skips_failed_urls_next_round(m
 
         async def fake_review(**kwargs):
             review_count["value"] += 1
+            if review_count["value"] >= 3:
+                return (
+                    {
+                        "needs_more": False,
+                        "new_queries": [],
+                        "urls_to_fetch": [],
+                        "evidence_gaps": [],
+                        "stop_reason": "证据已足够",
+                    },
+                    {"prompt_tokens": 1, "completion_tokens": 1, "total_tokens": 2},
+                )
             return (
                 {
                     "needs_more": True,
@@ -2671,9 +2810,10 @@ def test_deep_tool_loop_limits_review_actions_and_skips_failed_urls_next_round(m
         assert ("fetch_url", {"url": "https://bad.example/a", "focus": "taiwan strait latest"}) in deepening_calls
         assert ("fetch_url", {"url": "https://bad.example/b", "focus": "taiwan strait latest"}) in deepening_calls
         assert deepening_calls.count(("fetch_url", {"url": "https://bad.example/a", "focus": "taiwan strait latest"})) == 1
-        assert usage["total_tokens"] == 5
+        assert usage["total_tokens"] == 7
         assert any(event.get("error") == "DNS resolution failed" for event in trace["events"])
         assert len(sources) == 5
+        assert trace["stop_code"] == "evidence_enough"
 
     asyncio.run(run())
 

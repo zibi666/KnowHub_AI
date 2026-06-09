@@ -586,7 +586,7 @@ function webSearchTraceSummary(trace: WebSearchTrace | null) {
   const executedRounds = traceNumber(trace.executed_rounds ?? trace.executedRounds)
   if (executedRounds !== null) items.push(`已执行轮次：${executedRounds}`)
   const maxRounds = traceNumber(trace.max_rounds ?? trace.maxRounds)
-  if (depth === '深搜' && maxRounds !== null) items.push(`最大轮数：${maxRounds}`)
+  if (depth === '深搜' && maxRounds !== null) items.push(`硬上限：${maxRounds}`)
   const sourceCount = traceNumber(trace.source_count ?? trace.sourceCount)
   if (sourceCount !== null) items.push(`来源：${sourceCount}`)
   const earlyStop = Boolean(trace.early_stop ?? trace.earlyStop)

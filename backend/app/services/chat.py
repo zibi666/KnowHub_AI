@@ -129,6 +129,7 @@ WEB_SEARCH_REVIEW_MAX_QUERIES_PER_ROUND = 2
 WEB_SEARCH_REVIEW_MAX_URLS_PER_ROUND = 2
 WEB_SEARCH_REVIEW_MAX_ACTIONS_PER_ROUND = 3
 WEB_SEARCH_INITIAL_MAX_QUERIES = 3
+WEB_SEARCH_DEEP_HARD_MAX_ROUNDS = 10
 _STREAM_END = object()
 EMPTY_CHAT_RESPONSE_MESSAGE = (
     "模型返回了空回复：上游接口请求已完成，但没有返回任何可显示的文本。"
@@ -1430,14 +1431,16 @@ async def run_web_search_tool_loop(
     should_stop_after_batch = False
     tool_cache: dict[tuple[str, str], dict] = {}
     search_mode = normalized_web_search_mode(search_mode)
-    max_rounds = normalized_web_search_rounds(max_rounds)
+    requested_max_rounds = normalized_web_search_rounds(max_rounds)
+    hard_max_rounds = WEB_SEARCH_DEEP_HARD_MAX_ROUNDS
     base_user_query = web_search_fallback_query(context)
     effective_depth = effective_search_depth(base_user_query, search_mode)
     iterative_deep_search = effective_depth == "deep"
     trace: dict = {
         "mode": search_mode,
         "effective_depth": effective_depth,
-        "max_rounds": max_rounds,
+        "requested_max_rounds": requested_max_rounds,
+        "max_rounds": hard_max_rounds,
         "review_reasoning_effort": "low",
         "events": [],
     }
@@ -1463,7 +1466,7 @@ async def run_web_search_tool_loop(
             effective_arguments = dict(call.arguments)
             if call.name == "search_web" and search_mode in {"fast", "deep"}:
                 effective_arguments.setdefault("search_depth", effective_depth)
-                effective_arguments.setdefault("max_rounds", max_rounds)
+                effective_arguments.setdefault("max_rounds", hard_max_rounds)
             cache_key = web_search_cache_key(call.name, effective_arguments)
             cached_payload = False
             if cache_key and cache_key in tool_cache:
@@ -1583,7 +1586,7 @@ async def run_web_search_tool_loop(
             arguments = {"query": query}
             arguments["search_depth"] = effective_depth
             if effective_depth == "deep":
-                arguments["max_rounds"] = max_rounds
+                arguments["max_rounds"] = hard_max_rounds
             executed_calls += 1
             await publish_conversation_event(
                 conversation_id,
@@ -1625,12 +1628,10 @@ async def run_web_search_tool_loop(
                     )
             else:
                 had_tool_error = True
-            if executed_calls >= config.max_tool_calls:
-                break
-    if iterative_deep_search and max_rounds > 1:
+    if iterative_deep_search and hard_max_rounds > 1:
         user_query = base_user_query
         failed_urls: set[str] = set()
-        for round_index in range(2, max_rounds + 1):
+        for round_index in range(2, hard_max_rounds + 1):
             search_history = _search_history_from_trace(trace, sources)
             failed_urls.update(str(url) for url in search_history.get("failed_urls") or [])
             await publish_conversation_event(
@@ -1651,7 +1652,7 @@ async def run_web_search_tool_loop(
                 sources=sources,
                 search_history=search_history,
                 round_index=round_index - 1,
-                max_rounds=max_rounds,
+                max_rounds=hard_max_rounds,
                 reasoning_effort=reasoning_effort,
                 config_timeout=config.timeout_seconds,
                 available_models=available_models,
@@ -1669,6 +1670,15 @@ async def run_web_search_tool_loop(
             )
             if not needs_more:
                 trace["early_stop"] = True
+                reason_codes = set(_clean_review_notes(review_payload.get("reason_codes"), item_limit=80))
+                if "review_timeout" in reason_codes:
+                    trace["stop_code"] = "review_timeout"
+                elif "review_failed" in reason_codes:
+                    trace["stop_code"] = "review_failed"
+                elif "review_unparseable" in reason_codes:
+                    trace["stop_code"] = "review_unparseable"
+                else:
+                    trace["stop_code"] = "evidence_enough"
                 trace["stop_reason"] = _compact_trace_text(review_payload.get("stop_reason"), 220) or f"模型判断第 {round_index - 1} 轮证据已足够。"
                 break
             new_queries = new_queries[:WEB_SEARCH_REVIEW_MAX_QUERIES_PER_ROUND]
@@ -1677,7 +1687,8 @@ async def run_web_search_tool_loop(
                 url for url in urls_to_fetch if url not in failed_urls
             ][: min(WEB_SEARCH_REVIEW_MAX_URLS_PER_ROUND, remaining_actions)]
             if not new_queries and not urls_to_fetch:
-                trace["stop_reason"] = "模型未提出新的搜索关键词或读取 URL，深搜已停止。"
+                trace["stop_code"] = "review_no_actions"
+                trace["stop_reason"] = "模型判断仍需更多证据，但未提出新的搜索关键词或读取 URL，深搜已停止。"
                 break
             await publish_conversation_event(
                 conversation_id,
@@ -1691,7 +1702,7 @@ async def run_web_search_tool_loop(
             )
             round_payloads: list[tuple[str, dict, dict]] = []
             for query in new_queries:
-                arguments = {"query": query, "search_depth": "deep", "max_rounds": max_rounds}
+                arguments = {"query": query, "search_depth": "deep", "max_rounds": hard_max_rounds}
                 await publish_conversation_event(
                     conversation_id,
                     "web_search_status",
@@ -1737,6 +1748,9 @@ async def run_web_search_tool_loop(
                         payload=payload,
                     )
                 )
+        if "stop_reason" not in trace and trace["events"]:
+            trace["stop_code"] = "max_deep_rounds_reached"
+            trace["stop_reason"] = f"已达到深搜硬上限 {hard_max_rounds} 轮，使用现有证据回答。"
     if executed_calls:
         failed_without_sources = had_tool_error and not sources
         source_count = len({getattr(source, "url", "") for source in sources})
