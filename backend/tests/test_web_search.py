@@ -1790,7 +1790,7 @@ def test_review_web_search_evidence_uses_lightweight_low_reasoning_and_timeout(m
     asyncio.run(run())
 
 
-def test_review_web_search_evidence_timeout_returns_single_query(monkeypatch):
+def test_review_web_search_evidence_timeout_stops_without_new_actions(monkeypatch):
     async def run():
         class FakeProvider:
             async def chat_stream(self, **kwargs):
@@ -1817,10 +1817,11 @@ def test_review_web_search_evidence_timeout_returns_single_query(monkeypatch):
         )
 
         assert usage is None
-        assert payload["needs_more"] is True
-        assert payload["new_queries"] == ["today AI news"]
+        assert payload["needs_more"] is False
+        assert payload["new_queries"] == []
         assert payload["urls_to_fetch"] == []
         assert "review_timeout" in payload["reason_codes"]
+        assert "已停止补充搜索" in payload["stop_reason"]
 
     monkeypatch.setattr(chat, "WEB_SEARCH_REVIEW_MAX_QUERIES_PER_ROUND", 2)
     original_wait_for = chat.asyncio.wait_for
@@ -1829,6 +1830,84 @@ def test_review_web_search_evidence_timeout_returns_single_query(monkeypatch):
         return await original_wait_for(awaitable, timeout=0.001)
 
     monkeypatch.setattr(chat.asyncio, "wait_for", tiny_wait_for)
+    asyncio.run(run())
+
+
+def test_deep_tool_loop_review_timeout_stops_without_duplicate_fallback_query(monkeypatch):
+    async def run():
+        executed = []
+        context = [{"role": "user", "content": "taiwan strait latest"}]
+
+        class FakeProvider:
+            async def tool_call_turn(self, **kwargs):
+                return ToolCallTurnResult(tool_calls=[], usage={"prompt_tokens": 1, "completion_tokens": 0, "total_tokens": 1})
+
+        def fake_config():
+            return WebSearchConfig(
+                enabled=True,
+                searxng_base_url="https://search.example.com/search",
+                result_count=3,
+                language="all",
+                safesearch="1",
+                timeout_seconds=5,
+                fetch_timeout_seconds=5,
+                max_tool_calls=4,
+                fetch_max_chars=4000,
+            )
+
+        async def fake_run_web_search_tool(name, arguments, config):
+            executed.append((name, dict(arguments)))
+            return {
+                "ok": True,
+                "results": [
+                    {
+                        "title": "Source 1",
+                        "url": "https://example.com/1",
+                        "snippet": "existing evidence",
+                    }
+                ],
+            }
+
+        async def fake_review(**kwargs):
+            return (
+                {
+                    "needs_more": False,
+                    "new_queries": [],
+                    "urls_to_fetch": [],
+                    "evidence_gaps": ["review timed out"],
+                    "reason_codes": ["review_timeout"],
+                    "stop_reason": "证据审查超时，已停止补充搜索并使用现有证据回答。",
+                },
+                None,
+            )
+
+        monkeypatch.setattr(chat, "effective_web_search_config", fake_config)
+        monkeypatch.setattr(chat, "publish_conversation_event", lambda *args, **kwargs: asyncio.sleep(0))
+        monkeypatch.setattr(chat, "run_web_search_tool", fake_run_web_search_tool)
+        monkeypatch.setattr(chat, "review_web_search_evidence", fake_review)
+
+        sources, usage, trace = await chat.run_web_search_tool_loop(
+            provider=FakeProvider(),
+            api_key="sk-test",
+            model="gpt-5.5",
+            context=context,
+            conversation_id="conv-1",
+            assistant_message_id="msg-assistant",
+            reasoning_effort=None,
+            search_mode="deep",
+            max_rounds=3,
+        )
+
+        assert [item[0] for item in executed] == ["search_web"]
+        assert usage["total_tokens"] == 1
+        assert len(sources) == 1
+        assert trace["early_stop"] is True
+        assert trace["stop_reason"] == "证据审查超时，已停止补充搜索并使用现有证据回答。"
+        review_event = next(event for event in trace["events"] if event.get("type") == "review")
+        assert review_event["needs_more"] is False
+        assert "new_queries" not in review_event
+        assert "review_timeout" in review_event["reason_codes"]
+
     asyncio.run(run())
 
 

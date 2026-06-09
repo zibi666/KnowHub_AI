@@ -902,11 +902,12 @@ def _trace_tool_event(
 
 
 def _trace_review_event(round_index: int, review_payload: dict) -> dict:
+    needs_more_value = review_payload.get("needs_more")
     event = {
         "round": round_index,
         "phase": "reviewing",
         "type": "review",
-        "needs_more": bool(review_payload.get("needs_more", True)),
+        "needs_more": needs_more_value if isinstance(needs_more_value, bool) else None,
         "new_queries": _clean_search_queries(review_payload.get("new_queries"), limit=6),
         "urls_to_fetch": _clean_fetch_urls(review_payload.get("urls_to_fetch"), limit=6),
         "evidence_gaps": _clean_review_notes(review_payload.get("evidence_gaps")),
@@ -1010,12 +1011,12 @@ async def review_web_search_evidence(
                 elapsed_ms,
             )
             return {
-                "needs_more": True,
-                "new_queries": [user_query] if user_query else [],
+                "needs_more": False,
+                "new_queries": [],
                 "urls_to_fetch": [],
                 "evidence_gaps": ["review returned no parseable JSON"],
                 "reason_codes": ["review_unparseable"],
-                "stop_reason": "审查结果不可解析，使用保守兜底。",
+                "stop_reason": "证据审查结果不可解析，已停止补充搜索并使用现有证据回答。",
             }, usage
         perf_logger.info(
             "web_search_review_done model=%s round=%d elapsed_ms=%d needs_more=%s new_queries=%d urls=%d",
@@ -1037,12 +1038,12 @@ async def review_web_search_evidence(
             timeout_seconds,
         )
         return {
-            "needs_more": True,
-            "new_queries": [user_query] if user_query else [],
+            "needs_more": False,
+            "new_queries": [],
             "urls_to_fetch": [],
             "evidence_gaps": ["review timed out"],
             "reason_codes": ["review_timeout"],
-            "stop_reason": "审查超时，使用保守兜底。",
+            "stop_reason": "证据审查超时，已停止补充搜索并使用现有证据回答。",
         }, None
     except Exception as exc:
         elapsed_ms = int((time.perf_counter() - started) * 1000)
@@ -1054,12 +1055,12 @@ async def review_web_search_evidence(
             str(exc)[:300],
         )
         return {
-            "needs_more": True,
-            "new_queries": [user_query] if user_query else [],
+            "needs_more": False,
+            "new_queries": [],
             "urls_to_fetch": [],
             "evidence_gaps": ["review failed"],
             "reason_codes": ["review_failed"],
-            "stop_reason": "审查失败，使用保守兜底。",
+            "stop_reason": "证据审查失败，已停止补充搜索并使用现有证据回答。",
         }, None
 
 

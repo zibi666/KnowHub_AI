@@ -604,6 +604,15 @@ function traceEventTitle(event: WebSearchTraceEvent) {
 
 function traceEventStatus(event: WebSearchTraceEvent) {
   if (event.type === 'review') {
+    const reasonCodes = Array.isArray(event.reason_codes)
+      ? event.reason_codes
+      : Array.isArray(event.reasonCodes)
+        ? event.reasonCodes
+        : []
+    const stoppedByReviewError = reasonCodes.some((code) =>
+      ['review_timeout', 'review_failed', 'review_unparseable'].includes(String(code))
+    )
+    if (stoppedByReviewError) return '已停止'
     const needsMore = event.needs_more ?? event.needsMore
     if (needsMore === true) return '继续搜索'
     if (needsMore === false) return '证据足够'
