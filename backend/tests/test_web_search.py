@@ -246,21 +246,93 @@ def test_effective_config_uses_runtime_overrides(monkeypatch):
     assert config.language == "zh-CN"
 
 
+class DirectSearchResponse:
+    def __init__(self, text: str, url: str = "https://www.bing.com/search?q=test"):
+        self.text = text
+        self.url = url
+
+    def raise_for_status(self):
+        return None
+
+
+def _search_config(
+    *,
+    enabled: bool = True,
+    searxng_base_url: str | None = None,
+    result_count: int = 5,
+    provider_order: list[str] | None = None,
+) -> WebSearchConfig:
+    return WebSearchConfig(
+        enabled=enabled,
+        searxng_base_url=searxng_base_url,
+        result_count=result_count,
+        language="all",
+        safesearch="1",
+        timeout_seconds=5,
+        fetch_timeout_seconds=5,
+        max_tool_calls=2,
+        fetch_max_chars=4000,
+        provider_order=provider_order or ["direct"],
+        fetch_top_n=0,
+        rerank_enabled=False,
+    )
+
+
+def _bing_html(rows: list[tuple[str, str, str]]) -> str:
+    return "<html><body><ol>" + "".join(
+        f"""
+        <li class="b_algo">
+          <h2><a href="{url}">{title}</a></h2>
+          <div class="b_caption"><p>{snippet}</p></div>
+        </li>
+        """
+        for title, url, snippet in rows
+    ) + "</ol></body></html>"
+
+
+def _generic_html(rows: list[tuple[str, str]]) -> str:
+    return "<html><body>" + "".join(f'<a href="{url}">{title}</a>' for title, url in rows) + "</body></html>"
+
+
 def test_search_web_parses_limits_and_dedupes_results(monkeypatch):
-    class FakeResponse:
-        def raise_for_status(self):
+    class FakeClient:
+        def __init__(self, *args, **kwargs):
+            pass
+
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, *args):
             return None
 
-        def json(self):
-            return {
-                "results": [
-                    {"title": "One", "url": "https://example.com/a#top", "content": "first"},
-                    {"title": "Duplicate", "url": "https://example.com/a", "content": "duplicate"},
-                    {"title": "Invalid", "url": "javascript:alert(1)", "content": "invalid"},
-                    {"title": "Two", "link": "https://example.com/b", "snippet": "second"},
-                    {"title": "Three", "url": "https://example.com/c", "content": "third"},
-                ]
-            }
+        async def get(self, url, **kwargs):
+            if url != "https://www.bing.com/search":
+                return DirectSearchResponse("<html><body></body></html>", url=url)
+            return DirectSearchResponse(
+                _bing_html(
+                    [
+                        ("Test One", "https://example.com/a#top", "test first"),
+                        ("Test Duplicate", "https://example.com/a", "test duplicate"),
+                        ("Invalid", "javascript:alert(1)", "test invalid"),
+                        ("Test Two", "https://example.com/b", "test second"),
+                        ("Test Three", "https://example.com/c", "test third"),
+                    ]
+                ),
+                url=f"{url}?q=test",
+            )
+
+    async def run():
+        monkeypatch.setattr(web_search.httpx, "AsyncClient", FakeClient)
+        results = await search_web("test", _search_config(result_count=2))
+
+        assert [item.url for item in results] == ["https://example.com/a", "https://example.com/b"]
+        assert [item.title for item in results] == ["Test One", "Test Two"]
+
+    asyncio.run(run())
+
+
+def test_search_web_uses_every_direct_source_and_dedupes_results(monkeypatch):
+    captured_urls = []
 
     class FakeClient:
         def __init__(self, *args, **kwargs):
@@ -272,32 +344,34 @@ def test_search_web_parses_limits_and_dedupes_results(monkeypatch):
         async def __aexit__(self, *args):
             return None
 
-        async def get(self, *args, **kwargs):
-            return FakeResponse()
+        async def get(self, url, **kwargs):
+            captured_urls.append(url)
+            if url == "https://www.bing.com/search":
+                return DirectSearchResponse(
+                    _bing_html([("Test Bing One", "https://bing.example.com/one", "test first")]),
+                    url=f"{url}?q=test",
+                )
+            return DirectSearchResponse(
+                _generic_html([("Test Sogou Two test", "https://sogou.example.com/test-two")]),
+                url=f"{url}?query=test",
+            )
 
     async def run():
         monkeypatch.setattr(web_search.httpx, "AsyncClient", FakeClient)
-        config = WebSearchConfig(
-            enabled=True,
-            searxng_base_url="https://search.example.com/search",
-            result_count=2,
-            language="all",
-            safesearch="1",
-            timeout_seconds=5,
-            fetch_timeout_seconds=5,
-            max_tool_calls=2,
-            fetch_max_chars=4000,
-            fetch_top_n=0,
-            rerank_enabled=False,
-        )
-        results = await search_web("test", config)
-        assert [item.url for item in results] == ["https://example.com/a", "https://example.com/b"]
-        assert [item.title for item in results] == ["One", "Two"]
+        results = await search_web("test", _search_config(result_count=2))
+
+        assert captured_urls == [
+            "https://www.bing.com/search",
+            "https://www.sogou.com/web",
+            "https://www.so.com/s",
+            "https://so.toutiao.com/search",
+        ]
+        assert {item.title for item in results} == {"Test Bing One", "Test Sogou Two test"}
 
     asyncio.run(run())
 
 
-def test_search_web_prefers_bing_then_baidu_then_google(monkeypatch):
+def test_search_web_collects_configured_searxng_engines_before_ranking(monkeypatch):
     captured_engines = []
 
     class FakeResponse:
@@ -308,63 +382,13 @@ def test_search_web_prefers_bing_then_baidu_then_google(monkeypatch):
             return None
 
         def json(self):
-            if self.engine == "bing":
-                return {"results": [{"title": "Bing One", "url": "https://bing.example.com/one", "content": "test first"}]}
-            if self.engine == "baidu":
-                return {"results": [{"title": "Baidu Two", "url": "https://baidu.example.com/two", "content": "test second"}]}
-            return {"results": [{"title": "Google Three", "url": "https://google.example.com/three", "content": "test third"}]}
-
-    class FakeClient:
-        def __init__(self, *args, **kwargs):
-            pass
-
-        async def __aenter__(self):
-            return self
-
-        async def __aexit__(self, *args):
-            return None
-
-        async def get(self, *args, **kwargs):
-            engine = kwargs["params"]["engines"]
-            captured_engines.append(engine)
-            return FakeResponse(engine)
-
-    async def run():
-        monkeypatch.setattr(web_search.httpx, "AsyncClient", FakeClient)
-        config = WebSearchConfig(
-            enabled=True,
-            searxng_base_url="https://search.example.com/search",
-            result_count=2,
-            language="all",
-            safesearch="1",
-            timeout_seconds=20,
-            fetch_timeout_seconds=5,
-            max_tool_calls=2,
-            fetch_max_chars=4000,
-            fetch_top_n=0,
-            rerank_enabled=False,
-        )
-
-        results = await search_web("test", config)
-
-        assert captured_engines == ["bing", "baidu"]
-        assert {item.title for item in results} == {"Bing One", "Baidu Two"}
-
-    asyncio.run(run())
-
-
-def test_search_web_collects_configured_searxng_engines_before_ranking(monkeypatch):
-    captured_engines = []
-
-    class FakeResponse:
-        def raise_for_status(self):
-            return None
-
-        def json(self):
             return {
                 "results": [
-                    {"title": "Bing One", "url": "https://bing.example.com/one", "content": "test first"},
-                    {"title": "Bing Two", "url": "https://bing.example.com/two", "content": "test second"},
+                    {
+                        "title": f"{self.engine.title()} One",
+                        "url": f"https://{self.engine}.example.com/one",
+                        "content": "test first",
+                    }
                 ]
             }
 
@@ -378,30 +402,65 @@ def test_search_web_collects_configured_searxng_engines_before_ranking(monkeypat
         async def __aexit__(self, *args):
             return None
 
-        async def get(self, *args, **kwargs):
-            captured_engines.append(kwargs["params"]["engines"])
-            return FakeResponse()
+        async def get(self, url, **kwargs):
+            engine = kwargs["params"]["engines"]
+            captured_engines.append(engine)
+            return FakeResponse(engine)
 
     async def run():
         monkeypatch.setattr(web_search.httpx, "AsyncClient", FakeClient)
-        config = WebSearchConfig(
-            enabled=True,
+        config = _search_config(
             searxng_base_url="https://search.example.com/search",
             result_count=2,
-            language="all",
-            safesearch="1",
-            timeout_seconds=20,
-            fetch_timeout_seconds=5,
-            max_tool_calls=2,
-            fetch_max_chars=4000,
-            fetch_top_n=0,
-            rerank_enabled=False,
+            provider_order=["searxng"],
         )
 
         results = await search_web("test", config)
 
         assert captured_engines == ["bing", "baidu"]
-        assert [item.title for item in results] == ["Bing One", "Bing Two"]
+        assert {item.title for item in results} == {"Bing One", "Baidu One"}
+
+    asyncio.run(run())
+
+
+def test_search_web_queries_direct_sources_concurrently(monkeypatch):
+    started_urls = []
+    all_sources_started = asyncio.Event()
+    source_count = len(web_search._DIRECT_SEARCH_SOURCES)
+
+    class FakeClient:
+        def __init__(self, *args, **kwargs):
+            pass
+
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, *args):
+            return None
+
+        async def get(self, url, **kwargs):
+            started_urls.append(url)
+            if len(started_urls) == source_count:
+                all_sources_started.set()
+            await all_sources_started.wait()
+            if url == "https://www.bing.com/search":
+                return DirectSearchResponse(
+                    _bing_html([("Test Bing One", "https://bing.example.com/one", "test first")]),
+                    url=f"{url}?q=test",
+                )
+            return DirectSearchResponse("<html><body></body></html>", url=url)
+
+    async def run():
+        monkeypatch.setattr(web_search.httpx, "AsyncClient", FakeClient)
+        results = await asyncio.wait_for(search_web("test", _search_config(result_count=2)), timeout=0.2)
+
+        assert started_urls == [
+            "https://www.bing.com/search",
+            "https://www.sogou.com/web",
+            "https://www.so.com/s",
+            "https://so.toutiao.com/search",
+        ]
+        assert [item.title for item in results] == ["Test Bing One"]
 
     asyncio.run(run())
 
@@ -425,18 +484,10 @@ def test_search_web_returns_empty_results_when_providers_timeout(monkeypatch):
 
     async def run():
         monkeypatch.setattr(web_search.httpx, "AsyncClient", FakeClient)
-        config = WebSearchConfig(
-            enabled=True,
+        config = _search_config(
             searxng_base_url="https://search.example.com/search",
             result_count=2,
-            language="all",
-            safesearch="1",
-            timeout_seconds=1,
-            fetch_timeout_seconds=5,
-            max_tool_calls=2,
-            fetch_max_chars=4000,
-            fetch_top_n=0,
-            rerank_enabled=False,
+            provider_order=["searxng"],
         )
 
         results = await search_web("test", config)
@@ -478,25 +529,18 @@ def test_search_web_cools_down_unresponsive_engine(monkeypatch):
         async def __aexit__(self, *args):
             return None
 
-        async def get(self, *args, **kwargs):
+        async def get(self, url, **kwargs):
             engine = kwargs["params"]["engines"]
             captured_engines.append(engine)
             return FakeResponse(engine)
 
     async def run():
         monkeypatch.setattr(web_search.httpx, "AsyncClient", FakeClient)
-        config = WebSearchConfig(
-            enabled=True,
+        web_search.reset_search_engine_cooldowns()
+        config = _search_config(
             searxng_base_url="https://search.example.com/search",
             result_count=1,
-            language="all",
-            safesearch="1",
-            timeout_seconds=20,
-            fetch_timeout_seconds=5,
-            max_tool_calls=2,
-            fetch_max_chars=4000,
-            fetch_top_n=0,
-            rerank_enabled=False,
+            provider_order=["searxng"],
         )
 
         first = await search_web("test", config)
@@ -506,6 +550,248 @@ def test_search_web_cools_down_unresponsive_engine(monkeypatch):
         assert first[0].title == "baidu result"
         assert second[0].title == "baidu result"
         assert call_count["value"] == 3
+
+    asyncio.run(run())
+
+
+def test_search_web_searches_all_sources_even_when_bing_has_enough(monkeypatch):
+    captured_urls = []
+
+    class FakeClient:
+        def __init__(self, *args, **kwargs):
+            pass
+
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, *args):
+            return None
+
+        async def get(self, url, **kwargs):
+            captured_urls.append(url)
+            return DirectSearchResponse(
+                _bing_html(
+                    [
+                        ("Test Bing One", "https://bing.example.com/one", "test first"),
+                        ("Test Bing Two", "https://bing.example.com/two", "test second"),
+                    ]
+                ),
+                url=f"{url}?q=test",
+            )
+
+    async def run():
+        monkeypatch.setattr(web_search.httpx, "AsyncClient", FakeClient)
+        results = await search_web("test", _search_config(result_count=2))
+
+        assert captured_urls == [
+            "https://www.bing.com/search",
+            "https://www.sogou.com/web",
+            "https://www.so.com/s",
+            "https://so.toutiao.com/search",
+        ]
+        assert [item.title for item in results] == ["Test Bing One", "Test Bing Two"]
+
+    asyncio.run(run())
+
+
+def test_search_web_continues_after_direct_source_failure(monkeypatch):
+    captured_urls = []
+
+    class FakeClient:
+        def __init__(self, *args, **kwargs):
+            pass
+
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, *args):
+            return None
+
+        async def get(self, url, **kwargs):
+            captured_urls.append(url)
+            if url == "https://www.bing.com/search":
+                raise web_search.httpx.ConnectTimeout("timeout")
+            return DirectSearchResponse(
+                _generic_html([("Test Sogou Result", "https://sogou.example.com/one")]),
+                url=f"{url}?query=test",
+            )
+
+    async def run():
+        monkeypatch.setattr(web_search.httpx, "AsyncClient", FakeClient)
+        results = await search_web("test", _search_config(result_count=1))
+
+        assert captured_urls == [
+            "https://www.bing.com/search",
+            "https://www.sogou.com/web",
+            "https://www.so.com/s",
+            "https://so.toutiao.com/search",
+        ]
+        assert [item.title for item in results] == ["Test Sogou Result"]
+
+    asyncio.run(run())
+
+
+def test_search_web_uses_direct_sources_without_searxng_base_url(monkeypatch):
+    captured_requests = []
+
+    class FakeClient:
+        def __init__(self, *args, **kwargs):
+            pass
+
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, *args):
+            return None
+
+        async def get(self, url, **kwargs):
+            params = kwargs.get("params") or {}
+            captured_requests.append((url, params))
+            if url == "https://www.bing.com/search":
+                return DirectSearchResponse(
+                    _bing_html(
+                        [
+                            (
+                                "ChatGPT models",
+                                "https://example.com/chatgpt-models",
+                                "ChatGPT models and available model names.",
+                            )
+                        ]
+                    ),
+                    url=f"{url}?q=chatgpt",
+                )
+            return DirectSearchResponse("<html><body></body></html>", url=url)
+
+    async def run():
+        monkeypatch.setattr(web_search.httpx, "AsyncClient", FakeClient)
+        config = _search_config(result_count=5)
+
+        results = await search_web("ChatGPT model code", config)
+
+        assert [item.url for item in results] == ["https://example.com/chatgpt-models"]
+        assert all(url != "https://search.example.com/search" for url, _ in captured_requests)
+        assert all("engines" not in params for _, params in captured_requests)
+        assert captured_requests[0][0] == "https://www.bing.com/search"
+
+    asyncio.run(run())
+
+
+def test_search_web_direct_sources_reject_unrelated_rows(monkeypatch):
+    class FakeClient:
+        def __init__(self, *args, **kwargs):
+            pass
+
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, *args):
+            return None
+
+        async def get(self, url, **kwargs):
+            return DirectSearchResponse(
+                _bing_html(
+                    [
+                        (
+                            "BYK-349 surface additive",
+                            "https://example.com/byk-349",
+                            "Industrial coating additive details.",
+                        )
+                    ]
+                ),
+                url=f"{url}?q=chatgpt",
+            )
+
+    async def run():
+        monkeypatch.setattr(web_search.httpx, "AsyncClient", FakeClient)
+        assert await search_web("ChatGPT", _search_config(result_count=5)) == []
+
+    asyncio.run(run())
+
+
+def test_search_web_high_signal_queries_continue_across_sources_and_rank_authority(monkeypatch):
+    captured_urls = []
+
+    class FakeClient:
+        def __init__(self, *args, **kwargs):
+            pass
+
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, *args):
+            return None
+
+        async def get(self, url, **kwargs):
+            captured_urls.append(url)
+            if url == "https://www.bing.com/search":
+                return DirectSearchResponse(
+                    _bing_html(
+                        [
+                            (
+                                "某位老师最新动态短视频",
+                                "https://www.bilibili.com/video/BV14vEs6cEye/",
+                                "网友剪辑的相关动态。",
+                            ),
+                            (
+                                "某位老师相关讨论",
+                                "https://zhuanlan.zhihu.com/p/2020255751449366857",
+                                "网友整理的讨论帖。",
+                            ),
+                        ]
+                    ),
+                    url=f"{url}?q=teacher",
+                )
+            if url == "https://www.sogou.com/web":
+                return DirectSearchResponse(
+                    _generic_html(
+                        [
+                            ("帮助", "http://help.sogou.com/?w=01091500&v=1"),
+                            ("举报", "https://fankui.sogou.com/index.php/web/web/index/type/5"),
+                            (
+                                "中新网：某位老师发布最新公开回应",
+                                "https://www.chinanews.com.cn/sh/2026/03-24/10592189.shtml",
+                            ),
+                        ]
+                    ),
+                    url=f"{url}?query=teacher",
+                )
+            return DirectSearchResponse("<html><body></body></html>", url=url)
+
+    async def run():
+        monkeypatch.setattr(web_search.httpx, "AsyncClient", FakeClient)
+        results = await search_web("某位老师最新消息", _search_config(result_count=2))
+
+        assert captured_urls[:2] == ["https://www.bing.com/search", "https://www.sogou.com/web"]
+        assert results[0].url == "https://www.chinanews.com.cn/sh/2026/03-24/10592189.shtml"
+        assert all(item.title not in {"帮助", "举报"} for item in results)
+
+    asyncio.run(run())
+
+
+def test_search_web_death_queries_are_not_expanded_with_special_terms(monkeypatch):
+    captured_queries = []
+
+    class FakeClient:
+        def __init__(self, *args, **kwargs):
+            pass
+
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, *args):
+            return None
+
+        async def get(self, url, **kwargs):
+            params = kwargs.get("params") or {}
+            captured_queries.append(params.get("q") or params.get("query") or params.get("keyword") or "")
+            return DirectSearchResponse("<html><body></body></html>", url=url)
+
+    async def run():
+        monkeypatch.setattr(web_search.httpx, "AsyncClient", FakeClient)
+        await search_web("某位老师死了吗", _search_config(result_count=5))
+
+        assert captured_queries == ["某位老师死了吗"] * 4
+        assert not any("讣告" in query or "公司发布" in query or "官方 媒体" in query for query in captured_queries)
 
     asyncio.run(run())
 
@@ -759,21 +1045,8 @@ def test_sqlite_lightweight_migration_adds_web_search_sources_column(monkeypatch
     asyncio.run(run())
 
 
-def test_search_web_clamps_count_and_passes_language_time_range(monkeypatch):
-    captured = {}
-
-    class FakeResponse:
-        def raise_for_status(self):
-            return None
-
-        def json(self):
-            return {
-                "results": [
-                    {"title": "One", "url": "https://example.com/one", "content": "one"},
-                    {"title": "Two", "url": "https://example.com/two", "content": "two"},
-                    {"title": "Three", "url": "https://example.com/three", "content": "three"},
-                ]
-            }
+def test_search_web_clamps_count_and_sends_direct_query_params(monkeypatch):
+    captured_requests = []
 
     class FakeClient:
         def __init__(self, *args, **kwargs):
@@ -786,37 +1059,44 @@ def test_search_web_clamps_count_and_passes_language_time_range(monkeypatch):
             return None
 
         async def get(self, url, **kwargs):
-            captured["url"] = url
-            captured["params"] = kwargs.get("params")
-            return FakeResponse()
+            captured_requests.append((url, kwargs.get("params")))
+            return DirectSearchResponse(
+                _bing_html(
+                    [
+                        ("Example One", "https://example.com/one", "example one"),
+                        ("Example Two", "https://example.com/two", "example two"),
+                        ("Example Three", "https://example.com/three", "example three"),
+                    ]
+                ),
+                url=f"{url}?q=example",
+            )
 
     async def run():
         monkeypatch.setattr(web_search.httpx, "AsyncClient", FakeClient)
-        config = WebSearchConfig(
-            enabled=True,
-            searxng_base_url="https://search.example.com/search",
-            result_count=2,
-            language="all",
-            safesearch="1",
-            timeout_seconds=5,
-            fetch_timeout_seconds=5,
-            max_tool_calls=2,
-            fetch_max_chars=4000,
-            fetch_top_n=0,
-            rerank_enabled=False,
-        )
+        config = _search_config(result_count=2)
         results = await search_web("example", config, result_count=99, language="zh-CN", time_range="week")
 
         assert len(results) == 2
-        assert captured["params"]["language"] == "zh-CN"
-        assert captured["params"]["time_range"] == "week"
-        assert captured["params"]["engines"] in {"bing", "baidu"}
+        assert captured_requests == [
+            ("https://www.bing.com/search", {"q": "example"}),
+            ("https://www.sogou.com/web", {"query": "example"}),
+            ("https://www.so.com/s", {"q": "example"}),
+            ("https://so.toutiao.com/search", {"keyword": "example"}),
+        ]
 
     asyncio.run(run())
 
 
 def test_search_web_filters_unrelated_chinese_results_without_fallback(monkeypatch):
     class FakeResponse:
+        url = "https://www.bing.com/search?q=teacher"
+        text = _bing_html(
+            [
+                ("Word bookmark error", "https://example.com/word", "Word editing tips"),
+                ("PDF to Word", "https://example.com/pdf", "Converter tool"),
+            ]
+        )
+
         def raise_for_status(self):
             return None
 
@@ -856,21 +1136,33 @@ def test_search_web_filters_unrelated_chinese_results_without_fallback(monkeypat
             fetch_top_n=0,
             rerank_enabled=False,
         )
-        assert await search_web("张雪峰老师死了吗", config) == []
+        assert await search_web("某位老师最新消息", config) == []
 
     asyncio.run(run())
 
 
 def test_search_web_skips_low_value_sources_for_high_signal_chinese_queries(monkeypatch):
     class FakeResponse:
+        url = "https://www.bing.com/search?q=teacher"
+        text = _bing_html(
+            [
+                ("Example Teacher - Wikipedia", "https://zh.wikipedia.org/wiki/example-teacher", "profile page"),
+                (
+                    "某位老师 related report",
+                    "https://news.example.com/story",
+                    "某位老师 latest news report",
+                ),
+            ]
+        )
+
         def raise_for_status(self):
             return None
 
         def json(self):
             return {
                 "results": [
-                    {"title": "张雪峰 - 维基百科", "url": "https://zh.wikipedia.org/wiki/%E5%BC%A0%E9%9B%AA%E5%B3%B0", "content": "人物页面"},
-                    {"title": "张雪峰相关报道", "url": "https://news.example.com/story", "content": "张雪峰 相关新闻 报道"},
+                    {"title": "某位老师 - 维基百科", "url": "https://zh.wikipedia.org/wiki/example-teacher", "content": "人物页面"},
+                    {"title": "某位老师相关报道", "url": "https://news.example.com/story", "content": "某位老师 相关新闻 报道"},
                 ]
             }
 
@@ -902,7 +1194,7 @@ def test_search_web_skips_low_value_sources_for_high_signal_chinese_queries(monk
             fetch_top_n=0,
             rerank_enabled=False,
         )
-        results = await search_web("张雪峰老师死了吗", config)
+        results = await search_web("某位老师最新消息", config)
         assert [item.url for item in results] == ["https://news.example.com/story"]
 
     asyncio.run(run())
@@ -910,6 +1202,14 @@ def test_search_web_skips_low_value_sources_for_high_signal_chinese_queries(monk
 
 def test_search_web_does_not_fallback_for_time_sensitive_mixed_query(monkeypatch):
     class FakeResponse:
+        url = "https://www.bing.com/search?q=ai"
+        text = _bing_html(
+            [
+                ("Calendar", "https://www.rili.com.cn/", "today date"),
+                ("&#20154;&#24037;&#26234;&#33021;&#26032;&#38395;", "https://news.example.com/ai", "&#20154;&#24037;&#26234;&#33021; &#26368;&#26032; &#26032;&#38395;"),
+            ]
+        )
+
         def raise_for_status(self):
             return None
 
@@ -1157,7 +1457,7 @@ def test_deep_tool_loop_runs_until_requested_rounds_when_evidence_is_weak(monkey
     async def run():
         published_events = []
         executed = []
-        context = [{"role": "user", "content": "张雪峰老师死了吗"}]
+        context = [{"role": "user", "content": "today AI news"}]
 
         class FakeProvider:
             async def tool_call_turn(self, **kwargs):
@@ -1198,7 +1498,7 @@ def test_deep_tool_loop_runs_until_requested_rounds_when_evidence_is_weak(monkey
             return (
                 {
                     "needs_more": True,
-                    "new_queries": [f"张雪峰 死亡 辟谣 第{kwargs['round_index']}轮"],
+                    "new_queries": [f"??? ?? ?? ?{kwargs['round_index']}?"],
                     "urls_to_fetch": [],
                     "evidence_gaps": ["no strong sources"],
                     "reason_codes": ["weak_sources"],
@@ -1235,7 +1535,7 @@ def test_deep_tool_loop_runs_until_requested_rounds_when_evidence_is_weak(monkey
 def test_deep_tool_loop_stops_early_when_sources_are_enough(monkeypatch):
     async def run():
         executed = []
-        context = [{"role": "user", "content": "今天 AI 新闻"}]
+        context = [{"role": "user", "content": "?? AI ??"}]
 
         class FakeProvider:
             async def tool_call_turn(self, **kwargs):
@@ -1299,6 +1599,92 @@ def test_deep_tool_loop_stops_early_when_sources_are_enough(monkeypatch):
         assert len(executed) == 1
         assert len(sources) == 2
         assert usage["total_tokens"] == 1
+
+    asyncio.run(run())
+
+
+def test_tool_loop_stops_after_successful_search_results(monkeypatch):
+    async def run():
+        executed = []
+        tool_turn_count = {"value": 0}
+        context = [{"role": "user", "content": "latest ai news"}]
+
+        class FakeProvider:
+            async def tool_call_turn(self, **kwargs):
+                tool_turn_count["value"] += 1
+                if tool_turn_count["value"] == 1:
+                    return ToolCallTurnResult(
+                        tool_calls=[ToolCall(id="call-1", name="search_web", arguments={"query": "latest ai news"})],
+                        assistant_message={
+                            "role": "assistant",
+                            "content": "",
+                            "tool_calls": [
+                                {
+                                    "id": "call-1",
+                                    "type": "function",
+                                    "function": {"name": "search_web", "arguments": '{"query":"latest ai news"}'},
+                                }
+                            ],
+                        },
+                        usage={"prompt_tokens": 1, "completion_tokens": 1, "total_tokens": 2},
+                    )
+                return ToolCallTurnResult(
+                    tool_calls=[ToolCall(id="call-2", name="search_web", arguments={"query": "latest ai news follow up"})],
+                    assistant_message={
+                        "role": "assistant",
+                        "content": "",
+                        "tool_calls": [
+                            {
+                                "id": "call-2",
+                                "type": "function",
+                                "function": {"name": "search_web", "arguments": '{"query":"latest ai news follow up"}'},
+                            }
+                        ],
+                    },
+                    usage={"prompt_tokens": 1, "completion_tokens": 1, "total_tokens": 2},
+                )
+
+        def fake_config():
+            return WebSearchConfig(
+                enabled=True,
+                searxng_base_url="https://search.example.com/search",
+                result_count=30,
+                language="all",
+                safesearch="1",
+                timeout_seconds=5,
+                fetch_timeout_seconds=5,
+                max_tool_calls=20,
+                fetch_max_chars=4000,
+            )
+
+        async def fake_publish(*args, **kwargs):
+            return None
+
+        async def fake_run_web_search_tool(name, arguments, config):
+            executed.append((name, arguments))
+            return {
+                "ok": True,
+                "results": [{"title": "Example", "url": "https://example.com/news", "snippet": "news"}],
+            }
+
+        monkeypatch.setattr(chat, "effective_web_search_config", fake_config)
+        monkeypatch.setattr(chat, "publish_conversation_event", fake_publish)
+        monkeypatch.setattr(chat, "run_web_search_tool", fake_run_web_search_tool)
+
+        sources, usage = await chat.run_web_search_tool_loop(
+            provider=FakeProvider(),
+            api_key="sk-test",
+            model="gpt-5.5",
+            context=context,
+            conversation_id="conv-1",
+            assistant_message_id="msg-assistant",
+            reasoning_effort=None,
+        )
+
+        assert executed == [("search_web", {"query": "latest ai news"})]
+        assert tool_turn_count["value"] == 1
+        assert len(sources) == 1
+        assert usage["total_tokens"] == 2
 
     asyncio.run(run())
 
@@ -1427,7 +1813,7 @@ def test_chat_job_runs_web_search_tool_and_saves_structured_sources(monkeypatch)
                         "favicon_url": "https://example.com/favicon.ico",
                     }
                 ]
-                assert assistant.total_tokens == 13
+                assert assistant.total_tokens == 12
 
             assert any(event == "web_search_status" for event, _ in published_events)
             assert any(

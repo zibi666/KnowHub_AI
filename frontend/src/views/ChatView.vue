@@ -333,14 +333,14 @@ const webSearchTestResults = ref<Array<{
 const webSearchSettings = ref<WebSearchSettings>({
   enabled: false,
   searxngBaseUrl: '',
-  resultCount: 5,
+  resultCount: 30,
   language: 'all',
   safesearch: '1',
   timeoutSeconds: 20,
   fetchTimeoutSeconds: 20,
-  maxToolCalls: 4,
+  maxToolCalls: 20,
   fetchMaxChars: 12000,
-  providerOrder: ['bocha', 'sougou', 'jina', 'searxng', 'serper'],
+  providerOrder: ['bocha', 'sougou', 'jina', 'searxng', 'direct', 'serper'],
   searxngEngines: ['bing', 'baidu'],
   candidateCount: 20,
   fetchTopN: 5,
@@ -877,14 +877,14 @@ function normalizeWebSearchSettings(data: any): WebSearchSettings {
   return {
     enabled: Boolean(data?.enabled),
     searxngBaseUrl: data?.searxngBaseUrl ?? data?.searxng_base_url ?? '',
-    resultCount: Number(data?.resultCount ?? data?.result_count ?? 5),
+    resultCount: Number(data?.resultCount ?? data?.result_count ?? 30),
     language: data?.language || 'all',
     safesearch: data?.safesearch || '1',
     timeoutSeconds: Number(data?.timeoutSeconds ?? data?.timeout_seconds ?? 20),
     fetchTimeoutSeconds: Number(data?.fetchTimeoutSeconds ?? data?.fetch_timeout_seconds ?? 20),
-    maxToolCalls: Number(data?.maxToolCalls ?? data?.max_tool_calls ?? 4),
+    maxToolCalls: Number(data?.maxToolCalls ?? data?.max_tool_calls ?? 20),
     fetchMaxChars: Number(data?.fetchMaxChars ?? data?.fetch_max_chars ?? 12000),
-    providerOrder: normalizeListSetting(data?.providerOrder ?? data?.provider_order, ['searxng', 'bocha', 'sougou', 'jina']),
+    providerOrder: normalizeListSetting(data?.providerOrder ?? data?.provider_order, ['bocha', 'sougou', 'jina', 'searxng', 'direct', 'serper']),
     searxngEngines: normalizeListSetting(data?.searxngEngines ?? data?.searxng_engines, ['bing', 'baidu']),
     candidateCount: Number(data?.candidateCount ?? data?.candidate_count ?? 20),
     fetchTopN: Number(data?.fetchTopN ?? data?.fetch_top_n ?? 5),
@@ -3870,7 +3870,7 @@ onUnmounted(() => {
 
     <main
       class="chat-main flex flex-col min-w-0 min-h-0 overflow-hidden"
-      :class="{ 'has-messages': hasConversationFrame, 'is-empty-chat': isEmptyChat, 'composer-open': composerExpanded }"
+      :class="{ 'has-messages': hasConversationFrame, 'is-empty-chat': isEmptyChat, 'composer-open': composerExpanded, 'sources-open': sourceDrawerOpen }"
     >
       <header class="chat-header" :class="{ 'sources-open': sourceDrawerOpen }">
         <div class="top-model-controls" @click.stop>
@@ -4513,7 +4513,7 @@ onUnmounted(() => {
               <section v-else-if="settingsTab === 'web' && auth.user?.role === 'admin'" key="web" class="settings-pane">
                 <div class="settings-pane-heading">
                   <h2>联网搜索</h2>
-                  <p>配置 SearXNG 搜索源。用户在单个对话里开启后，模型可按需调用搜索和网页读取工具。</p>
+                  <p>启用内置直连搜索源。用户在单个对话里开启后，模型可按需调用搜索和网页读取工具。</p>
                 </div>
                 <form class="settings-card" @submit.prevent="saveWebSearchSettings">
                   <div v-if="webSearchSettingsLoading" class="settings-empty">正在加载联网搜索设置...</div>
@@ -4528,7 +4528,7 @@ onUnmounted(() => {
                     </label>
                     <label class="settings-field settings-field-wide">
                       <span>搜索源顺序</span>
-                      <input :value="listSettingText(webSearchSettings.providerOrder)" class="settings-input" placeholder="bocha, sougou, jina, searxng, serper" @input="webSearchSettings.providerOrder = normalizeListSetting(($event.target as HTMLInputElement).value)" />
+                      <input :value="listSettingText(webSearchSettings.providerOrder)" class="settings-input" placeholder="bocha, sougou, jina, searxng, direct, serper" @input="webSearchSettings.providerOrder = normalizeListSetting(($event.target as HTMLInputElement).value)" />
                     </label>
                     <label class="settings-field settings-field-wide">
                       <span>SearXNG 引擎</span>
@@ -4537,14 +4537,14 @@ onUnmounted(() => {
                     <div class="settings-field settings-field-wide">
                       <span>搜索源状态</span>
                       <div class="settings-provider-status">
-                        <span v-for="provider in ['searxng', 'bocha', 'sougou', 'jina', 'serper']" :key="provider" :class="{ active: webSearchSettings.providerStatus?.[provider] }">
+                        <span v-for="provider in ['searxng', 'bocha', 'sougou', 'jina', 'direct', 'serper']" :key="provider" :class="{ active: provider === 'direct' || webSearchSettings.providerStatus?.[provider] }">
                           {{ provider }} {{ webSearchSettings.providerStatus?.[provider] ? '已配置' : '未配置' }}
                         </span>
                       </div>
                     </div>
                     <label class="settings-field">
                       <span>结果数</span>
-                      <input v-model.number="webSearchSettings.resultCount" class="settings-input" type="number" min="1" max="10" />
+                      <input v-model.number="webSearchSettings.resultCount" class="settings-input" type="number" min="1" max="30" />
                     </label>
                     <label class="settings-field">
                       <span>候选数</span>
@@ -4568,7 +4568,7 @@ onUnmounted(() => {
                     </label>
                     <label class="settings-field">
                       <span>最大工具调用次数</span>
-                      <input v-model.number="webSearchSettings.maxToolCalls" class="settings-input" type="number" min="1" max="10" />
+                      <input v-model.number="webSearchSettings.maxToolCalls" class="settings-input" type="number" min="1" max="20" />
                     </label>
                     <label class="settings-field">
                       <span>网页最大字符数</span>
@@ -4621,7 +4621,7 @@ onUnmounted(() => {
                   <div class="settings-card-header">
                     <div>
                       <h3>测试搜索</h3>
-                      <p>使用当前已保存配置测试 SearXNG 返回结果。</p>
+                      <p>使用当前已保存配置测试 Bing、搜狗、360 搜索和头条搜索返回结果。</p>
                     </div>
                   </div>
                   <div class="settings-inline-field">

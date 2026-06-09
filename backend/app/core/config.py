@@ -94,14 +94,14 @@ class Settings(BaseSettings):
 
     web_search_enabled: bool = False
     web_search_searxng_base_url: str | None = None
-    web_search_result_count: int = 5
+    web_search_result_count: int = 30
     web_search_language: str = "all"
     web_search_safesearch: str = "1"
     web_search_timeout_seconds: int = 20
     web_search_fetch_timeout_seconds: int = 20
-    web_search_max_tool_calls: int = 4
+    web_search_max_tool_calls: int = 20
     web_search_fetch_max_chars: int = 12000
-    web_search_provider_order: str = "bocha,sougou,jina,searxng,serper"
+    web_search_provider_order: str = "bocha,sougou,jina,searxng,direct,serper"
     web_search_searxng_engines: str = "bing,baidu"
     web_search_candidate_count: int = 20
     web_search_fetch_top_n: int = 5

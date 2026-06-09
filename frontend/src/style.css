@@ -3024,14 +3024,29 @@ body,
 }
 
 .confirm-danger-button {
-  background: color-mix(in srgb, #dc2626 18%, transparent);
-  color: #fca5a5;
+  border: 1px solid #fca5a5;
+  background: #fee2e2;
+  color: #991b1b;
+  font-weight: 650;
 }
 
 .confirm-danger-button:hover:not(:disabled) {
-  background: color-mix(in srgb, #dc2626 28%, transparent);
-  color: #fecaca;
+  border-color: #b91c1c;
+  background: #dc2626;
+  color: #fff;
   transform: translateY(-1px);
+}
+
+.confirm-danger-button:focus-visible {
+  outline: 2px solid #b91c1c;
+  outline-offset: 2px;
+}
+
+.confirm-danger-button:active:not(:disabled) {
+  border-color: #7f1d1d;
+  background: #991b1b;
+  color: #fff;
+  transform: translateY(0);
 }
 
 .rename-secondary-button:disabled,
@@ -3500,6 +3515,15 @@ body,
   flex: 1 1 auto;
 }
 
+.chat-main.sources-open .chat-workspace {
+  z-index: 80;
+}
+
+.chat-main.sources-open .chat-footer {
+  pointer-events: none;
+  z-index: 1;
+}
+
 .question-nav-panel {
   position: absolute;
   top: 50%;
@@ -3520,7 +3544,7 @@ body,
 .source-drawer-backdrop {
   position: absolute;
   inset: 0;
-  z-index: 18;
+  z-index: 88;
   pointer-events: auto;
   background: rgba(0, 0, 0, 0.16);
 }
@@ -3529,7 +3553,7 @@ body,
   position: absolute;
   top: 0;
   right: 0;
-  z-index: 19;
+  z-index: 89;
   display: flex;
   width: min(29rem, calc(100vw - 1.5rem));
   height: 100%;

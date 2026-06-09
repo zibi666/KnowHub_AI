@@ -552,7 +552,7 @@ def inject_web_search_final_answer_context(context: list[dict], sources: list[di
         lines.append("Fewer than two high-confidence sources were found; avoid definitive conclusions for contested or time-sensitive claims.")
     if len({domain for domain in independent_domains if domain}) < 2 or quality_count < 1:
         lines.append("The independent-source gate was not fully satisfied; if the answer depends on a contested or current claim, state that evidence is insufficient.")
-    for source in sources[:10]:
+    for source in sources[:30]:
         index = int(source.get("index") or 0)
         title = str(source.get("title") or source.get("url") or "").strip()
         url = str(source.get("url") or "").strip()
@@ -771,7 +771,7 @@ async def run_web_search_tool_loop(
     if not config.configured:
         raise HTTPException(
             status_code=400,
-            detail={"code": "WEB_SEARCH_NOT_CONFIGURED", "message": "联网搜索尚未配置 SearXNG，无法启用。"},
+            detail={"code": "WEB_SEARCH_NOT_CONFIGURED", "message": "联网搜索尚未启用，无法使用。"},
         )
     tools = web_search_tools()
     sources: list = []
@@ -779,6 +779,7 @@ async def run_web_search_tool_loop(
     executed_calls = 0
     saw_tool_calls = False
     had_tool_error = False
+    should_stop_after_batch = False
     tool_cache: dict[tuple[str, str], dict] = {}
     search_mode = normalized_web_search_mode(search_mode)
     max_rounds = normalized_web_search_rounds(max_rounds)
@@ -833,6 +834,8 @@ async def run_web_search_tool_loop(
                     sources.extend(tool_result_sources(payload))
                     if call.name == "search_web" and isinstance(payload.get("results"), list):
                         result_count = len(payload["results"])
+                        if result_count > 0:
+                            should_stop_after_batch = True
                         await publish_conversation_event(
                             conversation_id,
                             "web_search_status",
@@ -869,7 +872,7 @@ async def run_web_search_tool_loop(
                     "content": json_tool_output(payload),
                 }
             )
-        if executed_calls >= config.max_tool_calls:
+        if should_stop_after_batch or executed_calls >= config.max_tool_calls:
             break
     if not saw_tool_calls and should_force_search:
         query = web_search_fallback_query(context)

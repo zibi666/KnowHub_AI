@@ -13,7 +13,7 @@ from dataclasses import asdict, dataclass, field, replace
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any
-from urllib.parse import urljoin, urlsplit, urlunsplit
+from urllib.parse import parse_qs, urljoin, urlsplit, urlunsplit
 
 import httpx
 
@@ -40,7 +40,7 @@ class WebSearchConfig:
     fetch_timeout_seconds: int
     max_tool_calls: int
     fetch_max_chars: int
-    provider_order: list[str] = field(default_factory=lambda: ["bocha", "sougou", "jina", "searxng", "serper"])
+    provider_order: list[str] = field(default_factory=lambda: ["bocha", "sougou", "jina", "searxng", "direct", "serper"])
     searxng_engines: list[str] = field(default_factory=lambda: ["bing", "baidu"])
     candidate_count: int = 20
     fetch_top_n: int = 5
@@ -60,20 +60,7 @@ class WebSearchConfig:
 
     @property
     def configured(self) -> bool:
-        if not self.enabled:
-            return False
-        for provider in self.provider_order:
-            if provider == "searxng" and self.searxng_base_url:
-                return True
-            if provider == "bocha" and self.bocha_api_key:
-                return True
-            if provider == "sougou" and self.sougou_api_sid and self.sougou_api_sk:
-                return True
-            if provider == "jina" and self.jina_api_key:
-                return True
-            if provider == "serper" and self.serper_api_key:
-                return True
-        return False
+        return self.enabled
 
 
 @dataclass
@@ -147,6 +134,31 @@ _HEADERS = {
     "Accept": "text/html,application/xhtml+xml,application/json,text/plain;q=0.9,*/*;q=0.2",
     "Accept-Language": "zh-CN,zh;q=0.9,en;q=0.7",
 }
+_DIRECT_SEARCH_HEADERS = {
+    "User-Agent": (
+        "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
+        "AppleWebKit/537.36 (KHTML, like Gecko) Chrome/125 Safari/537.36"
+    ),
+    "Accept": "text/html,application/xhtml+xml,text/plain;q=0.9,*/*;q=0.2",
+    "Accept-Language": "zh-CN,zh;q=0.9,en;q=0.7",
+}
+_DIRECT_SEARCH_SOURCES = (
+    ("bing", "https://www.bing.com/search", "q"),
+    ("sogou", "https://www.sogou.com/web", "query"),
+    ("so360", "https://www.so.com/s", "q"),
+    ("toutiao", "https://so.toutiao.com/search", "keyword"),
+)
+_DIRECT_SEARCH_INTERNAL_HOSTS = {
+    "bing": {"bing.com", "www.bing.com", "cn.bing.com"},
+    "sogou": {"sogou.com", "www.sogou.com"},
+    "so360": {"so.com", "www.so.com"},
+    "toutiao": {"so.toutiao.com", "toutiao.com", "www.toutiao.com"},
+}
+_WEB_SEARCH_RESULT_COUNT_DEFAULT = 30
+_WEB_SEARCH_RESULT_COUNT_MAX = 30
+_WEB_SEARCH_CONTEXT_SOURCE_LIMIT = 30
+_WEB_SEARCH_TOOL_CALLS_DEFAULT = 4
+_WEB_SEARCH_TOOL_CALLS_MAX = 4
 
 _FAVICON_HEADERS = {
     "User-Agent": "KnowHub Favicon Cache",
@@ -213,6 +225,56 @@ _QUERY_STOP_TERMS = {
 _LOW_VALUE_SOURCE_HOSTS = {
     "baike.baidu.com",
     "wikipedia.org",
+}
+
+_AUTHORITY_SOURCE_HOSTS = {
+    "chinanews.com.cn",
+    "cna.com.tw",
+    "cntv.cn",
+    "cctv.com",
+    "news.cn",
+    "people.com.cn",
+    "xinhuanet.com",
+    "thepaper.cn",
+    "sina.cn",
+    "sina.com.cn",
+    "qq.com",
+    "yicai.com",
+    "nbd.com.cn",
+    "bjnews.com.cn",
+    "jfdaily.com",
+    "stdaily.com",
+    "guancha.cn",
+    "gmw.cn",
+    "ce.cn",
+}
+
+_COMMUNITY_OR_VIDEO_HOSTS = {
+    "zhihu.com",
+    "bilibili.com",
+    "baidu.com",
+    "toutiao.com",
+    "ixigua.com",
+    "douyin.com",
+}
+
+_DIRECT_SEARCH_NAVIGATION_TITLES = {
+    "帮助",
+    "举报",
+    "图片",
+    "视频",
+    "微信",
+    "知乎",
+    "汉语",
+    "翻译",
+    "问问",
+    "应用",
+    "意见反馈",
+    "登录",
+    "注册",
+    "百度搜索",
+    "必应搜索",
+    "ai问答",
 }
 
 _LOW_VALUE_TITLE_TERMS = (
@@ -290,11 +352,12 @@ _TERM_ALIASES = {
 
 _TIME_RANGE_VALUES = {"day", "week", "month", "year"}
 _SEARCH_ENGINE_PRIORITY = ("bing", "baidu", "google")
-_SEARCH_PROVIDER_PRIORITY = ("bocha", "sougou", "jina", "searxng", "serper")
+_SEARCH_PROVIDER_PRIORITY = ("bocha", "sougou", "jina", "searxng", "direct", "serper")
 _SEARCH_DEPTH_VALUES = {"auto", "fast", "deep"}
 _DEEP_MAX_ROUNDS_DEFAULT = 3
 _DEEP_MAX_ROUNDS_LIMIT = 5
 _SEARCH_ENGINE_TIMEOUT_SECONDS = 5.0
+_DIRECT_SEARCH_TIMEOUT_SECONDS = 8.0
 _SEARCH_ENGINE_TIMEOUT_COOLDOWN_SECONDS = 120.0
 _SEARCH_ENGINE_CAPTCHA_COOLDOWN_SECONDS = 3600.0
 _SEARCH_ENGINE_ERROR_COOLDOWN_SECONDS = 60.0
@@ -423,14 +486,14 @@ def normalize_web_search_settings(raw: dict[str, Any]) -> dict[str, Any]:
     return {
         "enabled": bool(raw.get("enabled", False)),
         "searxng_base_url": normalize_searxng_url(base_url) if base_url else None,
-        "result_count": _coerce_int(raw.get("result_count"), 5, minimum=1, maximum=10),
+        "result_count": _coerce_int(raw.get("result_count"), _WEB_SEARCH_RESULT_COUNT_DEFAULT, minimum=1, maximum=_WEB_SEARCH_RESULT_COUNT_MAX),
         "language": (str(raw.get("language") or "all").strip() or "all")[:32],
         "safesearch": (str(raw.get("safesearch") or "1").strip() or "1")[:16],
         "timeout_seconds": _coerce_int(raw.get("timeout_seconds"), 20, minimum=3, maximum=60),
         "fetch_timeout_seconds": _coerce_int(raw.get("fetch_timeout_seconds"), 20, minimum=3, maximum=60),
-        "max_tool_calls": _coerce_int(raw.get("max_tool_calls"), 4, minimum=1, maximum=10),
+        "max_tool_calls": _coerce_int(raw.get("max_tool_calls"), _WEB_SEARCH_TOOL_CALLS_DEFAULT, minimum=1, maximum=_WEB_SEARCH_TOOL_CALLS_MAX),
         "fetch_max_chars": _coerce_int(raw.get("fetch_max_chars"), 12000, minimum=1000, maximum=50000),
-        "provider_order": _split_config_list(raw.get("provider_order"), ["bocha", "sougou", "jina", "searxng", "serper"], allowed=_SEARCH_PROVIDER_PRIORITY),
+        "provider_order": _split_config_list(raw.get("provider_order"), ["bocha", "sougou", "jina", "searxng", "direct", "serper"], allowed=_SEARCH_PROVIDER_PRIORITY),
         "searxng_engines": _split_config_list(raw.get("searxng_engines"), ["bing", "baidu"], allowed=_SEARCH_ENGINE_PRIORITY),
         "candidate_count": _coerce_int(raw.get("candidate_count"), 20, minimum=3, maximum=50),
         "fetch_top_n": _coerce_int(raw.get("fetch_top_n"), 5, minimum=0, maximum=10),
@@ -463,9 +526,9 @@ def effective_web_search_config() -> WebSearchConfig:
         "safesearch": setting("web_search_safesearch", "1"),
         "timeout_seconds": setting("web_search_timeout_seconds", 20),
         "fetch_timeout_seconds": setting("web_search_fetch_timeout_seconds", 20),
-        "max_tool_calls": setting("web_search_max_tool_calls", 4),
+        "max_tool_calls": setting("web_search_max_tool_calls", 20),
         "fetch_max_chars": setting("web_search_fetch_max_chars", 12000),
-        "provider_order": setting("web_search_provider_order", "bocha,sougou,jina,searxng,serper"),
+        "provider_order": setting("web_search_provider_order", "bocha,sougou,jina,searxng,direct,serper"),
         "searxng_engines": setting("web_search_searxng_engines", "bing,baidu"),
         "candidate_count": setting("web_search_candidate_count", 20),
         "fetch_top_n": setting("web_search_fetch_top_n", 5),
@@ -505,6 +568,7 @@ def web_search_provider_status(config: WebSearchConfig | None = None) -> dict[st
         "bocha": bool(config.bocha_api_key),
         "sougou": bool(config.sougou_api_sid and config.sougou_api_sk),
         "jina": bool(config.jina_api_key),
+        "direct": True,
         "serper": bool(config.serper_api_key),
     }
 
@@ -517,7 +581,7 @@ def normalize_searxng_url(url: str | None) -> str | None:
         value = value.split("?", 1)[0]
     parsed = urlsplit(value)
     if parsed.scheme not in {"http", "https"} or not parsed.netloc:
-        raise WebSearchError("SearXNG URL must be an absolute http(s) URL")
+        raise WebSearchError("Search URL must be an absolute http(s) URL")
     path = parsed.path or "/search"
     if path == "/":
         path = "/search"
@@ -608,7 +672,7 @@ def _normalize_fetch_max_chars(value: Any, config: WebSearchConfig) -> int:
 
 
 def _search_request_timeout(config: WebSearchConfig) -> float:
-    return float(max(1, min(config.timeout_seconds, _SEARCH_ENGINE_TIMEOUT_SECONDS)))
+    return float(max(1, min(config.timeout_seconds, _DIRECT_SEARCH_TIMEOUT_SECONDS)))
 
 
 def reset_search_engine_cooldowns() -> None:
@@ -745,8 +809,10 @@ def _config_for_search_depth(config: WebSearchConfig, depth: str) -> WebSearchCo
 def _allow_unfiltered_fallback(query_terms: list[str], query: str) -> bool:
     if _query_contains_time_sensitive_term(query):
         return False
-    if len(query_terms) <= 1:
+    if not query_terms:
         return True
+    if len(query_terms) == 1:
+        return not re.search(r"[a-zA-Z0-9\u4e00-\u9fff]", query_terms[0])
     return not any(re.search(r"[\u4e00-\u9fff]", term) for term in query_terms)
 
 
@@ -763,7 +829,6 @@ def _is_low_value_result(title: str, url: str) -> bool:
         return True
     lowered_title = title.lower()
     return any(term in lowered_title for term in _LOW_VALUE_TITLE_TERMS)
-
 
 def _host_matches_domain(host: str, domains: list[str]) -> bool:
     lowered = host.lower().strip(".")
@@ -830,6 +895,134 @@ def _first_item_value(item: dict[str, Any], *keys: str) -> Any:
         if value not in (None, ""):
             return value
     return None
+
+
+def _host_matches(host: str, candidates: set[str]) -> bool:
+    return _host_matches_domain(host, list(candidates))
+
+
+def _strip_inline_html(value: str) -> str:
+    text = re.sub(r"(?is)<(script|style|noscript).*?>.*?</\1>", " ", value)
+    text = re.sub(r"(?is)<[^>]+>", " ", text)
+    return _compact_text(html.unescape(text), 700)
+
+
+def _parse_bing_html_results(body: str) -> list[dict[str, str]]:
+    rows: list[dict[str, str]] = []
+    for block in re.findall(r'(?is)<li\b[^>]*class="[^"]*\bb_algo\b[^"]*"[^>]*>.*?</li>', body):
+        link_match = re.search(r'(?is)<h2[^>]*>.*?<a\b[^>]*href="([^"]+)"[^>]*>(.*?)</a>.*?</h2>', block)
+        if not link_match:
+            continue
+        url = html.unescape(link_match.group(1))
+        title = _strip_inline_html(link_match.group(2))
+        snippet = ""
+        snippet_match = re.search(r'(?is)<div\b[^>]*class="[^"]*\bb_caption\b[^"]*"[^>]*>.*?<p[^>]*>(.*?)</p>', block)
+        if snippet_match:
+            snippet = _strip_inline_html(snippet_match.group(1))
+        elif fallback_match := re.search(r"(?is)<p[^>]*>(.*?)</p>", block):
+            snippet = _strip_inline_html(fallback_match.group(1))
+        rows.append({"title": title, "url": url, "content": snippet})
+    return rows
+
+
+def _search_href_target(href: str, source_url: str) -> str | None:
+    value = html.unescape(str(href or "").strip())
+    if not value or value.startswith(("#", "javascript:", "mailto:")):
+        return None
+    absolute = urljoin(source_url, value)
+    parsed = urlsplit(absolute)
+    if parsed.scheme not in {"http", "https"} or not parsed.netloc:
+        return None
+    query = parse_qs(parsed.query)
+    for name in ("url", "u", "target"):
+        for candidate in query.get(name, []):
+            normalized = normalize_result_url(candidate)
+            if normalized:
+                return normalized
+    return normalize_result_url(absolute)
+
+
+def _is_search_navigation_result(source_name: str, title: str, url: str) -> bool:
+    normalized_title = _compact_text(title, 30).lower()
+    if normalized_title in _DIRECT_SEARCH_NAVIGATION_TITLES:
+        return True
+    parsed = urlsplit(url)
+    host = (parsed.hostname or "").lower()
+    if source_name == "so360" and host in _DIRECT_SEARCH_INTERNAL_HOSTS[source_name] and parsed.path.startswith("/link"):
+        return False
+    if source_name in {"bing", "sogou"}:
+        return _host_matches(host, _DIRECT_SEARCH_INTERNAL_HOSTS.get(source_name, set()))
+    if source_name == "so360":
+        return _host_matches(host, _DIRECT_SEARCH_INTERNAL_HOSTS.get(source_name, set())) or host.endswith(".360.cn")
+    return host in _DIRECT_SEARCH_INTERNAL_HOSTS.get(source_name, set())
+
+
+def _parse_generic_direct_search_results(source_name: str, source_url: str, body: str) -> list[dict[str, str]]:
+    rows: list[dict[str, str]] = []
+    for match in re.finditer(r'(?is)<a\b[^>]*href=["\']([^"\']+)["\'][^>]*>(.*?)</a>', body):
+        title = _strip_inline_html(match.group(2))
+        if len(title) < 2:
+            continue
+        url = _search_href_target(match.group(1), source_url)
+        if not url or _is_search_navigation_result(source_name, title, url):
+            continue
+        rows.append({"title": title, "url": url, "content": title})
+        if len(rows) >= 60:
+            break
+    return rows
+
+
+def _parse_direct_search_results(source_name: str, source_url: str, body: str) -> list[dict[str, str]]:
+    if source_name == "bing":
+        return _parse_bing_html_results(body)
+    return _parse_generic_direct_search_results(source_name, source_url, body)
+
+
+async def _fetch_direct_search_source(
+    client: httpx.AsyncClient,
+    source_name: str,
+    source_url: str,
+    query_param: str,
+    query: str,
+) -> tuple[str, list[dict[str, str]]]:
+    try:
+        response = await client.get(
+            source_url,
+            headers=_DIRECT_SEARCH_HEADERS,
+            params={query_param: query},
+            follow_redirects=True,
+        )
+        response.raise_for_status()
+    except httpx.HTTPError:
+        return source_name, []
+    return source_name, _parse_direct_search_results(source_name, str(response.url), response.text)
+
+
+async def _search_direct_candidates(
+    client: httpx.AsyncClient,
+    query: str,
+    config: WebSearchConfig,
+) -> list[WebSearchCandidate]:
+    query_terms = _query_relevance_terms(query)
+    high_signal_query = _is_high_signal_query(query_terms, query)
+    source_rows = await asyncio.gather(
+        *(
+            _fetch_direct_search_source(client, source_name, source_url, query_param, query)
+            for source_name, source_url, query_param in _DIRECT_SEARCH_SOURCES
+        )
+    )
+    candidates: list[WebSearchCandidate] = []
+    for source_name, rows in source_rows:
+        candidates.extend(
+            _parse_candidate_rows(
+                rows,
+                provider=source_name,
+                query_terms=query_terms,
+                high_signal_query=high_signal_query,
+                blocked_domains=config.blocked_domains,
+            )
+        )
+    return candidates
 
 
 def _parse_candidate_rows(
@@ -1161,6 +1354,8 @@ async def _collect_search_candidates(
                 return await _search_sougou_candidates(client, query, config), True, None
             if provider == "jina" and config.jina_api_key:
                 return await _search_jina_candidates(client, query, config), True, None
+            if provider == "direct":
+                return await _search_direct_candidates(client, query, config), True, None
             if provider == "serper" and config.serper_api_key:
                 return await _search_serper_candidates(client, query, config), True, None
             return [], False, None
@@ -1704,7 +1899,7 @@ def web_search_tools() -> list[dict[str, Any]]:
                         },
                         "language": {
                             "type": "string",
-                            "description": "Optional SearXNG language code, such as all, auto, en, or zh-CN.",
+                            "description": "Optional language hint, such as all, auto, en, or zh-CN.",
                         },
                         "time_range": {
                             "type": "string",
@@ -1921,7 +2116,7 @@ async def cached_favicon(url: str) -> tuple[Path, str, str]:
     raise WebSearchError("Too many favicon redirects")
 
 
-def structured_web_search_sources(sources: list[WebSearchResult], *, limit: int = 10) -> list[dict[str, Any]]:
+def structured_web_search_sources(sources: list[WebSearchResult], *, limit: int = _WEB_SEARCH_CONTEXT_SOURCE_LIMIT) -> list[dict[str, Any]]:
     deduped: list[WebSearchSource] = []
     seen: set[str] = set()
     for source in sources:
@@ -1977,7 +2172,7 @@ def append_sources_markdown(content: str, sources: list[WebSearchResult]) -> str
     if not deduped:
         return content
     lines = ["", "", "### 来源"]
-    for index, source in enumerate(deduped[:10], start=1):
+    for index, source in enumerate(deduped[:_WEB_SEARCH_CONTEXT_SOURCE_LIMIT], start=1):
         title = source.title.replace("[", "").replace("]", "").strip() or source.url
         lines.append(f"{index}. [{title}]({source.url})")
     return content.rstrip() + "\n".join(lines)
@@ -1999,7 +2194,7 @@ def format_search_results_for_context(query: str, payload: dict[str, Any]) -> st
         lines.append("No relevant results were found. Say that clearly if this weakens the answer.")
         return "\n".join(lines)
 
-    for index, item in enumerate(results[:10], start=1):
+    for index, item in enumerate(results[:_WEB_SEARCH_CONTEXT_SOURCE_LIMIT], start=1):
         if not isinstance(item, dict):
             continue
         title = _compact_text(item.get("title"), 180) or _compact_text(item.get("url"), 180)
