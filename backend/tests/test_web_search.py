@@ -1096,7 +1096,7 @@ def test_web_search_final_answer_context_is_compacted():
         {
             "index": index,
             "title": f"Source {index}",
-            "url": f"https://example.com/{index}",
+            "url": f"https://example{index}.com/{index}",
             "snippet": "证据正文" * 200,
             "provider": "direct",
             "confidence": 0.8,
@@ -1112,13 +1112,13 @@ def test_web_search_final_answer_context_is_compacted():
     chat.inject_web_search_final_answer_context(context, sources, max_sources=3, max_total_chars=3200)
 
     injected = context[-1]["content"]
-    assert "[[1]] Source 1" in injected
-    assert "[[3]] Source 3" in injected
-    assert "[[4]]" not in injected
+    assert '<source id="1"' in injected
+    assert '<source id="3"' in injected
+    assert '<source id="4"' not in injected
     assert len(injected) < 2200
 
 
-def test_web_search_final_answer_context_prefers_evidence_and_history():
+def test_web_search_final_answer_context_prefers_evidence_and_omits_history():
     context: list[dict] = []
     sources = [
         {
@@ -1136,21 +1136,60 @@ def test_web_search_final_answer_context_prefers_evidence_and_history():
     chat.inject_web_search_final_answer_context(
         context,
         sources,
-        search_history={
-            "searched_queries": ["台海局势 最新"],
-            "read_urls": ["https://example.com/news"],
-            "failed_urls": ["https://bad.example/a"],
-            "source_domains": ["example.com"],
-            "source_titles": ["Short UI Source"],
-        },
+        user_query="台海现在怎么样",
     )
 
     injected = context[-1]["content"]
     assert "这是给最终回答模型使用的正文级证据" in injected
-    assert "Evidence: 短摘要" not in injected
-    assert "Searched queries:" in injected
-    assert "台海局势 最新" in injected
-    assert "Failed URLs to avoid:" in injected
+    assert ">短摘要<" not in injected
+    assert "User question: 台海现在怎么样" in injected
+    assert "<source" in injected
+    assert "Searched queries:" not in injected
+    assert "Failed URLs to avoid:" not in injected
+    assert "https://bad.example/a" not in injected
+
+
+def test_web_search_final_answer_context_selects_top_sources_and_limits_domains():
+    context: list[dict] = []
+    sources = [
+        {
+            "index": 1,
+            "title": "Official Source",
+            "url": "https://official.example/report",
+            "evidence": "官方来源正文证据，说明核心事实。" * 20,
+            "confidence": 0.9,
+            "source_tier": "official",
+            "support_level": "high",
+        },
+        *[
+            {
+                "index": index,
+                "title": f"Same Domain {index}",
+                "url": f"https://repeat.example/{index}",
+                "evidence": "同一域名来源正文证据。" * 20,
+                "confidence": 0.7,
+                "source_tier": "major_news",
+                "support_level": "medium",
+            }
+            for index in range(2, 14)
+        ],
+        {
+            "index": 14,
+            "title": "Low Quality",
+            "url": "https://spam.example/14",
+            "evidence": "低质量来源正文。",
+            "confidence": 0.2,
+            "source_tier": "spam_low",
+        },
+    ]
+
+    chat.inject_web_search_final_answer_context(context, sources, max_sources=10)
+
+    injected = context[-1]["content"]
+    assert '<source id="1"' in injected
+    assert injected.count('<source id="') <= 10
+    assert injected.count('repeat.example') <= 2
+    assert "spam.example" not in injected
 
 
 def test_chat_generation_error_message_hides_remote_protocol_details():
@@ -1845,6 +1884,81 @@ def test_auto_tool_loop_uses_effective_deep_strategy_for_iterative_search(monkey
         assert usage["total_tokens"] == 5
         assert len(sources) == 3
         assert any(event.get("type") == "review" for event in trace["events"])
+
+    asyncio.run(run())
+
+
+def test_auto_deep_tool_loop_keeps_final_context_free_of_round_result_logs(monkeypatch):
+    async def run():
+        context = [{"role": "user", "content": "taiwan strait latest"}]
+
+        class FakeProvider:
+            async def tool_call_turn(self, **kwargs):
+                return ToolCallTurnResult(tool_calls=[], usage={"prompt_tokens": 1, "completion_tokens": 0, "total_tokens": 1})
+
+        def fake_config():
+            return WebSearchConfig(
+                enabled=True,
+                searxng_base_url="https://search.example.com/search",
+                result_count=3,
+                language="all",
+                safesearch="1",
+                timeout_seconds=5,
+                fetch_timeout_seconds=5,
+                max_tool_calls=4,
+                fetch_max_chars=4000,
+            )
+
+        async def fake_run_web_search_tool(name, arguments, config):
+            return {
+                "ok": True,
+                "results": [
+                    {
+                        "title": "Useful source",
+                        "url": "https://example.com/news",
+                        "snippet": "正文证据。" * 100,
+                        "confidence": 0.7,
+                        "source_tier": "major_news",
+                    }
+                ],
+            }
+
+        async def fake_review(**kwargs):
+            return (
+                {
+                    "needs_more": True,
+                    "new_queries": ["taiwan strait latest official"],
+                    "urls_to_fetch": [],
+                    "evidence_gaps": ["needs more"],
+                },
+                {"prompt_tokens": 1, "completion_tokens": 1, "total_tokens": 2},
+            )
+
+        monkeypatch.setattr(chat, "effective_web_search_config", fake_config)
+        monkeypatch.setattr(chat, "publish_conversation_event", lambda *args, **kwargs: asyncio.sleep(0))
+        monkeypatch.setattr(chat, "run_web_search_tool", fake_run_web_search_tool)
+        monkeypatch.setattr(chat, "review_web_search_evidence", fake_review)
+        monkeypatch.setattr(chat, "effective_search_depth", lambda query, mode: "deep")
+
+        sources, usage, trace = await chat.run_web_search_tool_loop(
+            provider=FakeProvider(),
+            api_key="sk-test",
+            model="gpt-5.5",
+            context=context,
+            conversation_id="conv-1",
+            assistant_message_id="msg-assistant",
+            reasoning_effort=None,
+            search_mode="auto",
+            max_rounds=3,
+        )
+
+        context_text = "\n".join(str(item.get("content") or "") for item in context)
+        assert "Deep web search round" not in context_text
+        assert "Web search results" not in context_text
+        assert "Web search was enabled and the model did not call tools" not in context_text
+        assert len(sources) == 3
+        assert trace["executed_rounds"] == 3
+        assert usage["total_tokens"] == 5
 
     asyncio.run(run())
 
@@ -2703,8 +2817,10 @@ def test_chat_job_fallback_searches_time_sensitive_prompt_when_model_skips_tool(
 
             assert tool_queries == [("search_web", {"query": "今天 AI 新闻", "search_depth": "fast"})]
             assert any(event == "web_search_status" and data.get("phase") == "searching" for event, data in published_events)
-            assert any("search_web" in str(item.get("content")) for item in final_messages["messages"] if item.get("role") == "user")
-            assert any("[[1]]" in str(item.get("content")) for item in final_messages["messages"] if item.get("role") == "system")
+            assert not any("search_web" in str(item.get("content")) for item in final_messages["messages"] if item.get("role") == "user")
+            system_context = "\n".join(str(item.get("content")) for item in final_messages["messages"] if item.get("role") == "system")
+            assert '<source id="1"' in system_context
+            assert "https://example.com/ai-news" in system_context
         finally:
             await engine.dispose()
 

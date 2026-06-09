@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import asyncio
 import contextlib
+import html
 import json
 import logging
 import re
@@ -556,12 +557,88 @@ def inject_web_search_policy(context: list[dict]) -> None:
     context.insert(insert_at, {"role": "system", "content": WEB_SEARCH_TOOL_POLICY})
 
 
+def _source_brief_summary(source: dict, *, limit: int = 220) -> str:
+    text = str(source.get("evidence") or source.get("snippet") or "").strip()
+    text = re.sub(r"\s+", " ", text)
+    if not text:
+        return ""
+    if re.search(r"\b(?:tier|support|rerank|confidence|provider|mode):", text, flags=re.I):
+        fallback = str(source.get("snippet") or "").strip()
+        if fallback and fallback != text and not re.search(r"\b(?:tier|support|rerank|confidence|provider|mode):", fallback, flags=re.I):
+            text = fallback
+        else:
+            return ""
+    sentence = re.match(r"^(.+?[。！？!?]|.+?[.;；])", text)
+    if sentence and len(sentence.group(1)) >= 40:
+        text = sentence.group(1)
+    if len(text) > limit:
+        text = text[:limit].rstrip(" ,，.。;；:：") + "..."
+    return text
+
+
+def _source_brief_score(source: dict) -> tuple[float, float, int]:
+    tier = str(source.get("source_tier") or "").strip()
+    support = str(source.get("support_level") or "").strip()
+    confidence = float(source.get("confidence") or 0.0)
+    evidence_len = len(str(source.get("evidence") or source.get("snippet") or ""))
+    tier_bonus = {"official": 4.0, "major_news": 3.0, "normal": 1.0}.get(tier, 0.0)
+    support_bonus = {"high": 1.0, "medium": 0.5}.get(support, 0.0)
+    penalty = -3.0 if tier in {"ugc_low", "spam_low"} or source.get("degraded") else 0.0
+    return (tier_bonus + support_bonus + confidence + penalty, min(evidence_len, 1000) / 1000, -int(source.get("index") or 0))
+
+
+def _source_brief_meta(source: dict) -> str:
+    parts: list[str] = []
+    tier = str(source.get("source_tier") or "").strip()
+    confidence = source.get("confidence")
+    if tier:
+        parts.append(f'tier="{html.escape(tier, quote=True)}"')
+    if isinstance(confidence, (int, float)):
+        parts.append(f'confidence="{float(confidence):.2f}"')
+    return (" " + " ".join(parts)) if parts else ""
+
+
+def _select_web_search_brief_sources(
+    sources: list[dict],
+    *,
+    max_sources: int = 10,
+    per_domain_limit: int = 2,
+) -> tuple[list[dict], int]:
+    candidates: list[dict] = []
+    seen_urls: set[str] = set()
+    for source in sources:
+        if not isinstance(source, dict):
+            continue
+        url = str(source.get("url") or "").strip()
+        if not url or url in seen_urls:
+            continue
+        seen_urls.add(url)
+        if not _source_brief_summary(source):
+            continue
+        if str(source.get("source_tier") or "") in {"ugc_low", "spam_low"} and float(source.get("confidence") or 0.0) < 0.55:
+            continue
+        candidates.append(source)
+    ranked = sorted(candidates, key=_source_brief_score, reverse=True)
+    selected: list[dict] = []
+    domain_counts: dict[str, int] = {}
+    for source in ranked:
+        domain = urlparse(str(source.get("url") or "")).hostname or ""
+        if domain and domain_counts.get(domain, 0) >= per_domain_limit:
+            continue
+        selected.append(source)
+        if domain:
+            domain_counts[domain] = domain_counts.get(domain, 0) + 1
+        if len(selected) >= max_sources:
+            break
+    return selected, max(0, len(candidates) - len(selected))
+
+
 def inject_web_search_final_answer_context(
     context: list[dict],
     sources: list[dict],
     *,
-    search_history: dict | None = None,
-    max_sources: int = 14,
+    user_query: str = "",
+    max_sources: int = 10,
     max_total_chars: int = 12000,
 ) -> None:
     if not sources:
@@ -575,65 +652,66 @@ def inject_web_search_final_answer_context(
             }
         )
         return
-    high_confidence_count = sum(1 for source in sources if float(source.get("confidence") or 0) >= 0.5)
-    quality_count = sum(1 for source in sources if source.get("source_tier") in {"official", "major_news"})
+    selected_sources, omitted_count = _select_web_search_brief_sources(sources, max_sources=max_sources)
+    high_confidence_count = sum(1 for source in selected_sources if float(source.get("confidence") or 0) >= 0.5)
+    quality_count = sum(1 for source in selected_sources if source.get("source_tier") in {"official", "major_news"})
     independent_domains = {
         urlparse(str(source.get("url") or "")).hostname
-        for source in sources
+        for source in selected_sources
         if float(source.get("confidence") or 0) >= 0.5 and source.get("url")
     }
     lines = [
-        "Web search sources for the final answer:",
-        "Use the exact source numbers below for inline citations, for example [[1]] or [[2]].",
-        "Place each marker immediately after the specific claim that is directly supported by that source.",
-        "Do not cite a sentence unless the matching source actually supports it.",
-        "If sources are weak, unrelated, or do not support a claim, say so instead of adding a citation.",
-        "Never add a citation marker just to satisfy formatting.",
-        "Do not append a separate markdown source list.",
+        "Web search brief for the final answer.",
+        f"User question: {_compact_trace_text(user_query, 500) or latest_user_text(context)}",
+        "What the user needs: synthesize the relevant websites below into a direct answer to the user question.",
+        "Citation rules: cite factual claims with the exact source marker like [[1]]. Cite only sources that directly support the claim. Do not output a separate source list.",
+        "Relevant sources:",
     ]
-    history_lines = _search_history_lines(search_history)
-    if history_lines:
-        lines.append(
-            "Search coverage summary: use this to understand what was attempted, but cite only numbered sources below."
-        )
-        lines.extend(history_lines)
-        lines.append(
-            "If multiple numbered sources support a time-sensitive factual claim, use citations broadly instead of relying on only one or two sources."
-        )
     if high_confidence_count < 2:
-        lines.append("Fewer than two high-confidence sources were found; avoid definitive conclusions for contested or time-sensitive claims.")
+        lines.append("Note: fewer than two high-confidence sources were selected; avoid definitive conclusions for contested or time-sensitive claims.")
     if len({domain for domain in independent_domains if domain}) < 2 or quality_count < 1:
-        lines.append("The independent-source gate was not fully satisfied; if the answer depends on a contested or current claim, state that evidence is insufficient.")
+        lines.append("Note: independent or high-quality source coverage is limited; state uncertainty when evidence is insufficient.")
     used_chars = sum(len(line) for line in lines)
-    for source in sources[:max_sources]:
+    included_sources = 0
+    for source in selected_sources:
         index = int(source.get("index") or 0)
         title = str(source.get("title") or source.get("url") or "").strip()
         url = str(source.get("url") or "").strip()
-        snippet = str(source.get("snippet") or "").strip()
         if not index or not url:
             continue
-        source_lines = [f"[[{index}]] {title[:180]}", f"URL: {url[:500]}"]
-        if source.get("provider") or source.get("confidence") is not None:
-            source_lines.append(
-                "Meta: "
-                f"provider={source.get('provider') or 'unknown'}, "
-                f"confidence={source.get('confidence') or 'unknown'}, "
-                f"tier={source.get('source_tier') or 'unknown'}, "
-                f"support={source.get('support_level') or 'unknown'}, "
-                f"depth={source.get('search_depth') or 'unknown'}, "
-                f"rerank={source.get('rerank_status') or 'unknown'}, "
-                f"degraded={bool(source.get('degraded'))}"
-            )
-        evidence = str(source.get("evidence") or source.get("snippet") or "").strip()
-        if evidence:
-            source_lines.append(f"Evidence: {evidence[:340]}")
+        evidence = _source_brief_summary(source, limit=220)
+        if not evidence:
+            continue
+        meta = _source_brief_meta(source)
+        source_lines = [
+            (
+                f'<source id="{index}" name="{html.escape(title[:160], quote=True)}" '
+                f'url="{html.escape(url[:500], quote=True)}"{meta}>'
+            ),
+            html.escape(evidence, quote=False),
+            "</source>",
+        ]
         next_chars = sum(len(line) for line in source_lines)
         if used_chars + next_chars > max_total_chars:
-            lines.append("Additional search evidence was saved in the source panel but omitted from this prompt to keep generation stable.")
+            omitted_count += len(selected_sources) - included_sources
+            lines.append("More relevant sources are saved in the source panel but omitted here to keep generation stable.")
             break
         lines.extend(source_lines)
         used_chars += next_chars
-    context.append({"role": "system", "content": "\n".join(lines)})
+        included_sources += 1
+    if omitted_count > 0:
+        lines.append(f"{omitted_count} additional relevant sources are available in the source panel but not included in this generation brief.")
+    brief = "\n".join(lines)
+    perf_logger.info(
+        "web_search_final_brief source_count=%d included_sources=%d chars=%d omitted_sources=%d",
+        len(sources),
+        included_sources,
+        len(brief),
+        omitted_count,
+    )
+    if len(brief) > 12000:
+        perf_logger.warning("web_search_final_brief_large chars=%d source_count=%d", len(brief), len(sources))
+    context.append({"role": "system", "content": brief})
 
 
 def compact_web_search_tool_context(query: str, payload: dict, *, max_results: int = 8, max_chars: int = 6000) -> str:
@@ -1365,16 +1443,6 @@ async def run_web_search_tool_loop(
                     )
             else:
                 had_tool_error = True
-            context.append(
-                {
-                    "role": "user",
-                    "content": (
-                        "Web search was enabled and the model did not call tools, so the backend ran search_web automatically. "
-                        "Use the formatted results below only if relevant; if they are weak or unrelated, say so.\n\n"
-                        f"{compact_web_search_tool_context(query, payload)}"
-                    ),
-                }
-            )
     if iterative_deep_search and max_rounds > 1:
         user_query = base_user_query
         failed_urls: set[str] = set()
@@ -1486,16 +1554,6 @@ async def run_web_search_tool_loop(
                         arguments=arguments,
                         payload=payload,
                     )
-                )
-                context.append(
-                    {
-                        "role": "system",
-                        "content": (
-                            f"Deep web search round {round_index} used {tool_name} with arguments {json.dumps(arguments, ensure_ascii=False)}. "
-                            "Use the formatted results only if relevant.\n\n"
-                            f"{compact_web_search_tool_context(str(arguments.get('query') or arguments.get('url') or user_query), payload)}"
-                        ),
-                    }
                 )
     if executed_calls:
         failed_without_sources = had_tool_error and not sources
@@ -3181,7 +3239,7 @@ async def run_chat_generation_job(
             inject_web_search_final_answer_context(
                 context,
                 structured_sources,
-                search_history=(web_search_trace or {}).get("search_history") if web_search_trace else None,
+                user_query=web_search_fallback_query(context),
             )
             await _persist_assistant_partial(
                 assistant_message_id,
