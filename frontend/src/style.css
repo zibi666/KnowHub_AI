@@ -3661,6 +3661,7 @@ body,
   border-radius: 11px;
   background: color-mix(in srgb, var(--control-bg) 46%, transparent);
   padding: 0.95rem;
+  min-height: 7.1rem;
   text-align: left;
   transition: border-color 150ms ease, background 150ms ease, transform 150ms ease, box-shadow 150ms ease;
 }
@@ -3682,7 +3683,8 @@ body,
   display: inline-grid;
   width: 1.52rem;
   height: 1.52rem;
-  margin-top: 0.1rem;
+  margin-top: 0.14rem;
+  flex: 0 0 auto;
   place-items: center;
   border-radius: 999px;
   background: color-mix(in srgb, var(--bubble-bg) 22%, var(--surface-bg));
@@ -3695,39 +3697,38 @@ body,
   display: grid;
   min-width: 0;
   max-width: 100%;
-  gap: 0.42rem;
+  align-content: start;
+  gap: 0.34rem;
 }
 
 .source-result-meta {
   display: flex;
   min-width: 0;
   max-width: 100%;
-  flex-wrap: wrap;
+  flex-wrap: nowrap;
   align-items: center;
   gap: 0.38rem;
   color: var(--muted);
   font-size: 0.78rem;
   line-height: 1.2;
-  overflow-wrap: anywhere;
-  word-break: break-word;
+  overflow: hidden;
 }
 
 .source-result-meta span:not(.source-icon) {
   min-width: 0;
-  max-width: 100%;
-  overflow-wrap: anywhere;
-  white-space: normal;
-  word-break: break-word;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
 }
 
 .source-result-site {
   flex: 0 1 auto;
-  max-width: 13rem;
+  max-width: 14rem;
 }
 
 .source-result-date {
   display: inline-flex;
-  flex: 1 1 9rem;
+  flex: 0 1 auto;
   align-items: center;
   gap: 0.38rem;
 }
@@ -3765,6 +3766,19 @@ body,
   font-size: 0.98rem;
   font-weight: 720;
   line-height: 1.42;
+  overflow-wrap: anywhere;
+  word-break: break-word;
+  -webkit-box-orient: vertical;
+  -webkit-line-clamp: 2;
+}
+
+.source-result-diagnostics {
+  display: -webkit-box;
+  max-width: 100%;
+  overflow: hidden;
+  color: color-mix(in srgb, var(--muted) 86%, var(--text));
+  font-size: 0.76rem;
+  line-height: 1.35;
   overflow-wrap: anywhere;
   word-break: break-word;
   -webkit-box-orient: vertical;

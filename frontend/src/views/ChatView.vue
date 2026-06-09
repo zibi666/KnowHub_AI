@@ -4138,10 +4138,10 @@ onUnmounted(() => {
                   <SourceIcon :source="source" />
                   <span class="source-result-site">{{ sourceSiteName(source) }}</span>
                   <span v-if="sourcePublishedLabel(source)" class="source-result-date">{{ sourcePublishedLabel(source) }}</span>
-                  <span v-if="sourceDiagnostics(source)" class="source-result-date">{{ sourceDiagnostics(source) }}</span>
                 </span>
                 <strong class="source-result-title">{{ source.title }}</strong>
                 <em v-if="sourceSummaryText(source)" class="source-result-summary">{{ sourceSummaryText(source) }}</em>
+                <span v-if="sourceDiagnostics(source)" class="source-result-diagnostics">{{ sourceDiagnostics(source) }}</span>
               </span>
             </button>
           </div>
