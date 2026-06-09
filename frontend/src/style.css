@@ -3654,6 +3654,9 @@ body,
   align-items: start;
   gap: 0.72rem;
   width: 100%;
+  min-width: 0;
+  max-width: 100%;
+  overflow: hidden;
   border: 1px solid color-mix(in srgb, var(--text) 8%, transparent);
   border-radius: 11px;
   background: color-mix(in srgb, var(--control-bg) 46%, transparent);
@@ -3691,24 +3694,30 @@ body,
 .source-result-main {
   display: grid;
   min-width: 0;
+  max-width: 100%;
   gap: 0.42rem;
 }
 
 .source-result-meta {
   display: flex;
   min-width: 0;
+  max-width: 100%;
+  flex-wrap: wrap;
   align-items: center;
   gap: 0.38rem;
   color: var(--muted);
   font-size: 0.78rem;
   line-height: 1.2;
+  overflow-wrap: anywhere;
+  word-break: break-word;
 }
 
 .source-result-meta span:not(.source-icon) {
   min-width: 0;
-  overflow: hidden;
-  text-overflow: ellipsis;
-  white-space: nowrap;
+  max-width: 100%;
+  overflow-wrap: anywhere;
+  white-space: normal;
+  word-break: break-word;
 }
 
 .source-result-site {
@@ -3718,7 +3727,7 @@ body,
 
 .source-result-date {
   display: inline-flex;
-  flex: 0 0 auto;
+  flex: 1 1 9rem;
   align-items: center;
   gap: 0.38rem;
 }
@@ -3751,10 +3760,13 @@ body,
 .source-result-title {
   display: -webkit-box;
   overflow: hidden;
+  max-width: 100%;
   color: var(--text);
   font-size: 0.98rem;
   font-weight: 720;
   line-height: 1.42;
+  overflow-wrap: anywhere;
+  word-break: break-word;
   -webkit-box-orient: vertical;
   -webkit-line-clamp: 2;
 }
@@ -3762,6 +3774,7 @@ body,
 .source-result-summary {
   display: -webkit-box;
   overflow: hidden;
+  max-width: 100%;
   color: color-mix(in srgb, var(--muted) 78%, var(--text));
   font-size: 0.86rem;
   font-style: normal;

@@ -624,7 +624,7 @@ function traceEventResultCount(event: WebSearchTraceEvent) {
 }
 
 function traceEventSources(event: WebSearchTraceEvent) {
-  return Array.isArray(event.sources) ? event.sources.slice(0, 6) : []
+  return Array.isArray(event.sources) ? event.sources : []
 }
 
 function traceEventLists(event: WebSearchTraceEvent) {
