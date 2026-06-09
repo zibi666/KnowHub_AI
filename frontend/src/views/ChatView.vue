@@ -76,7 +76,7 @@ const REASONING_STORAGE_KEY = 'private-gpt-reasoning-effort'
 const SIDEBAR_STORAGE_KEY = 'private-gpt-sidebar-collapsed'
 const WELCOME_STORAGE_KEY = 'private-gpt-welcome-message'
 const WELCOME_SIZE_STORAGE_KEY = 'private-gpt-welcome-font-size'
-const CURRENT_CONVERSATION_STORAGE_KEY = 'private-gpt-current-conversation'
+const LEGACY_CURRENT_CONVERSATION_STORAGE_KEY = 'private-gpt-current-conversation'
 const FILE_TREE_PIN_STORAGE_KEY = 'private-gpt-file-tree-pinned'
 const IMAGE_FINALIZATION_MIN_MS = 800
 const WEB_SEARCH_MAX_ROUNDS = 10
@@ -1751,10 +1751,6 @@ function sortConversationsByUpdatedAt(items: Conversation[]) {
   return items.map(normalizeConversation).sort((a, b) => conversationUpdatedAtMs(b) - conversationUpdatedAtMs(a))
 }
 
-function lastVisibleConversation() {
-  return conversations.value[conversations.value.length - 1]
-}
-
 function openSearchDialog() {
   settingsMenuOpen.value = false
   searchOpen.value = true
@@ -3180,7 +3176,7 @@ function newChat() {
   stopImagePolling()
   stopConversationEvents()
   currentId.value = null
-  window.localStorage.removeItem(CURRENT_CONVERSATION_STORAGE_KEY)
+  window.localStorage.removeItem(LEGACY_CURRENT_CONVERSATION_STORAGE_KEY)
   messages.value = []
   messagesLoading.value = false
   conversationAttachments.value = []
@@ -3305,7 +3301,6 @@ async function openConversation(id: string, focusMessageId?: string | null) {
   clearAllImageFinalizationTimers()
   stopImagePolling()
   currentId.value = id
-  window.localStorage.setItem(CURRENT_CONVERSATION_STORAGE_KEY, id)
   messages.value = []
   messagesLoading.value = true
   userHasScrolledUp = false
@@ -3429,12 +3424,7 @@ async function confirmDeleteConversation() {
     deleteConfirmOpen.value = false
     conversationPendingDelete.value = null
     if (currentId.value === conversation.id) {
-      const nextConversation = lastVisibleConversation()
-      if (nextConversation) {
-        await openConversation(nextConversation.id)
-      } else {
-        newChat()
-      }
+      newChat()
     }
   } catch (err) {
     error.value = err instanceof Error ? err.message : '删除对话失败'
@@ -3618,7 +3608,6 @@ async function send() {
       })
       targetConversationId = created.id
       currentId.value = created.id
-      window.localStorage.setItem(CURRENT_CONVERSATION_STORAGE_KEY, created.id)
       await bindDraftFileTreeToConversation(created.id)
     }
     const path = targetConversationId ? `/conversations/${targetConversationId}/messages` : '/conversations/new/messages'
@@ -3640,7 +3629,6 @@ async function send() {
     const assistantMessage = result.assistantMessage || result.assistant_message
     if (newConversationId) {
       currentId.value = newConversationId
-      window.localStorage.setItem(CURRENT_CONVERSATION_STORAGE_KEY, newConversationId)
     }
     if (userMessage) replaceDraftWithMessage(draftUserId, userMessage, { clientKey: userClientKey })
     if (assistantMessage) {
@@ -3885,13 +3873,7 @@ onMounted(async () => {
   loadAppearance()
   loadFileTreePinned()
   await Promise.all([loadModels(), loadConversations(), loadWebSearchStatus()])
-  const storedConversationId = window.localStorage.getItem(CURRENT_CONVERSATION_STORAGE_KEY)
-  if (storedConversationId && conversations.value.some((conversation) => conversation.id === storedConversationId)) {
-    await openConversation(storedConversationId)
-  } else {
-    const fallbackConversation = lastVisibleConversation()
-    if (fallbackConversation) await openConversation(fallbackConversation.id)
-  }
+  window.localStorage.removeItem(LEGACY_CURRENT_CONVERSATION_STORAGE_KEY)
   await nextTick()
   observeChatFooter()
   resizeComposerInput()
