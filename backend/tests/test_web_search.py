@@ -1397,6 +1397,84 @@ def test_fetch_url_clamps_max_chars_and_focuses_excerpt(monkeypatch):
     asyncio.run(run())
 
 
+def test_fetch_url_truncates_large_page_instead_of_failing(monkeypatch):
+    class FakeStreamResponse:
+        status_code = 200
+        headers = {"content-type": "text/html; charset=utf-8"}
+        encoding = "utf-8"
+        url = "https://example.com/large"
+
+        def raise_for_status(self):
+            return None
+
+        async def aiter_bytes(self):
+            yield b"<html><head><title>Large</title></head><body>"
+            yield ("Important Taiwan Strait update. " * 300).encode("utf-8")
+            yield b"</body></html>"
+
+    class FakeStream:
+        async def __aenter__(self):
+            return FakeStreamResponse()
+
+        async def __aexit__(self, *args):
+            return None
+
+    class FakeClient:
+        def __init__(self, *args, **kwargs):
+            pass
+
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, *args):
+            return None
+
+        def stream(self, *args, **kwargs):
+            return FakeStream()
+
+    async def run():
+        monkeypatch.setattr(web_search, "_assert_public_http_url", lambda url: asyncio.sleep(0, result=url))
+        monkeypatch.setattr(web_search.httpx, "AsyncClient", FakeClient)
+        config = WebSearchConfig(
+            enabled=True,
+            searxng_base_url="https://search.example.com/search",
+            result_count=3,
+            language="all",
+            safesearch="1",
+            timeout_seconds=5,
+            fetch_timeout_seconds=5,
+            max_tool_calls=2,
+            fetch_max_chars=1200,
+        )
+
+        result = await fetch_url("https://example.com/large", config, max_chars=500, focus="Taiwan")
+
+        assert result.title == "Large"
+        assert result.partial is True
+        assert result.truncated is True
+        assert "Important Taiwan Strait update" in result.content
+        assert len(result.content) <= 500
+
+    asyncio.run(run())
+
+
+def test_run_web_search_tool_normalizes_dns_errors(monkeypatch):
+    async def run():
+        async def fake_assert(url):
+            raise web_search.httpx.ConnectError("[Errno -5] No address associated with hostname")
+
+        monkeypatch.setattr(web_search, "_assert_public_http_url", fake_assert)
+        result = await web_search.run_web_search_tool(
+            "fetch_url",
+            {"url": "https://www.mnd.gov.tw/"},
+            _search_config(),
+        )
+
+        assert result == {"ok": False, "error": "DNS resolution failed"}
+
+    asyncio.run(run())
+
+
 def test_tool_loop_reuses_duplicate_searches_and_fetches_without_extra_count(monkeypatch):
     async def run():
         published_events = []
@@ -1662,6 +1740,175 @@ def test_deep_tool_loop_stops_early_when_ai_review_says_enough(monkeypatch):
         assert trace["early_stop"] is True
         assert trace["stop_reason"] == "证据已足够"
         assert any(event.get("type") == "review" and event.get("accuracy_notes") for event in trace["events"])
+
+    asyncio.run(run())
+
+
+def test_review_web_search_evidence_uses_lightweight_low_reasoning_and_timeout(monkeypatch):
+    async def run():
+        captured = {}
+
+        class FakeProvider:
+            async def chat_stream(self, **kwargs):
+                captured.update(kwargs)
+                yield StreamEvent(
+                    "completed_text",
+                    {
+                        "text": (
+                            '{"needs_more": false, "new_queries": [], "urls_to_fetch": [], '
+                            '"evidence_gaps": [], "reason_codes": ["enough"]}'
+                        )
+                    },
+                )
+                yield StreamEvent("usage", {"prompt_tokens": 3, "completion_tokens": 1, "total_tokens": 4})
+
+        monkeypatch.setattr(
+            chat,
+            "get_settings",
+            lambda: SimpleNamespace(preferred_compaction_models=["gpt-5.4-mini", "gpt-4.1-mini"]),
+        )
+
+        payload, usage = await chat.review_web_search_evidence(
+            provider=FakeProvider(),
+            api_key="sk-test",
+            model="gpt-5.5",
+            user_query="today AI news",
+            sources=[],
+            round_index=1,
+            max_rounds=3,
+            reasoning_effort="high",
+            config_timeout=20,
+            available_models=["gpt-5.5", "gpt-5.4-mini"],
+        )
+
+        assert payload["needs_more"] is False
+        assert usage["total_tokens"] == 4
+        assert captured["model"] == "gpt-5.4-mini"
+        assert captured["reasoning_effort"] == "low"
+        assert captured["max_completion_tokens"] == 300
+
+    asyncio.run(run())
+
+
+def test_review_web_search_evidence_timeout_returns_single_query(monkeypatch):
+    async def run():
+        class FakeProvider:
+            async def chat_stream(self, **kwargs):
+                await asyncio.sleep(0.05)
+                yield StreamEvent("token", {"text": "{}"})
+
+        monkeypatch.setattr(
+            chat,
+            "get_settings",
+            lambda: SimpleNamespace(preferred_compaction_models=["gpt-5.4-mini"]),
+        )
+
+        payload, usage = await chat.review_web_search_evidence(
+            provider=FakeProvider(),
+            api_key="sk-test",
+            model="gpt-5.5",
+            user_query="today AI news",
+            sources=[],
+            round_index=1,
+            max_rounds=3,
+            reasoning_effort="high",
+            config_timeout=0,
+            available_models=["gpt-5.5"],
+        )
+
+        assert usage is None
+        assert payload["needs_more"] is True
+        assert payload["new_queries"] == ["today AI news"]
+        assert payload["urls_to_fetch"] == []
+        assert "review_timeout" in payload["reason_codes"]
+
+    monkeypatch.setattr(chat, "WEB_SEARCH_REVIEW_MAX_QUERIES_PER_ROUND", 2)
+    original_wait_for = chat.asyncio.wait_for
+
+    async def tiny_wait_for(awaitable, timeout):
+        return await original_wait_for(awaitable, timeout=0.001)
+
+    monkeypatch.setattr(chat.asyncio, "wait_for", tiny_wait_for)
+    asyncio.run(run())
+
+
+def test_deep_tool_loop_limits_review_actions_and_dedupes_failed_urls(monkeypatch):
+    async def run():
+        executed = []
+        context = [{"role": "user", "content": "taiwan strait latest"}]
+
+        class FakeProvider:
+            async def tool_call_turn(self, **kwargs):
+                return ToolCallTurnResult(tool_calls=[], usage={"prompt_tokens": 1, "completion_tokens": 0, "total_tokens": 1})
+
+        def fake_config():
+            return WebSearchConfig(
+                enabled=True,
+                searxng_base_url="https://search.example.com/search",
+                result_count=3,
+                language="all",
+                safesearch="1",
+                timeout_seconds=5,
+                fetch_timeout_seconds=5,
+                max_tool_calls=4,
+                fetch_max_chars=4000,
+            )
+
+        async def fake_run_web_search_tool(name, arguments, config):
+            executed.append((name, dict(arguments)))
+            if name == "fetch_url":
+                return {"ok": False, "error": "DNS resolution failed"}
+            return {
+                "ok": True,
+                "results": [
+                    {
+                        "title": f"Source {len(executed)}",
+                        "url": f"https://example.com/{len(executed)}",
+                        "snippet": "weak",
+                    }
+                ],
+            }
+
+        async def fake_review(**kwargs):
+            return (
+                {
+                    "needs_more": True,
+                    "new_queries": ["q1", "q2", "q3"],
+                    "urls_to_fetch": [
+                        "https://bad.example/a",
+                        "https://bad.example/a",
+                        "https://bad.example/b",
+                    ],
+                    "evidence_gaps": ["weak"],
+                },
+                {"prompt_tokens": 1, "completion_tokens": 1, "total_tokens": 2},
+            )
+
+        monkeypatch.setattr(chat, "effective_web_search_config", fake_config)
+        monkeypatch.setattr(chat, "publish_conversation_event", lambda *args, **kwargs: asyncio.sleep(0))
+        monkeypatch.setattr(chat, "run_web_search_tool", fake_run_web_search_tool)
+        monkeypatch.setattr(chat, "review_web_search_evidence", fake_review)
+
+        sources, usage, trace = await chat.run_web_search_tool_loop(
+            provider=FakeProvider(),
+            api_key="sk-test",
+            model="gpt-5.5",
+            context=context,
+            conversation_id="conv-1",
+            assistant_message_id="msg-assistant",
+            reasoning_effort=None,
+            search_mode="deep",
+            max_rounds=3,
+        )
+
+        deepening_calls = executed[1:]
+        assert len([item for item in deepening_calls if item[0] == "search_web"]) == 2
+        assert len([item for item in deepening_calls if item[0] == "fetch_url"]) == 2
+        assert ("fetch_url", {"url": "https://bad.example/a", "focus": "taiwan strait latest"}) in deepening_calls
+        assert ("fetch_url", {"url": "https://bad.example/b", "focus": "taiwan strait latest"}) in deepening_calls
+        assert usage["total_tokens"] == 5
+        assert any(event.get("error") == "DNS resolution failed" for event in trace["events"])
+        assert len(sources) == 3
 
     asyncio.run(run())
 

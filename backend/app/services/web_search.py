@@ -106,6 +106,8 @@ class WebFetchResult:
     title: str
     url: str
     content: str
+    partial: bool = False
+    truncated: bool = False
 
 
 @dataclass
@@ -669,6 +671,30 @@ def _normalize_time_range(value: Any) -> str | None:
 
 def _normalize_fetch_max_chars(value: Any, config: WebSearchConfig) -> int:
     return _coerce_int(value, config.fetch_max_chars, minimum=1, maximum=max(1, config.fetch_max_chars))
+
+
+def _readable_content_type(content_type: str) -> bool:
+    return not content_type or any(kind in content_type for kind in ("text/", "html", "xml", "json"))
+
+
+def _decode_response_bytes(response: httpx.Response, chunks: list[bytes]) -> str:
+    encoding = response.encoding or "utf-8"
+    return b"".join(chunks).decode(encoding, errors="replace")
+
+
+def _network_error_message(exc: Exception) -> str:
+    text = str(exc)
+    lowered = text.lower()
+    if isinstance(exc, httpx.ConnectError) or "no address associated" in lowered or "name or service not known" in lowered:
+        return "DNS resolution failed"
+    if isinstance(exc, httpx.TimeoutException) or "timed out" in lowered or "timeout" in lowered:
+        return "Request timed out"
+    if isinstance(exc, httpx.HTTPStatusError):
+        status_code = exc.response.status_code if exc.response is not None else None
+        return f"HTTP {status_code} error" if status_code else "HTTP error"
+    if isinstance(exc, httpx.TransportError):
+        return "Connection failed"
+    return text[:500] or exc.__class__.__name__
 
 
 def _search_request_timeout(config: WebSearchConfig) -> float:
@@ -1458,21 +1484,30 @@ async def _fetch_candidate_readable_text(candidate: WebSearchCandidate, config: 
                         continue
                     response.raise_for_status()
                     content_type = response.headers.get("content-type", "").lower()
-                    if content_type and not any(kind in content_type for kind in ("text/", "html", "xml", "json")):
+                    if not _readable_content_type(content_type):
                         return None
                     chunks: list[bytes] = []
                     total = 0
+                    truncated = False
                     async for chunk in response.aiter_bytes():
                         total += len(chunk)
                         if total > byte_limit:
-                            return None
+                            remaining = max(0, byte_limit - sum(len(item) for item in chunks))
+                            if remaining:
+                                chunks.append(chunk[:remaining])
+                            truncated = True
+                            break
                         chunks.append(chunk)
-                    raw = b"".join(chunks)
-                    encoding = response.encoding or "utf-8"
-                    title, content = _extract_readable_text(raw.decode(encoding, errors="replace"), content_type)
+                    title, content = _extract_readable_text(_decode_response_bytes(response, chunks), content_type)
                     if not content:
                         return await _fetch_with_jina_reader(candidate, config)
-                    return WebFetchResult(title=title or candidate.title, url=str(response.url), content=content)
+                    return WebFetchResult(
+                        title=title or candidate.title,
+                        url=str(response.url),
+                        content=content,
+                        partial=truncated,
+                        truncated=truncated,
+                    )
     except Exception:
         return await _fetch_with_jina_reader(candidate, config)
     return None
@@ -1873,35 +1908,59 @@ async def fetch_url(
     focus: Any = None,
 ) -> WebFetchResult:
     config = config or effective_web_search_config()
-    current_url = await _assert_public_http_url(url.strip())
+    try:
+        current_url = await _assert_public_http_url(url.strip())
+    except Exception as exc:
+        raise WebSearchError(_network_error_message(exc)) from exc
     effective_max_chars = _normalize_fetch_max_chars(max_chars, config)
     byte_limit = max(4096, config.fetch_max_chars * 4)
-    async with httpx.AsyncClient(timeout=config.fetch_timeout_seconds) as client:
-        for _ in range(4):
-            async with client.stream("GET", current_url, headers=_HEADERS, follow_redirects=False) as response:
-                if response.status_code in {301, 302, 303, 307, 308} and response.headers.get("location"):
-                    current_url = await _assert_public_http_url(urljoin(current_url, response.headers["location"]))
-                    continue
-                response.raise_for_status()
-                content_type = response.headers.get("content-type", "").lower()
-                if content_type and not any(kind in content_type for kind in ("text/", "html", "xml", "json")):
-                    raise WebSearchError("URL did not return readable text")
-                chunks: list[bytes] = []
-                total = 0
-                async for chunk in response.aiter_bytes():
-                    total += len(chunk)
-                    if total > byte_limit:
-                        raise WebSearchError("Fetched page is too large")
-                    chunks.append(chunk)
-                raw = b"".join(chunks)
-                encoding = response.encoding or "utf-8"
-                text = raw.decode(encoding, errors="replace")
-                title, content = _extract_readable_text(text, content_type)
-                return WebFetchResult(
-                    title=title or current_url,
-                    url=str(response.url),
-                    content=_focused_excerpt(content, focus, effective_max_chars),
-                )
+    try:
+        async with httpx.AsyncClient(timeout=config.fetch_timeout_seconds) as client:
+            for _ in range(4):
+                async with client.stream("GET", current_url, headers=_HEADERS, follow_redirects=False) as response:
+                    if response.status_code in {301, 302, 303, 307, 308} and response.headers.get("location"):
+                        try:
+                            current_url = await _assert_public_http_url(urljoin(current_url, response.headers["location"]))
+                        except Exception as exc:
+                            raise WebSearchError(_network_error_message(exc)) from exc
+                        continue
+                    response.raise_for_status()
+                    content_type = response.headers.get("content-type", "").lower()
+                    if not _readable_content_type(content_type):
+                        raise WebSearchError("URL did not return readable text")
+                    chunks: list[bytes] = []
+                    total = 0
+                    truncated = False
+                    async for chunk in response.aiter_bytes():
+                        total += len(chunk)
+                        if total > byte_limit:
+                            remaining = max(0, byte_limit - sum(len(item) for item in chunks))
+                            if remaining:
+                                chunks.append(chunk[:remaining])
+                            truncated = True
+                            break
+                        chunks.append(chunk)
+                    title, content = _extract_readable_text(_decode_response_bytes(response, chunks), content_type)
+                    if not content:
+                        candidate = WebSearchCandidate(title=current_url, url=current_url, snippet="", provider="fetch_url", rank=1)
+                        fallback = await _fetch_with_jina_reader(candidate, config)
+                        if fallback:
+                            fallback.partial = fallback.partial or truncated
+                            fallback.truncated = fallback.truncated or truncated
+                            fallback.content = _focused_excerpt(fallback.content, focus, effective_max_chars)
+                            return fallback
+                        raise WebSearchError("URL did not return readable text")
+                    return WebFetchResult(
+                        title=title or current_url,
+                        url=str(response.url),
+                        content=_focused_excerpt(content, focus, effective_max_chars),
+                        partial=truncated,
+                        truncated=truncated,
+                    )
+    except WebSearchError:
+        raise
+    except Exception as exc:
+        raise WebSearchError(_network_error_message(exc)) from exc
     raise WebSearchError("Too many redirects")
 
 
@@ -2210,7 +2269,19 @@ def format_search_results_for_context(query: str, payload: dict[str, Any]) -> st
         f"Status: {status}",
     ]
     if not payload.get("ok"):
-        lines.append(f"Error: {_compact_text(payload.get('error'), 300)}")
+        error = _compact_text(payload.get("error"), 300)
+        if payload.get("truncated") or payload.get("partial"):
+            lines.append("Note: fetched content was truncated to stay within the configured read limit.")
+        lines.append(f"Error: {error}")
+        return "\n".join(lines)
+
+    if payload.get("url") and payload.get("content"):
+        lines.append("Note: fetched content was truncated to stay within the configured read limit." if payload.get("truncated") or payload.get("partial") else "Fetched page excerpt:")
+        lines.append(f"URL: {_compact_text(payload.get('url'), 500)}")
+        title = _compact_text(payload.get("title"), 180)
+        if title:
+            lines.append(f"Title: {title}")
+        lines.append(_compact_text(payload.get("content"), 1000))
         return "\n".join(lines)
 
     results = payload.get("results")
