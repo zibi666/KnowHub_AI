@@ -672,12 +672,6 @@ function openSourceUrl(source: WebSearchSource) {
   window.open(url, '_blank', 'noopener,noreferrer')
 }
 
-function truncateSourceText(value: string, limit = 170) {
-  const chars = Array.from(value)
-  if (chars.length <= limit) return value
-  return `${chars.slice(0, limit).join('').replace(/[，。、；：,.:\s]+$/u, '')}...`
-}
-
 function cleanSourceText(value: unknown) {
   return String(value || '')
     .replace(/https?:\/\/\S+/gi, ' ')
@@ -704,7 +698,7 @@ function sourceSummaryText(source: WebSearchSource) {
     summary = summary.slice(title.length).replace(/^[\s:：,，。.-]+/u, '').trim()
   }
   if (!summary || summary === title) return ''
-  return truncateSourceText(summary)
+  return summary
 }
 
 function sourceDiagnostics(source: WebSearchSource) {
