@@ -2181,7 +2181,8 @@ def test_review_web_search_evidence_uses_current_model_low_reasoning_and_timeout
         assert "today AI news" in prompt
         assert "https://example.com/ai" in prompt
         assert "https://bad.example/ai" in prompt
-        assert "You may repeat or slightly vary a searched query" in prompt
+        assert "Repeat or slightly vary a searched keyword only when this round's results for that keyword were imprecise" in prompt
+        assert "If the keyword already returned precise useful evidence, do not repeat it." in prompt
 
     asyncio.run(run())
 

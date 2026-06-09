@@ -110,8 +110,10 @@ WEB_SEARCH_DEEP_REVIEW_POLICY = (
     "evidence_gaps (array of short strings), relevance_notes (array of short public notes), "
     "accuracy_notes (array of short public notes), stop_reason (short string), reason_codes (array of short strings). "
     "Judge Chinese relevance semantically; allow synonyms, abbreviations, translations, and headline rewrites. "
-    "You may repeat or slightly vary a previous query only when that direction still lacks enough independent, "
-    "body-level, official, or major-news evidence; explain that gap in evidence_gaps or relevance_notes. "
+    "Repeat or slightly vary a previous query only when this round's results for that exact keyword were imprecise, "
+    "noisy, off-target, stale, or lacked body-level evidence. If the searched keyword already returned precise "
+    "useful evidence, do not propose the same or a near-duplicate query again; explain any repeat-worthy gap in "
+    "evidence_gaps or relevance_notes. "
     "Prefer new URLs over refetching pages already read successfully, and do not retry URLs listed as failed. "
     "Do not include hidden reasoning or prose. Ask for more only when the current evidence is weak, stale, "
     "contradictory, clearly unrelated, or missing primary/major-news support."
@@ -1170,16 +1172,17 @@ async def review_web_search_evidence(
     if review_reasoning_effort == "low":
         action_policy = (
             "The user's current reasoning effort is LOW. Be conservative and cheap: prefer stopping with the "
-            "current evidence unless there is a clear evidence gap. You may repeat or slightly vary a searched "
-            "query when the latest search for that direction was weak, noisy, stale, or lacked body-level evidence. "
-            "If more work is required, propose at most one high-value query or one unread authoritative URL."
+            "current evidence unless there is a clear evidence gap. Repeat or slightly vary a searched keyword only "
+            "when this round's results for that keyword were imprecise, noisy, off-target, stale, or lacked "
+            "body-level evidence. If the keyword already returned precise useful evidence, do not repeat it. If more "
+            "work is required, propose at most one high-value query or one unread authoritative URL."
         )
     else:
         action_policy = (
-            "The user's current reasoning effort is not LOW. Repeating or slightly varying a previous query is "
-            "allowed only when the same information direction is still under-evidenced; name the missing body-level, "
-            "independent, official, or major-news support in evidence_gaps or relevance_notes. Prefer clearly new "
-            "angles and unread authoritative URLs."
+            "The user's current reasoning effort is not LOW. Repeat or slightly vary a searched keyword only when "
+            "this round's results for that keyword were imprecise, noisy, off-target, stale, or lacked body-level "
+            "evidence; name that repeat-worthy gap in evidence_gaps or relevance_notes. Prefer clearly new angles "
+            "and unread authoritative URLs when the previous keyword already returned precise useful evidence."
         )
     messages = [
         {"role": "system", "content": WEB_SEARCH_DEEP_REVIEW_POLICY},
