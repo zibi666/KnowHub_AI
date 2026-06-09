@@ -1095,7 +1095,7 @@ async def run_web_search_tool_loop(
     max_rounds = normalized_web_search_rounds(max_rounds)
     base_user_query = web_search_fallback_query(context)
     effective_depth = effective_search_depth(base_user_query, search_mode)
-    iterative_deep_search = search_mode == "deep"
+    iterative_deep_search = effective_depth == "deep"
     trace: dict = {
         "mode": search_mode,
         "effective_depth": effective_depth,
@@ -1207,8 +1207,9 @@ async def run_web_search_tool_loop(
         query = base_user_query
         if query:
             arguments = {"query": query}
-            if search_mode in {"fast", "deep"}:
-                arguments.update({"search_depth": effective_depth, "max_rounds": max_rounds})
+            arguments["search_depth"] = effective_depth
+            if effective_depth == "deep":
+                arguments["max_rounds"] = max_rounds
             executed_calls += 1
             await publish_conversation_event(
                 conversation_id,
@@ -1395,6 +1396,7 @@ async def run_web_search_tool_loop(
             ),
         )
     trace["source_count"] = len({getattr(source, "url", "") for source in sources if getattr(source, "url", "")})
+    trace["executed_rounds"] = max((int(event.get("round") or 0) for event in trace["events"]), default=0)
     if "early_stop" not in trace:
         trace["early_stop"] = False
     if "stop_reason" not in trace and executed_calls:

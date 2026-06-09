@@ -1674,6 +1674,154 @@ def test_deep_tool_loop_runs_until_requested_rounds_when_evidence_is_weak(monkey
     asyncio.run(run())
 
 
+def test_auto_tool_loop_uses_effective_deep_strategy_for_iterative_search(monkeypatch):
+    async def run():
+        executed = []
+        context = [{"role": "user", "content": "taiwan strait latest"}]
+
+        class FakeProvider:
+            async def tool_call_turn(self, **kwargs):
+                return ToolCallTurnResult(tool_calls=[], usage={"prompt_tokens": 1, "completion_tokens": 0, "total_tokens": 1})
+
+        def fake_config():
+            return WebSearchConfig(
+                enabled=True,
+                searxng_base_url="https://search.example.com/search",
+                result_count=3,
+                language="all",
+                safesearch="1",
+                timeout_seconds=5,
+                fetch_timeout_seconds=5,
+                max_tool_calls=4,
+                fetch_max_chars=4000,
+            )
+
+        async def fake_run_web_search_tool(name, arguments, config):
+            executed.append((name, dict(arguments)))
+            return {
+                "ok": True,
+                "results": [
+                    {
+                        "title": f"Weak Source {len(executed)}",
+                        "url": f"https://example.com/{len(executed)}",
+                        "snippet": "unconfirmed",
+                        "confidence": 0.3,
+                        "source_tier": "normal",
+                    }
+                ],
+            }
+
+        async def fake_review(**kwargs):
+            return (
+                {
+                    "needs_more": True,
+                    "new_queries": [f"taiwan strait corroboration {kwargs['round_index']}"],
+                    "urls_to_fetch": [],
+                    "evidence_gaps": ["needs independent corroboration"],
+                    "reason_codes": ["weak_sources"],
+                },
+                {"prompt_tokens": 1, "completion_tokens": 1, "total_tokens": 2},
+            )
+
+        monkeypatch.setattr(chat, "effective_web_search_config", fake_config)
+        monkeypatch.setattr(chat, "publish_conversation_event", lambda *args, **kwargs: asyncio.sleep(0))
+        monkeypatch.setattr(chat, "run_web_search_tool", fake_run_web_search_tool)
+        monkeypatch.setattr(chat, "review_web_search_evidence", fake_review)
+        monkeypatch.setattr(chat, "effective_search_depth", lambda query, mode: "deep")
+
+        sources, usage, trace = await chat.run_web_search_tool_loop(
+            provider=FakeProvider(),
+            api_key="sk-test",
+            model="gpt-5.5",
+            context=context,
+            conversation_id="conv-1",
+            assistant_message_id="msg-assistant",
+            reasoning_effort=None,
+            search_mode="auto",
+            max_rounds=3,
+        )
+
+        assert [item[0] for item in executed] == ["search_web", "search_web", "search_web"]
+        assert executed[0][1]["search_depth"] == "deep"
+        assert executed[0][1]["max_rounds"] == 3
+        assert trace["mode"] == "auto"
+        assert trace["effective_depth"] == "deep"
+        assert trace["executed_rounds"] == 3
+        assert usage["total_tokens"] == 5
+        assert len(sources) == 3
+        assert any(event.get("type") == "review" for event in trace["events"])
+
+    asyncio.run(run())
+
+
+def test_fast_tool_loop_does_not_enter_iterative_review(monkeypatch):
+    async def run():
+        executed = []
+        context = [{"role": "user", "content": "today AI news"}]
+
+        class FakeProvider:
+            async def tool_call_turn(self, **kwargs):
+                return ToolCallTurnResult(tool_calls=[], usage={"prompt_tokens": 1, "completion_tokens": 0, "total_tokens": 1})
+
+        def fake_config():
+            return WebSearchConfig(
+                enabled=True,
+                searxng_base_url="https://search.example.com/search",
+                result_count=3,
+                language="all",
+                safesearch="1",
+                timeout_seconds=5,
+                fetch_timeout_seconds=5,
+                max_tool_calls=3,
+                fetch_max_chars=4000,
+            )
+
+        async def fake_run_web_search_tool(name, arguments, config):
+            executed.append((name, dict(arguments)))
+            return {
+                "ok": True,
+                "results": [
+                    {
+                        "title": "Fast Source",
+                        "url": "https://example.com/fast",
+                        "snippet": "quick",
+                        "confidence": 0.3,
+                        "source_tier": "normal",
+                    }
+                ],
+            }
+
+        async def fail_review(**kwargs):
+            raise AssertionError("fast search should not review evidence")
+
+        monkeypatch.setattr(chat, "effective_web_search_config", fake_config)
+        monkeypatch.setattr(chat, "publish_conversation_event", lambda *args, **kwargs: asyncio.sleep(0))
+        monkeypatch.setattr(chat, "run_web_search_tool", fake_run_web_search_tool)
+        monkeypatch.setattr(chat, "review_web_search_evidence", fail_review)
+
+        sources, usage, trace = await chat.run_web_search_tool_loop(
+            provider=FakeProvider(),
+            api_key="sk-test",
+            model="gpt-5.5",
+            context=context,
+            conversation_id="conv-1",
+            assistant_message_id="msg-assistant",
+            reasoning_effort=None,
+            search_mode="fast",
+            max_rounds=3,
+        )
+
+        assert [item[0] for item in executed] == ["search_web"]
+        assert executed[0][1]["search_depth"] == "fast"
+        assert "max_rounds" not in executed[0][1]
+        assert trace["effective_depth"] == "fast"
+        assert trace["executed_rounds"] == 1
+        assert usage["total_tokens"] == 1
+        assert len(sources) == 1
+
+    asyncio.run(run())
+
+
 def test_deep_tool_loop_stops_early_when_ai_review_says_enough(monkeypatch):
     async def run():
         executed = []
@@ -2192,7 +2340,13 @@ def test_chat_job_runs_web_search_tool_and_saves_structured_sources(monkeypatch)
                 db.add(quota)
                 api_key = _key("user-1", group.id)
                 db.add(api_key)
-                conversation = Conversation(id="conv-1", user_id="user-1", title="test", web_search_enabled=True)
+                conversation = Conversation(
+                    id="conv-1",
+                    user_id="user-1",
+                    title="test",
+                    web_search_enabled=True,
+                    web_search_mode="fast",
+                )
                 user_message = Message(id="msg-user", user_id="user-1", conversation_id="conv-1", role="user", content="latest ai news", status="completed")
                 assistant = Message(
                     id="msg-assistant",
@@ -2321,7 +2475,13 @@ def test_chat_job_fallback_searches_time_sensitive_prompt_when_model_skips_tool(
                 db.add(quota)
                 api_key = _key("user-1", group.id)
                 db.add(api_key)
-                conversation = Conversation(id="conv-1", user_id="user-1", title="test", web_search_enabled=True)
+                conversation = Conversation(
+                    id="conv-1",
+                    user_id="user-1",
+                    title="test",
+                    web_search_enabled=True,
+                    web_search_mode="fast",
+                )
                 user_message = Message(id="msg-user", user_id="user-1", conversation_id="conv-1", role="user", content="今天 AI 新闻", status="completed")
                 assistant = Message(
                     id="msg-assistant",
@@ -2351,7 +2511,7 @@ def test_chat_job_fallback_searches_time_sensitive_prompt_when_model_skips_tool(
                 assert assistant.web_search_trace_json["events"][0]["phase"] == "auto_fallback"
                 assert assistant.total_tokens == 11
 
-            assert tool_queries == [("search_web", {"query": "今天 AI 新闻"})]
+            assert tool_queries == [("search_web", {"query": "今天 AI 新闻", "search_depth": "fast"})]
             assert any(event == "web_search_status" and data.get("phase") == "searching" for event, data in published_events)
             assert any("search_web" in str(item.get("content")) for item in final_messages["messages"] if item.get("role") == "user")
             assert any("[[1]]" in str(item.get("content")) for item in final_messages["messages"] if item.get("role") == "system")

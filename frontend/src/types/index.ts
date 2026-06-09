@@ -148,6 +148,8 @@ export interface WebSearchTrace {
   effectiveDepth?: string
   max_rounds?: number
   maxRounds?: number
+  executed_rounds?: number
+  executedRounds?: number
   source_count?: number
   sourceCount?: number
   early_stop?: boolean
