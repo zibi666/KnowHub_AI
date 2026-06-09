@@ -1218,14 +1218,12 @@ async def search_web(
     result_limit = _normalize_search_result_count(result_count, config)
     query_terms = _query_relevance_terms(clean_query)
     high_signal_query = _is_high_signal_query(query_terms, clean_query)
-    raw_candidates, successful_response, last_error = await _collect_search_candidates(
+    raw_candidates, _, _ = await _collect_search_candidates(
         clean_query,
         config,
         language=language,
         time_range=time_range,
     )
-    if not successful_response and last_error is not None:
-        raise last_error
     candidates = _dedupe_candidates(raw_candidates, query_terms, config)
     if high_signal_query:
         candidates = [

@@ -406,6 +406,47 @@ def test_search_web_collects_configured_searxng_engines_before_ranking(monkeypat
     asyncio.run(run())
 
 
+def test_search_web_returns_empty_results_when_providers_timeout(monkeypatch):
+    captured_engines = []
+
+    class FakeClient:
+        def __init__(self, *args, **kwargs):
+            pass
+
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, *args):
+            return None
+
+        async def get(self, *args, **kwargs):
+            captured_engines.append(kwargs["params"]["engines"])
+            raise web_search.httpx.ReadTimeout("search timed out")
+
+    async def run():
+        monkeypatch.setattr(web_search.httpx, "AsyncClient", FakeClient)
+        config = WebSearchConfig(
+            enabled=True,
+            searxng_base_url="https://search.example.com/search",
+            result_count=2,
+            language="all",
+            safesearch="1",
+            timeout_seconds=1,
+            fetch_timeout_seconds=5,
+            max_tool_calls=2,
+            fetch_max_chars=4000,
+            fetch_top_n=0,
+            rerank_enabled=False,
+        )
+
+        results = await search_web("test", config)
+
+        assert captured_engines == ["bing", "baidu"]
+        assert results == []
+
+    asyncio.run(run())
+
+
 def test_search_web_cools_down_unresponsive_engine(monkeypatch):
     captured_engines = []
     call_count = {"value": 0}
