@@ -691,6 +691,20 @@ function cleanSourceText(value: unknown) {
     .trim()
 }
 
+function isBadSourceSummary(value: string, title: string) {
+  if (!value) return true
+  const lowered = value.toLowerCase()
+  const cjkCount = (value.match(/[\u4e00-\u9fff]/gu) || []).length
+  if (cjkCount > 0 && cjkCount < 8) return true
+  if (/^\s*(?:var|let|const|function|window\.|document\.|return\b|[={\[])/iu.test(value)) return true
+  if (/(rightconfig|alldata|noffhflag|__next_data__|window\.__)/iu.test(value)) return true
+  if (/\b(?:tier|support|rerank|confidence|mode):/iu.test(value)) return true
+  if (/(节目官网|播放列表|正在播放|热播榜|新闻频道\s*>|政府信息公开|欢迎你@|收藏\s+播放)/u.test(value)) return true
+  const normalizedValue = value.toLowerCase().replace(/[\W_]+/gu, '')
+  const normalizedTitle = title.toLowerCase().replace(/[\W_]+/gu, '')
+  return Boolean(normalizedValue && normalizedTitle && normalizedTitle.includes(normalizedValue))
+}
+
 function sourcePublishedLabel(source: WebSearchSource) {
   const raw = String(source.publishedAt || source.published_at || '').trim()
   if (!raw) return ''
@@ -705,10 +719,15 @@ function sourceSummaryText(source: WebSearchSource) {
   const title = cleanSourceText(source.title)
   let summary = cleanSourceText(source.snippet)
   if (!summary) return ''
+  if (summary.includes('>')) {
+    const tail = summary.split('>').pop()?.trim() || ''
+    if ((tail.match(/[\u4e00-\u9fff]/gu) || []).length >= 8) summary = tail
+  }
   if (title && summary.toLowerCase().startsWith(title.toLowerCase())) {
     summary = summary.slice(title.length).replace(/^[\s:：,，。.-]+/u, '').trim()
   }
   if (!summary || summary === title) return ''
+  if (isBadSourceSummary(summary, title)) return ''
   const sentence = summary.match(/^.+?[。！？!?]|^.+?[.;；]/u)?.[0]?.trim()
   let compact = sentence || summary
   const limit = 96

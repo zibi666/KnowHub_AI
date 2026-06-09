@@ -2118,16 +2118,55 @@ def _source_favicon_url(url: str) -> str | None:
     return urlunsplit((parsed.scheme, parsed.netloc, "/favicon.ico", "", ""))
 
 
-def _display_source_snippet(source: WebSearchResult) -> str:
-    text = _compact_text(source.snippet, 360)
-    if not text:
-        text = _compact_text(source.evidence, 360)
-    if not text:
+def _source_summary_is_bad(text: str, title: str) -> bool:
+    compact = _compact_text(text, 500)
+    if not compact:
+        return True
+    lowered = compact.lower()
+    cjk_count = len(re.findall(r"[\u4e00-\u9fff]", compact))
+    if cjk_count and cjk_count < 8:
+        return True
+    if re.match(r"^\s*(?:var|let|const|function|window\.|document\.|return\b|[={\[])", compact, flags=re.I):
+        return True
+    if any(token in lowered for token in ("rightconfig", "alldata", "noffhflag", "__next_data__", "window.__")):
+        return True
+    if re.search(r"\b(?:tier|support|rerank|confidence|mode):", lowered):
+        return True
+    if re.search(r"(节目官网|播放列表|正在播放|热播榜|新闻频道\s*>|政府信息公开|欢迎你@|收藏\s+播放)", compact):
+        return True
+    normalized_text = re.sub(r"[\W_]+", "", compact.lower())
+    normalized_title = re.sub(r"[\W_]+", "", _compact_text(title, 260).lower())
+    if normalized_text and normalized_title and normalized_text in normalized_title:
+        return True
+    return False
+
+
+def _clean_source_summary_candidate(text: str, title: str) -> str:
+    value = _compact_text(text, 500)
+    if not value:
         return ""
-    title = _compact_text(source.title, 180)
-    if title and text.lower().startswith(title.lower()):
-        text = text[len(title):].lstrip(" \t\r\n:：,，。.-")
-    if not text or text == title:
+    value = re.sub(r"https?://\S+", " ", value, flags=re.I)
+    value = re.sub(r"\b(?:[a-z0-9-]+\.)+[a-z]{2,}(?:/[^\s，。；、]*)?", " ", value, flags=re.I)
+    value = _compact_text(value, 500)
+    if ">" in value:
+        tail = value.rsplit(">", 1)[-1].strip()
+        if len(re.findall(r"[\u4e00-\u9fff]", tail)) >= 8:
+            value = tail
+    title_text = _compact_text(title, 180)
+    if title_text and value.lower().startswith(title_text.lower()):
+        value = value[len(title_text):].lstrip(" \t\r\n:：,，。.-")
+    return _compact_text(value, 500)
+
+
+def _display_source_snippet(source: WebSearchResult, title: str | None = None) -> str:
+    title = _compact_text(title or source.title, 180)
+    text = ""
+    for candidate in (source.snippet, source.evidence):
+        candidate_text = _clean_source_summary_candidate(candidate, title)
+        if not _source_summary_is_bad(candidate_text, title):
+            text = candidate_text
+            break
+    if not text:
         return ""
     original_text = text
     match = re.search(r"^(.+?[。！？!?]|.+?[.;；])", text)
@@ -2235,7 +2274,7 @@ def structured_web_search_sources(sources: list[WebSearchResult], *, limit: int 
                 index=len(deduped) + 1,
                 title=title,
                 url=url,
-                snippet=_display_source_snippet(source),
+                snippet=_display_source_snippet(source, title),
                 evidence=_compact_text(source.evidence or source.snippet, 700),
                 site_name=_source_site_name(url),
                 published_at=source.published_at,

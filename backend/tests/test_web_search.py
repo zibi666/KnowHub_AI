@@ -139,6 +139,45 @@ def test_structured_sources_use_short_display_snippet_before_evidence():
     assert sources[0]["evidence"].startswith("var allData")
 
 
+def test_structured_sources_drop_script_navigation_and_diagnostic_summaries():
+    sources = structured_web_search_sources(
+        [
+            web_search.WebSearchResult(
+                title="回顾2025年台海局势、台湾政坛 严厉惩“独” 蓝白“倒赖”_腾讯新闻",
+                url="https://news.qq.com/a",
+                snippet='= {"rightConfig": {"foo": "bar"}}',
+            ),
+            web_search.WebSearchResult(
+                title="雁默：2025年的台海局势，是“退潮浪更高”的起点_凤凰网",
+                url="https://news.ifeng.com/a",
+                snippet='var allData = {"noffhFlag":["215401"]};',
+            ),
+            web_search.WebSearchResult(
+                title="国务院台办新闻发布会辑录（2025-11-26）",
+                url="https://gwytb.gov.cn/a",
+                snippet="具...",
+            ),
+            web_search.WebSearchResult(
+                title="[中国新闻]台海观察：“台独”逆流愈烈 统一洪流愈强",
+                url="https://tv.cctv.com/a",
+                snippet="节目官网 收藏 播放列表 正在播放 热播榜 正在播放 正在",
+            ),
+            web_search.WebSearchResult(
+                title="中国政府网_中央人民政府门户网站",
+                url="https://www.gov.cn/",
+                snippet="政府信息公开 惠企助企政策集纳查询 欢迎你@国务院...",
+            ),
+            web_search.WebSearchResult(
+                title="美国司令曾警告中方，并反对武装统一台湾，中国高志凯博士直白回应",
+                url="https://article.zlink.toutiao.com/a",
+                snippet="toutiao · 76% · tier:normal · support:high · rerank:fallback · ...",
+            ),
+        ]
+    )
+
+    assert all(not item.get("snippet") for item in sources)
+
+
 def test_cached_favicon_downloads_and_reuses_cache(monkeypatch, tmp_path):
     calls = {"count": 0}
 
