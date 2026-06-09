@@ -287,6 +287,8 @@ def test_search_web_parses_limits_and_dedupes_results(monkeypatch):
             fetch_timeout_seconds=5,
             max_tool_calls=2,
             fetch_max_chars=4000,
+            fetch_top_n=0,
+            rerank_enabled=False,
         )
         results = await search_web("test", config)
         assert [item.url for item in results] == ["https://example.com/a", "https://example.com/b"]
@@ -339,17 +341,19 @@ def test_search_web_prefers_bing_then_baidu_then_google(monkeypatch):
             fetch_timeout_seconds=5,
             max_tool_calls=2,
             fetch_max_chars=4000,
+            fetch_top_n=0,
+            rerank_enabled=False,
         )
 
         results = await search_web("test", config)
 
         assert captured_engines == ["bing", "baidu"]
-        assert [item.title for item in results] == ["Bing One", "Baidu Two"]
+        assert {item.title for item in results} == {"Bing One", "Baidu Two"}
 
     asyncio.run(run())
 
 
-def test_search_web_stops_after_bing_when_results_are_enough(monkeypatch):
+def test_search_web_collects_configured_searxng_engines_before_ranking(monkeypatch):
     captured_engines = []
 
     class FakeResponse:
@@ -390,11 +394,13 @@ def test_search_web_stops_after_bing_when_results_are_enough(monkeypatch):
             fetch_timeout_seconds=5,
             max_tool_calls=2,
             fetch_max_chars=4000,
+            fetch_top_n=0,
+            rerank_enabled=False,
         )
 
         results = await search_web("test", config)
 
-        assert captured_engines == ["bing"]
+        assert captured_engines == ["bing", "baidu"]
         assert [item.title for item in results] == ["Bing One", "Bing Two"]
 
     asyncio.run(run())
@@ -448,6 +454,8 @@ def test_search_web_cools_down_unresponsive_engine(monkeypatch):
             fetch_timeout_seconds=5,
             max_tool_calls=2,
             fetch_max_chars=4000,
+            fetch_top_n=0,
+            rerank_enabled=False,
         )
 
         first = await search_web("test", config)
@@ -459,6 +467,166 @@ def test_search_web_cools_down_unresponsive_engine(monkeypatch):
         assert call_count["value"] == 3
 
     asyncio.run(run())
+
+
+def test_search_web_fuses_bocha_and_jina_candidates(monkeypatch):
+    posts = []
+
+    class FakeResponse:
+        def __init__(self, url):
+            self.url = url
+
+        def raise_for_status(self):
+            return None
+
+        def json(self):
+            if "bocha" in self.url:
+                return {
+                    "data": {
+                        "webPages": {
+                            "value": [
+                                {
+                                    "name": "Bocha AI News",
+                                    "url": "https://bocha.example.com/ai",
+                                    "summary": "AI latest news",
+                                    "siteName": "Bocha",
+                                }
+                            ]
+                        }
+                    }
+                }
+            return {
+                "data": [
+                    {
+                        "title": "Jina AI News",
+                        "url": "https://jina.example.com/ai",
+                        "content": "AI current report",
+                    }
+                ]
+            }
+
+    class FakeClient:
+        def __init__(self, *args, **kwargs):
+            pass
+
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, *args):
+            return None
+
+        async def post(self, url, **kwargs):
+            posts.append(url)
+            return FakeResponse(url)
+
+    async def run():
+        monkeypatch.setattr(web_search.httpx, "AsyncClient", FakeClient)
+        config = WebSearchConfig(
+            enabled=True,
+            searxng_base_url=None,
+            result_count=5,
+            language="all",
+            safesearch="1",
+            timeout_seconds=5,
+            fetch_timeout_seconds=5,
+            max_tool_calls=2,
+            fetch_max_chars=4000,
+            provider_order=["bocha", "jina"],
+            bocha_api_key="bocha-key",
+            jina_api_key="jina-key",
+            fetch_top_n=0,
+            rerank_enabled=False,
+        )
+
+        results = await search_web("AI news", config)
+
+        assert any("bocha" in url for url in posts)
+        assert any("s.jina.ai" in url for url in posts)
+        assert {item.provider for item in results} == {"bocha", "jina"}
+
+    asyncio.run(run())
+
+
+def test_search_web_builds_evidence_and_marks_rerank_fallback(monkeypatch):
+    class FakeResponse:
+        def raise_for_status(self):
+            return None
+
+        def json(self):
+            return {"results": [{"title": "AI Report", "url": "https://example.com/ai", "content": "short"}]}
+
+    class FakeClient:
+        def __init__(self, *args, **kwargs):
+            pass
+
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, *args):
+            return None
+
+        async def get(self, *args, **kwargs):
+            return FakeResponse()
+
+    async def fake_fetch_candidate(candidate, config):
+        return web_search.WebFetchResult(
+            title="AI Report Full",
+            url=candidate.url,
+            content="AI policy update evidence. " * 80,
+        )
+
+    async def run():
+        monkeypatch.setattr(web_search.httpx, "AsyncClient", FakeClient)
+        monkeypatch.setattr(web_search, "_fetch_candidate_readable_text", fake_fetch_candidate)
+        monkeypatch.setattr(web_search, "_cross_encoder_scores", lambda *args, **kwargs: asyncio.sleep(0, result=None))
+        config = WebSearchConfig(
+            enabled=True,
+            searxng_base_url="https://search.example.com/search",
+            result_count=1,
+            language="all",
+            safesearch="1",
+            timeout_seconds=5,
+            fetch_timeout_seconds=5,
+            max_tool_calls=2,
+            fetch_max_chars=4000,
+            fetch_top_n=1,
+            chunk_size=300,
+            chunk_overlap=50,
+            rerank_enabled=True,
+        )
+
+        results = await search_web("AI policy update", config)
+
+        assert len(results) == 1
+        assert results[0].title == "AI Report Full"
+        assert "AI policy update evidence" in results[0].evidence
+        assert results[0].rerank_status == "fallback"
+        assert results[0].confidence is not None
+
+    asyncio.run(run())
+
+
+def test_save_web_search_settings_does_not_persist_provider_secrets(monkeypatch):
+    saved = {}
+
+    monkeypatch.setattr(web_search, "load_runtime_settings", lambda: {})
+    monkeypatch.setattr(web_search, "save_runtime_settings", lambda data: saved.update(data))
+    monkeypatch.setattr(web_search, "effective_web_search_config", lambda: WebSearchConfig(
+        enabled=True,
+        searxng_base_url="https://search.example.com/search",
+        result_count=5,
+        language="all",
+        safesearch="1",
+        timeout_seconds=20,
+        fetch_timeout_seconds=20,
+        max_tool_calls=4,
+        fetch_max_chars=12000,
+    ))
+
+    web_search.save_web_search_settings({"enabled": True, "bocha_api_key": "secret", "provider_order": ["bocha"]})
+
+    assert "bocha_api_key" not in saved["web_search"]
+    assert saved["web_search"]["provider_order"] == ["bocha"]
 
 
 def test_web_search_tools_include_agentic_parameters():
@@ -577,13 +745,15 @@ def test_search_web_clamps_count_and_passes_language_time_range(monkeypatch):
             fetch_timeout_seconds=5,
             max_tool_calls=2,
             fetch_max_chars=4000,
+            fetch_top_n=0,
+            rerank_enabled=False,
         )
         results = await search_web("example", config, result_count=99, language="zh-CN", time_range="week")
 
         assert len(results) == 2
         assert captured["params"]["language"] == "zh-CN"
         assert captured["params"]["time_range"] == "week"
-        assert captured["params"]["engines"] == "bing"
+        assert captured["params"]["engines"] in {"bing", "baidu"}
 
     asyncio.run(run())
 
@@ -626,6 +796,8 @@ def test_search_web_filters_unrelated_chinese_results_without_fallback(monkeypat
             fetch_timeout_seconds=5,
             max_tool_calls=2,
             fetch_max_chars=4000,
+            fetch_top_n=0,
+            rerank_enabled=False,
         )
         assert await search_web("张雪峰老师死了吗", config) == []
 
@@ -670,6 +842,8 @@ def test_search_web_skips_low_value_sources_for_high_signal_chinese_queries(monk
             fetch_timeout_seconds=5,
             max_tool_calls=2,
             fetch_max_chars=4000,
+            fetch_top_n=0,
+            rerank_enabled=False,
         )
         results = await search_web("张雪峰老师死了吗", config)
         assert [item.url for item in results] == ["https://news.example.com/story"]

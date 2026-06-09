@@ -88,6 +88,32 @@ export interface WebSearchSettings {
   max_tool_calls?: number
   fetchMaxChars: number
   fetch_max_chars?: number
+  providerOrder: string[]
+  provider_order?: string[]
+  searxngEngines: string[]
+  searxng_engines?: string[]
+  candidateCount: number
+  candidate_count?: number
+  fetchTopN: number
+  fetch_top_n?: number
+  chunkSize: number
+  chunk_size?: number
+  chunkOverlap: number
+  chunk_overlap?: number
+  maxEvidenceChunks: number
+  max_evidence_chunks?: number
+  rerankEnabled: boolean
+  rerank_enabled?: boolean
+  rerankerModel: string
+  reranker_model?: string
+  minRelevanceScore: number
+  min_relevance_score?: number
+  trustedDomains: string[]
+  trusted_domains?: string[]
+  blockedDomains: string[]
+  blocked_domains?: string[]
+  providerStatus?: Record<string, boolean>
+  provider_status?: Record<string, boolean>
 }
 
 export interface SendMessageResponse {

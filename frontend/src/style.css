@@ -1455,6 +1455,41 @@ body,
   border-color: var(--bubble-bg);
 }
 
+.settings-textarea {
+  width: 100%;
+  min-height: 4.5rem;
+  resize: vertical;
+  border: 1px solid var(--input-border);
+  border-radius: 10px;
+  background: var(--input-bg);
+  color: var(--text);
+  outline: none;
+  padding: 0.55rem 0.75rem;
+  font: inherit;
+}
+
+.settings-textarea:focus {
+  border-color: var(--bubble-bg);
+}
+
+.settings-provider-status {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.4rem;
+}
+
+.settings-provider-status span {
+  border: 1px solid var(--line);
+  border-radius: 999px;
+  color: var(--muted);
+  padding: 0.24rem 0.55rem;
+}
+
+.settings-provider-status span.active {
+  border-color: color-mix(in srgb, var(--success, #15803d) 40%, var(--line));
+  color: var(--success, #15803d);
+}
+
 .settings-card {
   display: grid;
   gap: 0.85rem;
@@ -1511,6 +1546,11 @@ body,
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
+}
+
+.settings-web-results small {
+  color: var(--muted);
+  font-size: 0.75rem;
 }
 
 .settings-api-heading {

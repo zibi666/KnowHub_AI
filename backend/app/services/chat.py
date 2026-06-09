@@ -504,7 +504,17 @@ def inject_web_search_policy(context: list[dict]) -> None:
 
 def inject_web_search_final_answer_context(context: list[dict], sources: list[dict]) -> None:
     if not sources:
+        context.append(
+            {
+                "role": "system",
+                "content": (
+                    "Web search was enabled, but no sufficiently relevant evidence passed the quality threshold. "
+                    "Do not present uncertain or time-sensitive claims as confirmed; say that the search results were insufficient."
+                ),
+            }
+        )
         return
+    high_confidence_count = sum(1 for source in sources if float(source.get("confidence") or 0) >= 0.5)
     lines = [
         "Web search sources for the final answer:",
         "Use the exact source numbers below for inline citations, for example [[1]] or [[2]].",
@@ -514,6 +524,8 @@ def inject_web_search_final_answer_context(context: list[dict], sources: list[di
         "Never add a citation marker just to satisfy formatting.",
         "Do not append a separate markdown source list.",
     ]
+    if high_confidence_count < 2:
+        lines.append("Fewer than two high-confidence sources were found; avoid definitive conclusions for contested or time-sensitive claims.")
     for source in sources[:10]:
         index = int(source.get("index") or 0)
         title = str(source.get("title") or source.get("url") or "").strip()
@@ -523,8 +535,10 @@ def inject_web_search_final_answer_context(context: list[dict], sources: list[di
             continue
         lines.append(f"[[{index}]] {title}")
         lines.append(f"URL: {url}")
+        if source.get("provider") or source.get("confidence") is not None:
+            lines.append(f"Meta: provider={source.get('provider') or 'unknown'}, confidence={source.get('confidence') or 'unknown'}")
         if snippet:
-            lines.append(f"Snippet: {snippet[:700]}")
+            lines.append(f"Evidence: {snippet[:700]}")
     context.append({"role": "system", "content": "\n".join(lines)})
 
 

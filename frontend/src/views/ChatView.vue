@@ -303,7 +303,7 @@ const webSearchSettingsLoading = ref(false)
 const webSearchSettingsSaving = ref(false)
 const webSearchTesting = ref(false)
 const webSearchTestQuery = ref('')
-const webSearchTestResults = ref<Array<{ title: string; url: string; snippet?: string }>>([])
+const webSearchTestResults = ref<Array<{ title: string; url: string; snippet?: string; evidence?: string; provider?: string; confidence?: number; rerankStatus?: string; rerank_status?: string }>>([])
 const webSearchSettings = ref<WebSearchSettings>({
   enabled: false,
   searxngBaseUrl: '',
@@ -313,7 +313,20 @@ const webSearchSettings = ref<WebSearchSettings>({
   timeoutSeconds: 20,
   fetchTimeoutSeconds: 20,
   maxToolCalls: 4,
-  fetchMaxChars: 12000
+  fetchMaxChars: 12000,
+  providerOrder: ['searxng', 'bocha', 'sougou', 'jina'],
+  searxngEngines: ['bing', 'baidu'],
+  candidateCount: 20,
+  fetchTopN: 5,
+  chunkSize: 900,
+  chunkOverlap: 120,
+  maxEvidenceChunks: 8,
+  rerankEnabled: true,
+  rerankerModel: 'BAAI/bge-reranker-v2-m3',
+  minRelevanceScore: 0.35,
+  trustedDomains: [],
+  blockedDomains: [],
+  providerStatus: {}
 })
 
 let scrollFrame: number | null = null
@@ -781,6 +794,32 @@ function normalizeImageSettings(data: any): ImageGenerationSettings {
   }
 }
 
+function normalizeListSetting(value: any, fallback: string[] = []): string[] {
+  if (Array.isArray(value)) {
+    return value.map((item) => String(item || '').trim()).filter(Boolean)
+  }
+  if (typeof value === 'string') {
+    return value.split(/[\n,]/).map((item) => item.trim()).filter(Boolean)
+  }
+  return [...fallback]
+}
+
+function listSettingText(value: any): string {
+  return normalizeListSetting(value).join(', ')
+}
+
+function webSearchSettingsPayload(settings: WebSearchSettings) {
+  return {
+    ...settings,
+    providerOrder: normalizeListSetting(settings.providerOrder),
+    searxngEngines: normalizeListSetting(settings.searxngEngines),
+    trustedDomains: normalizeListSetting(settings.trustedDomains),
+    blockedDomains: normalizeListSetting(settings.blockedDomains),
+    providerStatus: undefined,
+    provider_status: undefined
+  }
+}
+
 function normalizeWebSearchSettings(data: any): WebSearchSettings {
   return {
     enabled: Boolean(data?.enabled),
@@ -791,7 +830,20 @@ function normalizeWebSearchSettings(data: any): WebSearchSettings {
     timeoutSeconds: Number(data?.timeoutSeconds ?? data?.timeout_seconds ?? 20),
     fetchTimeoutSeconds: Number(data?.fetchTimeoutSeconds ?? data?.fetch_timeout_seconds ?? 20),
     maxToolCalls: Number(data?.maxToolCalls ?? data?.max_tool_calls ?? 4),
-    fetchMaxChars: Number(data?.fetchMaxChars ?? data?.fetch_max_chars ?? 12000)
+    fetchMaxChars: Number(data?.fetchMaxChars ?? data?.fetch_max_chars ?? 12000),
+    providerOrder: normalizeListSetting(data?.providerOrder ?? data?.provider_order, ['searxng', 'bocha', 'sougou', 'jina']),
+    searxngEngines: normalizeListSetting(data?.searxngEngines ?? data?.searxng_engines, ['bing', 'baidu']),
+    candidateCount: Number(data?.candidateCount ?? data?.candidate_count ?? 20),
+    fetchTopN: Number(data?.fetchTopN ?? data?.fetch_top_n ?? 5),
+    chunkSize: Number(data?.chunkSize ?? data?.chunk_size ?? 900),
+    chunkOverlap: Number(data?.chunkOverlap ?? data?.chunk_overlap ?? 120),
+    maxEvidenceChunks: Number(data?.maxEvidenceChunks ?? data?.max_evidence_chunks ?? 8),
+    rerankEnabled: Boolean(data?.rerankEnabled ?? data?.rerank_enabled ?? true),
+    rerankerModel: data?.rerankerModel ?? data?.reranker_model ?? 'BAAI/bge-reranker-v2-m3',
+    minRelevanceScore: Number(data?.minRelevanceScore ?? data?.min_relevance_score ?? 0.35),
+    trustedDomains: normalizeListSetting(data?.trustedDomains ?? data?.trusted_domains),
+    blockedDomains: normalizeListSetting(data?.blockedDomains ?? data?.blocked_domains),
+    providerStatus: data?.providerStatus ?? data?.provider_status ?? {}
   }
 }
 
@@ -1634,7 +1686,7 @@ async function saveWebSearchSettings() {
   try {
     webSearchSettings.value = normalizeWebSearchSettings(await apiFetch('/admin/settings/web-search', {
       method: 'PATCH',
-      body: JSON.stringify(webSearchSettings.value)
+      body: JSON.stringify(webSearchSettingsPayload(webSearchSettings.value))
     }))
     settingsNotice.value = '联网搜索设置已保存'
     await loadWebSearchStatus()
@@ -1650,7 +1702,7 @@ async function testWebSearchSettings() {
   webSearchTesting.value = true
   webSearchTestResults.value = []
   try {
-    const result = await apiFetch<{ results: Array<{ title: string; url: string; snippet?: string }> }>('/admin/settings/web-search/test', {
+    const result = await apiFetch<{ results: Array<{ title: string; url: string; snippet?: string; evidence?: string; provider?: string; confidence?: number; rerankStatus?: string; rerank_status?: string }> }>('/admin/settings/web-search/test', {
       method: 'POST',
       body: JSON.stringify({ query: webSearchTestQuery.value.trim() || 'OpenAI news' })
     })
@@ -4325,9 +4377,29 @@ onUnmounted(() => {
                       <span>SearXNG URL</span>
                       <input v-model="webSearchSettings.searxngBaseUrl" class="settings-input" placeholder="https://searxng.example.com/search" />
                     </label>
+                    <label class="settings-field settings-field-wide">
+                      <span>搜索源顺序</span>
+                      <input :value="listSettingText(webSearchSettings.providerOrder)" class="settings-input" placeholder="searxng, bocha, sougou, jina" @input="webSearchSettings.providerOrder = normalizeListSetting(($event.target as HTMLInputElement).value)" />
+                    </label>
+                    <label class="settings-field settings-field-wide">
+                      <span>SearXNG 引擎</span>
+                      <input :value="listSettingText(webSearchSettings.searxngEngines)" class="settings-input" placeholder="bing, baidu" @input="webSearchSettings.searxngEngines = normalizeListSetting(($event.target as HTMLInputElement).value)" />
+                    </label>
+                    <div class="settings-field settings-field-wide">
+                      <span>搜索源状态</span>
+                      <div class="settings-provider-status">
+                        <span v-for="provider in ['searxng', 'bocha', 'sougou', 'jina', 'serper']" :key="provider" :class="{ active: webSearchSettings.providerStatus?.[provider] }">
+                          {{ provider }} {{ webSearchSettings.providerStatus?.[provider] ? '已配置' : '未配置' }}
+                        </span>
+                      </div>
+                    </div>
                     <label class="settings-field">
                       <span>结果数</span>
                       <input v-model.number="webSearchSettings.resultCount" class="settings-input" type="number" min="1" max="10" />
+                    </label>
+                    <label class="settings-field">
+                      <span>候选数</span>
+                      <input v-model.number="webSearchSettings.candidateCount" class="settings-input" type="number" min="3" max="50" />
                     </label>
                     <label class="settings-field">
                       <span>语言</span>
@@ -4353,6 +4425,42 @@ onUnmounted(() => {
                       <span>网页最大字符数</span>
                       <input v-model.number="webSearchSettings.fetchMaxChars" class="settings-input" type="number" min="1000" max="50000" />
                     </label>
+                    <label class="settings-field">
+                      <span>正文读取页数</span>
+                      <input v-model.number="webSearchSettings.fetchTopN" class="settings-input" type="number" min="0" max="10" />
+                    </label>
+                    <label class="settings-field">
+                      <span>切块大小</span>
+                      <input v-model.number="webSearchSettings.chunkSize" class="settings-input" type="number" min="300" max="3000" />
+                    </label>
+                    <label class="settings-field">
+                      <span>切块重叠</span>
+                      <input v-model.number="webSearchSettings.chunkOverlap" class="settings-input" type="number" min="0" max="1000" />
+                    </label>
+                    <label class="settings-field">
+                      <span>证据片段数</span>
+                      <input v-model.number="webSearchSettings.maxEvidenceChunks" class="settings-input" type="number" min="1" max="20" />
+                    </label>
+                    <label class="settings-field">
+                      <span>最低相关度</span>
+                      <input v-model.number="webSearchSettings.minRelevanceScore" class="settings-input" type="number" min="0" max="1" step="0.05" />
+                    </label>
+                    <label class="settings-check">
+                      <input v-model="webSearchSettings.rerankEnabled" type="checkbox" />
+                      启用本地重排
+                    </label>
+                    <label class="settings-field settings-field-wide">
+                      <span>重排模型</span>
+                      <input v-model="webSearchSettings.rerankerModel" class="settings-input" placeholder="BAAI/bge-reranker-v2-m3" />
+                    </label>
+                    <label class="settings-field settings-field-wide">
+                      <span>可信域名</span>
+                      <textarea :value="listSettingText(webSearchSettings.trustedDomains)" class="settings-textarea" rows="2" placeholder="news.example.com, gov.cn" @input="webSearchSettings.trustedDomains = normalizeListSetting(($event.target as HTMLTextAreaElement).value)"></textarea>
+                    </label>
+                    <label class="settings-field settings-field-wide">
+                      <span>屏蔽域名</span>
+                      <textarea :value="listSettingText(webSearchSettings.blockedDomains)" class="settings-textarea" rows="2" placeholder="example.com, low-quality.example" @input="webSearchSettings.blockedDomains = normalizeListSetting(($event.target as HTMLTextAreaElement).value)"></textarea>
+                    </label>
                   </div>
                   <div class="settings-api-card-footer">
                     <button class="settings-primary" type="submit" :disabled="webSearchSettingsLoading || webSearchSettingsSaving">
@@ -4376,7 +4484,12 @@ onUnmounted(() => {
                   <div v-if="webSearchTestResults.length" class="settings-web-results">
                     <a v-for="item in webSearchTestResults" :key="item.url" :href="item.url" target="_blank" rel="noreferrer">
                       <strong>{{ item.title || item.url }}</strong>
-                      <span>{{ item.snippet || item.url }}</span>
+                      <small>
+                        {{ item.provider || 'source' }}
+                        <template v-if="typeof item.confidence === 'number'"> · {{ Math.round(item.confidence * 100) }}%</template>
+                        <template v-if="item.rerankStatus || item.rerank_status"> · {{ item.rerankStatus || item.rerank_status }}</template>
+                      </small>
+                      <span>{{ item.evidence || item.snippet || item.url }}</span>
                     </a>
                   </div>
                 </form>
