@@ -62,6 +62,9 @@ async def ensure_lightweight_migrations(conn) -> None:
         result = await conn.execute(text("SHOW COLUMNS FROM messages LIKE 'web_search_sources_json'"))
         if result.first() is None:
             await conn.execute(text("ALTER TABLE messages ADD COLUMN web_search_sources_json JSON NULL"))
+        result = await conn.execute(text("SHOW COLUMNS FROM messages LIKE 'web_search_trace_json'"))
+        if result.first() is None:
+            await conn.execute(text("ALTER TABLE messages ADD COLUMN web_search_trace_json JSON NULL"))
         result = await conn.execute(text("SHOW COLUMNS FROM api_key_groups LIKE 'purpose'"))
         if result.first() is None:
             await conn.execute(text("ALTER TABLE api_key_groups ADD COLUMN purpose VARCHAR(20) NOT NULL DEFAULT 'none'"))
@@ -77,6 +80,12 @@ async def ensure_lightweight_migrations(conn) -> None:
         result = await conn.execute(text("SHOW COLUMNS FROM conversations LIKE 'web_search_enabled'"))
         if result.first() is None:
             await conn.execute(text("ALTER TABLE conversations ADD COLUMN web_search_enabled BOOLEAN NOT NULL DEFAULT FALSE"))
+        result = await conn.execute(text("SHOW COLUMNS FROM conversations LIKE 'web_search_mode'"))
+        if result.first() is None:
+            await conn.execute(text("ALTER TABLE conversations ADD COLUMN web_search_mode VARCHAR(20) NOT NULL DEFAULT 'auto'"))
+        result = await conn.execute(text("SHOW COLUMNS FROM conversations LIKE 'web_search_max_rounds'"))
+        if result.first() is None:
+            await conn.execute(text("ALTER TABLE conversations ADD COLUMN web_search_max_rounds INT NOT NULL DEFAULT 3"))
         return
 
     if settings.database_url.startswith("sqlite"):
@@ -98,6 +107,8 @@ async def ensure_lightweight_migrations(conn) -> None:
             await conn.execute(text("ALTER TABLE messages ADD COLUMN first_token_seconds INTEGER"))
         if "web_search_sources_json" not in existing_messages:
             await conn.execute(text("ALTER TABLE messages ADD COLUMN web_search_sources_json JSON"))
+        if "web_search_trace_json" not in existing_messages:
+            await conn.execute(text("ALTER TABLE messages ADD COLUMN web_search_trace_json JSON"))
         result = await conn.execute(text("PRAGMA table_info(api_key_groups)"))
         existing_groups = {row[1] for row in result.fetchall()}
         if "purpose" not in existing_groups:
@@ -114,3 +125,7 @@ async def ensure_lightweight_migrations(conn) -> None:
         existing_conversations = {row[1] for row in result.fetchall()}
         if "web_search_enabled" not in existing_conversations:
             await conn.execute(text("ALTER TABLE conversations ADD COLUMN web_search_enabled BOOLEAN NOT NULL DEFAULT 0"))
+        if "web_search_mode" not in existing_conversations:
+            await conn.execute(text("ALTER TABLE conversations ADD COLUMN web_search_mode VARCHAR(20) NOT NULL DEFAULT 'auto'"))
+        if "web_search_max_rounds" not in existing_conversations:
+            await conn.execute(text("ALTER TABLE conversations ADD COLUMN web_search_max_rounds INTEGER NOT NULL DEFAULT 3"))

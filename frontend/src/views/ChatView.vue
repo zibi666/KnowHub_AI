@@ -21,12 +21,16 @@ import type {
   ModelEndpoint,
   SendMessageResponse,
   User,
+  WebSearchMode,
   WebSearchSettings,
   WebSearchSource,
-  WebSearchStatus
+  WebSearchStatus,
+  WebSearchTrace,
+  WebSearchTraceEvent,
+  WebSearchTraceSource
 } from '../types'
 import { copyText } from '../utils/clipboard'
-import { sourceOpenUrl, sourceSiteName } from '../utils/sources'
+import { messageWebSearchSources, sourceOpenUrl, sourceSiteName } from '../utils/sources'
 
 type ThemeMode = 'dark' | 'light'
 type SettingsTab = 'appearance' | 'image' | 'web' | 'api' | 'groups' | 'account'
@@ -72,9 +76,10 @@ const REASONING_STORAGE_KEY = 'private-gpt-reasoning-effort'
 const SIDEBAR_STORAGE_KEY = 'private-gpt-sidebar-collapsed'
 const WELCOME_STORAGE_KEY = 'private-gpt-welcome-message'
 const WELCOME_SIZE_STORAGE_KEY = 'private-gpt-welcome-font-size'
-const CURRENT_CONVERSATION_STORAGE_KEY = 'private-gpt-current-conversation'
+const LEGACY_CURRENT_CONVERSATION_STORAGE_KEY = 'private-gpt-current-conversation'
 const FILE_TREE_PIN_STORAGE_KEY = 'private-gpt-file-tree-pinned'
 const IMAGE_FINALIZATION_MIN_MS = 800
+const WEB_SEARCH_MAX_ROUNDS = 10
 const ATTACHMENT_IMAGE_MAX_EDGE = 1920
 const ATTACHMENT_IMAGE_QUALITY = 0.82
 const ATTACHMENT_IMAGE_MIN_COMPRESS_BYTES = 450 * 1024
@@ -174,6 +179,8 @@ const reindexingAttachment = ref(false)
 const sourceDrawerOpen = ref(false)
 const sourceDrawerMessageId = ref<string | null>(null)
 const sourceDrawerSources = ref<WebSearchSource[]>([])
+const searchTraceOpen = ref(false)
+const searchTraceMessage = ref<Message | null>(null)
 const error = ref('')
 const contextStats = ref({
   promptTokensEstimated: 0,
@@ -298,22 +305,60 @@ const imageSettings = ref<ImageGenerationSettings>({
   moderation: 'auto'
 })
 const webSearchEnabled = ref(false)
+const webSearchMode = ref<WebSearchMode>('auto')
+const webSearchMaxRounds = ref(3)
+const webSearchModeDialogOpen = ref(false)
+const webSearchModeDraft = ref<WebSearchMode>('auto')
+const webSearchRoundDraft = ref(3)
 const webSearchStatus = ref<WebSearchStatus>({ enabled: false, configured: false })
 const webSearchSettingsLoading = ref(false)
 const webSearchSettingsSaving = ref(false)
 const webSearchTesting = ref(false)
 const webSearchTestQuery = ref('')
-const webSearchTestResults = ref<Array<{ title: string; url: string; snippet?: string }>>([])
+const webSearchTestResults = ref<Array<{
+  title: string
+  url: string
+  snippet?: string
+  evidence?: string
+  provider?: string
+  confidence?: number
+  rerankStatus?: string
+  rerank_status?: string
+  sourceTier?: string
+  source_tier?: string
+  matchedTerms?: string[]
+  matched_terms?: string[]
+  supportLevel?: string
+  support_level?: string
+  searchDepth?: string
+  search_depth?: string
+  degraded?: boolean
+  filterReason?: string
+  filter_reason?: string
+}>>([])
 const webSearchSettings = ref<WebSearchSettings>({
   enabled: false,
   searxngBaseUrl: '',
-  resultCount: 5,
+  resultCount: 30,
   language: 'all',
   safesearch: '1',
   timeoutSeconds: 20,
   fetchTimeoutSeconds: 20,
-  maxToolCalls: 4,
-  fetchMaxChars: 12000
+  maxToolCalls: 20,
+  fetchMaxChars: 12000,
+  providerOrder: ['bocha', 'sougou', 'jina', 'searxng', 'direct', 'serper'],
+  searxngEngines: ['bing', 'baidu'],
+  candidateCount: 20,
+  fetchTopN: 5,
+  chunkSize: 900,
+  chunkOverlap: 120,
+  maxEvidenceChunks: 8,
+  rerankEnabled: true,
+  rerankerModel: 'BAAI/bge-reranker-v2-m3',
+  minRelevanceScore: 0.35,
+  trustedDomains: [],
+  blockedDomains: [],
+  providerStatus: {}
 })
 
 let scrollFrame: number | null = null
@@ -339,8 +384,14 @@ const webSearchAvailable = computed(() => webSearchStatus.value.enabled && webSe
 const webSearchToggleDisabled = computed(() => currentConversationStreaming.value || (!webSearchEnabled.value && !webSearchAvailable.value))
 const webSearchToggleLabel = computed(() => {
   if (currentConversationStreaming.value) return '生成中无法切换联网搜索'
-  if (webSearchEnabled.value) return webSearchAvailable.value ? '关闭联网搜索' : '关闭联网搜索（当前全局不可用）'
+  if (webSearchEnabled.value) return webSearchAvailable.value ? '管理联网搜索' : '管理联网搜索（当前全局不可用）'
   return webSearchAvailable.value ? '开启联网搜索' : '联网搜索未配置'
+})
+const webSearchModeText = computed(() => {
+  if (!webSearchEnabled.value) return ''
+  if (webSearchMode.value === 'deep') return `深搜 ${webSearchMaxRounds.value}轮`
+  if (webSearchMode.value === 'fast') return '快速'
+  return '自动'
 })
 const activeFileTreeAttachments = computed(() => (currentId.value ? conversationAttachments.value : draftConversationAttachments.value))
 const selectedFileTreeAttachments = computed(() => activeFileTreeAttachments.value.filter((item) => item.selected))
@@ -447,16 +498,217 @@ function closeWebSearchSources() {
   sourceDrawerOpen.value = false
 }
 
+function traceList(value: unknown): string[] {
+  if (!Array.isArray(value)) return []
+  return value
+    .map((item) => String(item || '').trim())
+    .filter(Boolean)
+    .slice(0, 8)
+}
+
+function traceNumber(value: unknown): number | null {
+  const numberValue = Number(value)
+  return Number.isFinite(numberValue) ? numberValue : null
+}
+
+function messageSearchTrace(message: Message | null): WebSearchTrace | null {
+  const trace = message?.webSearchTrace || message?.web_search_trace || null
+  if (trace?.events?.length) return trace
+  const sources = message ? messageWebSearchSources(message) : []
+  if (!sources.length) return trace
+  return {
+    mode: 'legacy',
+    source_count: sources.length,
+    stop_reason: '旧消息没有保存搜索过程，仅显示已保存的来源列表。',
+    events: [
+      {
+        round: 1,
+        phase: 'sources',
+        type: 'search',
+        ok: true,
+        result_count: sources.length,
+        sources: sources.map((source) => ({
+          title: source.title,
+          url: source.url,
+          provider: source.provider,
+          confidence: source.confidence,
+          sourceTier: source.sourceTier || source.source_tier,
+          supportLevel: source.supportLevel || source.support_level,
+          searchDepth: source.searchDepth || source.search_depth,
+          degraded: source.degraded,
+          filterReason: source.filterReason || source.filter_reason
+        }))
+      }
+    ]
+  }
+}
+
+const activeSearchTrace = computed(() => messageSearchTrace(searchTraceMessage.value))
+const activeSearchTraceEvents = computed(() => activeSearchTrace.value?.events || [])
+
+function syncMessageSearchTrace(message: Message, data: any) {
+  if (!Object.prototype.hasOwnProperty.call(data || {}, 'web_search_trace') && !Object.prototype.hasOwnProperty.call(data || {}, 'webSearchTrace')) return
+  const trace = data.web_search_trace ?? data.webSearchTrace ?? null
+  message.webSearchTrace = trace
+  message.web_search_trace = trace
+}
+
+function openWebSearchTrace(message: Message) {
+  searchTraceMessage.value = message
+  searchTraceOpen.value = true
+}
+
+function closeWebSearchTrace() {
+  searchTraceOpen.value = false
+}
+
+function webSearchTraceModeLabel(trace: WebSearchTrace | null) {
+  const mode = String(trace?.mode || '').toLowerCase()
+  if (mode === 'deep') return '深度优先'
+  if (mode === 'fast') return '快速回答'
+  if (mode === 'auto') return '自动'
+  if (mode === 'legacy') return '旧消息来源'
+  return mode || '联网搜索'
+}
+
+function webSearchTraceDepthLabel(trace: WebSearchTrace | null) {
+  const depth = String(trace?.effective_depth || trace?.effectiveDepth || '').toLowerCase()
+  if (depth === 'deep') return '深搜'
+  if (depth === 'fast') return '快搜'
+  return depth
+}
+
+function webSearchTraceSummary(trace: WebSearchTrace | null) {
+  if (!trace) return []
+  const items = [`模式：${webSearchTraceModeLabel(trace)}`]
+  const depth = webSearchTraceDepthLabel(trace)
+  if (depth) items.push(`实际策略：${depth}`)
+  const planningAttempts = traceNumber(trace.planning_attempts ?? trace.planningAttempts)
+  if (planningAttempts !== null && planningAttempts > 0) items.push(`规划尝试：${planningAttempts}`)
+  const executedRounds = traceNumber(trace.executed_rounds ?? trace.executedRounds)
+  if (executedRounds !== null) items.push(`已执行轮次：${executedRounds}`)
+  const requestedRounds = traceNumber(trace.requested_max_rounds ?? trace.requestedMaxRounds)
+  if (depth === '深搜' && requestedRounds !== null) items.push(`用户轮数：${requestedRounds}`)
+  const maxRounds = traceNumber(trace.max_rounds ?? trace.maxRounds)
+  if (depth === '深搜' && maxRounds !== null) items.push(`硬上限：${maxRounds}`)
+  const reviewAttempts = traceNumber(trace.review_attempts ?? trace.reviewAttempts)
+  if (reviewAttempts !== null && reviewAttempts > 0) items.push(`审查尝试：${reviewAttempts}`)
+  const sourceCount = traceNumber(trace.source_count ?? trace.sourceCount)
+  if (sourceCount !== null) items.push(`来源：${sourceCount}`)
+  const softLimitReached = Boolean(trace.soft_max_rounds_reached ?? trace.softMaxRoundsReached)
+  if (softLimitReached) items.push('已越过用户轮数')
+  const earlyStop = Boolean(trace.early_stop ?? trace.earlyStop)
+  if (earlyStop) items.push('提前结束')
+  return items
+}
+
+function webSearchTraceStopReason(trace: WebSearchTrace | null) {
+  return String(trace?.stop_reason || trace?.stopReason || '').trim()
+}
+
+function webSearchTracePlannerSummary(trace: WebSearchTrace | null) {
+  return String(trace?.planner_summary || trace?.plannerSummary || '').trim()
+}
+
+function traceEventTitle(event: WebSearchTraceEvent) {
+  if (event.type === 'review') return `第 ${event.round || 1} 轮证据审查`
+  if (event.type === 'read') return `第 ${event.round || 1} 轮读取页面`
+  return `第 ${event.round || 1} 轮搜索`
+}
+
+function traceEventStatus(event: WebSearchTraceEvent) {
+  if (event.type === 'review') {
+    const reasonCodes = Array.isArray(event.reason_codes)
+      ? event.reason_codes
+      : Array.isArray(event.reasonCodes)
+        ? event.reasonCodes
+        : []
+    const stoppedByReviewError = reasonCodes.some((code) =>
+      ['review_timeout', 'review_failed', 'review_unparseable'].includes(String(code))
+    )
+    if (stoppedByReviewError) return '已停止'
+    const needsMore = event.needs_more ?? event.needsMore
+    if (needsMore === true) return '继续搜索'
+    if (needsMore === false) return '证据足够'
+    return '已审查'
+  }
+  if (event.cached) return '复用结果'
+  if (event.ok === false) return '失败'
+  if (event.ok === true) return '成功'
+  return event.phase || event.tool || ''
+}
+
+function traceEventMainText(event: WebSearchTraceEvent) {
+  return String(event.query || event.url || event.tool || event.phase || '').trim()
+}
+
+function traceEventResultCount(event: WebSearchTraceEvent) {
+  return traceNumber(event.result_count ?? event.resultCount)
+}
+
+function traceEventAttempts(event: WebSearchTraceEvent) {
+  return traceNumber(event.attempts)
+}
+
+function traceEventDecisionSummary(event: WebSearchTraceEvent) {
+  return String(event.decision_summary || event.decisionSummary || '').trim()
+}
+
+function traceEventSoftLimitReached(event: WebSearchTraceEvent) {
+  return Boolean(event.soft_max_rounds_reached ?? event.softMaxRoundsReached)
+}
+
+function traceEventSources(event: WebSearchTraceEvent) {
+  return Array.isArray(event.sources) ? event.sources : []
+}
+
+function traceEventLists(event: WebSearchTraceEvent) {
+  return [
+    { label: '证据缺口', values: traceList(event.evidence_gaps ?? event.evidenceGaps) },
+    { label: '相关性判断', values: traceList(event.relevance_notes ?? event.relevanceNotes) },
+    { label: '准确性判断', values: traceList(event.accuracy_notes ?? event.accuracyNotes) },
+    { label: '已搜索关键词', values: traceList(event.searched_queries ?? event.searchedQueries) },
+    { label: '已读取 URL', values: traceList(event.read_urls ?? event.readUrls) },
+    { label: '失败 URL', values: traceList(event.failed_urls ?? event.failedUrls) },
+    { label: '来源域名', values: traceList(event.source_domains ?? event.sourceDomains) },
+    { label: '后续关键词', values: traceList(event.new_queries ?? event.newQueries) },
+    { label: '待读取 URL', values: traceList(event.urls_to_fetch ?? event.urlsToFetch) }
+  ].filter((item) => item.values.length > 0)
+}
+
+function traceEventStopReason(event: WebSearchTraceEvent) {
+  return String(event.stop_reason || event.stopReason || '').trim()
+}
+
+function traceSourceTitle(source: WebSearchTraceSource) {
+  return String(source.title || source.url || '').trim()
+}
+
+function traceSourceUrl(source: WebSearchTraceSource) {
+  return String(source.url || '').trim()
+}
+
+function traceSourceDiagnostics(source: WebSearchTraceSource) {
+  const parts: string[] = []
+  const confidence = typeof source.confidence === 'number' ? source.confidence : null
+  const tier = source.sourceTier || source.source_tier
+  const support = source.supportLevel || source.support_level
+  const depth = source.searchDepth || source.search_depth
+  const filterReason = source.filterReason || source.filter_reason
+  if (source.provider) parts.push(source.provider)
+  if (confidence !== null) parts.push(`${Math.round(confidence * 100)}%`)
+  if (tier) parts.push(`tier:${tier}`)
+  if (support) parts.push(`support:${support}`)
+  if (depth) parts.push(`mode:${depth}`)
+  if (source.degraded) parts.push('degraded')
+  if (filterReason) parts.push(filterReason)
+  return parts.join(' · ')
+}
+
 function openSourceUrl(source: WebSearchSource) {
   const url = sourceOpenUrl(source)
   if (!url) return
   window.open(url, '_blank', 'noopener,noreferrer')
-}
-
-function truncateSourceText(value: string, limit = 170) {
-  const chars = Array.from(value)
-  if (chars.length <= limit) return value
-  return `${chars.slice(0, limit).join('').replace(/[，。、；：,.:\s]+$/u, '')}...`
 }
 
 function cleanSourceText(value: unknown) {
@@ -465,6 +717,37 @@ function cleanSourceText(value: unknown) {
     .replace(/\b(?:[a-z0-9-]+\.)+[a-z]{2,}(?:\/[^\s，。；、]*)?/gi, ' ')
     .replace(/\s+/g, ' ')
     .trim()
+}
+
+function isBadSourceSummary(value: string, title: string) {
+  if (!value) return true
+  const lowered = value.toLowerCase()
+  const cjkCount = (value.match(/[\u4e00-\u9fff]/gu) || []).length
+  if (cjkCount > 0 && cjkCount < 8) return true
+  if (/^\s*(?:var|let|const|function|window\.|document\.|return\b|[={\[])/iu.test(value)) return true
+  if (/(rightconfig|alldata|noffhflag|__next_data__|window\.__)/iu.test(value)) return true
+  if (/\b(?:tier|support|rerank|confidence|provider|mode):/iu.test(value)) return true
+  if (/(?:^|[·|,，\s])\d{1,3}%\s*(?:[·|,，\s]|$)/u.test(value)) return true
+  const diagnosticParts = value.split(/\s*[·|]\s*/u).filter(Boolean)
+  if (diagnosticParts.length >= 3 && diagnosticParts.some((part) => /^[a-z][a-z0-9_-]{2,}$/iu.test(part))) return true
+  if (/(节目官网|播放列表|正在播放|热播榜|新闻频道\s*>|政府信息公开|欢迎你@|收藏\s+播放)/u.test(value)) return true
+  const normalizedValue = value.toLowerCase().replace(/[\W_]+/gu, '')
+  const normalizedTitle = title.toLowerCase().replace(/[\W_]+/gu, '')
+  return Boolean(normalizedValue && normalizedTitle && normalizedTitle.includes(normalizedValue))
+}
+
+function normalizeSourceSummaryCandidate(value: unknown, title: string) {
+  let summary = cleanSourceText(value)
+  if (!summary) return ''
+  if (summary.includes('>')) {
+    const tail = summary.split('>').pop()?.trim() || ''
+    if ((tail.match(/[\u4e00-\u9fff]/gu) || []).length >= 8) summary = tail
+  }
+  if (title && summary.toLowerCase().startsWith(title.toLowerCase())) {
+    summary = summary.slice(title.length).replace(/^[\s:：,，。.-]+/u, '').trim()
+  }
+  if (!summary || summary === title) return ''
+  return isBadSourceSummary(summary, title) ? '' : summary
 }
 
 function sourcePublishedLabel(source: WebSearchSource) {
@@ -479,13 +762,37 @@ function sourcePublishedLabel(source: WebSearchSource) {
 
 function sourceSummaryText(source: WebSearchSource) {
   const title = cleanSourceText(source.title)
-  let summary = cleanSourceText(source.snippet)
+  let summary = normalizeSourceSummaryCandidate(source.snippet, title)
+  if (!summary) summary = normalizeSourceSummaryCandidate(source.evidence, title)
   if (!summary) return ''
-  if (title && summary.toLowerCase().startsWith(title.toLowerCase())) {
-    summary = summary.slice(title.length).replace(/^[\s:：,，。.-]+/u, '').trim()
+  const sentence = summary.match(/^.+?[。！？!?]|^.+?[.;；]/u)?.[0]?.trim()
+  let compact = sentence || summary
+  const limit = 96
+  if (sentence && sentence.length < summary.length) {
+    compact = `${sentence.replace(/[.。！？!?;；]+$/u, '').trim()}...`
   }
-  if (!summary || summary === title) return ''
-  return truncateSourceText(summary)
+  return compact.length > limit ? `${compact.slice(0, limit).trim()}...` : compact
+}
+
+function sourceDiagnostics(source: WebSearchSource) {
+  const parts: string[] = []
+  const confidence = typeof source.confidence === 'number' ? source.confidence : null
+  const tier = source.sourceTier || source.source_tier
+  const support = source.supportLevel || source.support_level
+  const rerank = source.rerankStatus || source.rerank_status
+  const depth = source.searchDepth || source.search_depth
+  const filterReason = source.filterReason || source.filter_reason
+  const matched = source.matchedTerms || source.matched_terms || []
+  if (source.provider) parts.push(source.provider)
+  if (confidence !== null) parts.push(`${Math.round(confidence * 100)}%`)
+  if (tier) parts.push(`tier:${tier}`)
+  if (support) parts.push(`support:${support}`)
+  if (rerank) parts.push(`rerank:${rerank}`)
+  if (depth) parts.push(`mode:${depth}`)
+  if (source.degraded) parts.push('degraded')
+  if (matched.length) parts.push(`match:${matched.slice(0, 4).join(',')}`)
+  if (filterReason) parts.push(filterReason)
+  return parts.join(' · ')
 }
 
 function selectedModelSupportsVision() {
@@ -712,6 +1019,8 @@ function applyRuntimeProgress(message: Message, data: any = {}) {
 function normalizeLoadedMessage(message: Message): Message {
   message.webSearchSources = message.webSearchSources || message.web_search_sources || []
   message.web_search_sources = message.webSearchSources
+  message.webSearchTrace = message.webSearchTrace || message.web_search_trace || null
+  message.web_search_trace = message.webSearchTrace
   const progress = message.imageProgress || message.image_progress
   restoreCachedStreamProgress(message)
   if (message.status === 'streaming') {
@@ -781,17 +1090,56 @@ function normalizeImageSettings(data: any): ImageGenerationSettings {
   }
 }
 
+function normalizeListSetting(value: any, fallback: string[] = []): string[] {
+  if (Array.isArray(value)) {
+    return value.map((item) => String(item || '').trim()).filter(Boolean)
+  }
+  if (typeof value === 'string') {
+    return value.split(/[\n,]/).map((item) => item.trim()).filter(Boolean)
+  }
+  return [...fallback]
+}
+
+function listSettingText(value: any): string {
+  return normalizeListSetting(value).join(', ')
+}
+
+function webSearchSettingsPayload(settings: WebSearchSettings) {
+  return {
+    ...settings,
+    providerOrder: normalizeListSetting(settings.providerOrder),
+    searxngEngines: normalizeListSetting(settings.searxngEngines),
+    trustedDomains: normalizeListSetting(settings.trustedDomains),
+    blockedDomains: normalizeListSetting(settings.blockedDomains),
+    providerStatus: undefined,
+    provider_status: undefined
+  }
+}
+
 function normalizeWebSearchSettings(data: any): WebSearchSettings {
   return {
     enabled: Boolean(data?.enabled),
     searxngBaseUrl: data?.searxngBaseUrl ?? data?.searxng_base_url ?? '',
-    resultCount: Number(data?.resultCount ?? data?.result_count ?? 5),
+    resultCount: Number(data?.resultCount ?? data?.result_count ?? 30),
     language: data?.language || 'all',
     safesearch: data?.safesearch || '1',
     timeoutSeconds: Number(data?.timeoutSeconds ?? data?.timeout_seconds ?? 20),
     fetchTimeoutSeconds: Number(data?.fetchTimeoutSeconds ?? data?.fetch_timeout_seconds ?? 20),
-    maxToolCalls: Number(data?.maxToolCalls ?? data?.max_tool_calls ?? 4),
-    fetchMaxChars: Number(data?.fetchMaxChars ?? data?.fetch_max_chars ?? 12000)
+    maxToolCalls: Number(data?.maxToolCalls ?? data?.max_tool_calls ?? 20),
+    fetchMaxChars: Number(data?.fetchMaxChars ?? data?.fetch_max_chars ?? 12000),
+    providerOrder: normalizeListSetting(data?.providerOrder ?? data?.provider_order, ['bocha', 'sougou', 'jina', 'searxng', 'direct', 'serper']),
+    searxngEngines: normalizeListSetting(data?.searxngEngines ?? data?.searxng_engines, ['bing', 'baidu']),
+    candidateCount: Number(data?.candidateCount ?? data?.candidate_count ?? 20),
+    fetchTopN: Number(data?.fetchTopN ?? data?.fetch_top_n ?? 5),
+    chunkSize: Number(data?.chunkSize ?? data?.chunk_size ?? 900),
+    chunkOverlap: Number(data?.chunkOverlap ?? data?.chunk_overlap ?? 120),
+    maxEvidenceChunks: Number(data?.maxEvidenceChunks ?? data?.max_evidence_chunks ?? 8),
+    rerankEnabled: Boolean(data?.rerankEnabled ?? data?.rerank_enabled ?? true),
+    rerankerModel: data?.rerankerModel ?? data?.reranker_model ?? 'BAAI/bge-reranker-v2-m3',
+    minRelevanceScore: Number(data?.minRelevanceScore ?? data?.min_relevance_score ?? 0.35),
+    trustedDomains: normalizeListSetting(data?.trustedDomains ?? data?.trusted_domains),
+    blockedDomains: normalizeListSetting(data?.blockedDomains ?? data?.blocked_domains),
+    providerStatus: data?.providerStatus ?? data?.provider_status ?? {}
   }
 }
 
@@ -1435,9 +1783,17 @@ function conversationUpdatedAtMs(conversation: Conversation) {
 }
 
 function normalizeConversation(conversation: Conversation): Conversation {
+  const rawMode = conversation.webSearchMode ?? conversation.web_search_mode
+  const mode: WebSearchMode = rawMode === 'deep' || rawMode === 'fast' || rawMode === 'auto' ? rawMode : 'auto'
+  const rounds = Number(conversation.webSearchMaxRounds ?? conversation.web_search_max_rounds ?? 3)
+  const normalizedRounds = Number.isFinite(rounds) ? Math.min(WEB_SEARCH_MAX_ROUNDS, Math.max(1, Math.round(rounds))) : 3
   return {
     ...conversation,
-    webSearchEnabled: Boolean(conversation.webSearchEnabled ?? conversation.web_search_enabled)
+    webSearchEnabled: Boolean(conversation.webSearchEnabled ?? conversation.web_search_enabled),
+    webSearchMode: mode,
+    web_search_mode: mode,
+    webSearchMaxRounds: normalizedRounds,
+    web_search_max_rounds: normalizedRounds
   }
 }
 
@@ -1446,15 +1802,20 @@ function activeConversationWebSearchEnabled() {
 }
 
 function syncWebSearchToggleFromConversation() {
-  webSearchEnabled.value = currentId.value ? activeConversationWebSearchEnabled() : false
+  if (!currentId.value) {
+    webSearchEnabled.value = false
+    webSearchMode.value = 'auto'
+    webSearchMaxRounds.value = 3
+    return
+  }
+  const conversation = currentConversation.value ? normalizeConversation(currentConversation.value) : null
+  webSearchEnabled.value = Boolean(conversation?.webSearchEnabled ?? false)
+  webSearchMode.value = conversation?.webSearchMode || 'auto'
+  webSearchMaxRounds.value = conversation?.webSearchMaxRounds || 3
 }
 
 function sortConversationsByUpdatedAt(items: Conversation[]) {
   return items.map(normalizeConversation).sort((a, b) => conversationUpdatedAtMs(b) - conversationUpdatedAtMs(a))
-}
-
-function lastVisibleConversation() {
-  return conversations.value[conversations.value.length - 1]
 }
 
 function openSearchDialog() {
@@ -1634,7 +1995,7 @@ async function saveWebSearchSettings() {
   try {
     webSearchSettings.value = normalizeWebSearchSettings(await apiFetch('/admin/settings/web-search', {
       method: 'PATCH',
-      body: JSON.stringify(webSearchSettings.value)
+      body: JSON.stringify(webSearchSettingsPayload(webSearchSettings.value))
     }))
     settingsNotice.value = '联网搜索设置已保存'
     await loadWebSearchStatus()
@@ -1650,7 +2011,7 @@ async function testWebSearchSettings() {
   webSearchTesting.value = true
   webSearchTestResults.value = []
   try {
-    const result = await apiFetch<{ results: Array<{ title: string; url: string; snippet?: string }> }>('/admin/settings/web-search/test', {
+    const result = await apiFetch<{ results: Array<{ title: string; url: string; snippet?: string; evidence?: string; provider?: string; confidence?: number; rerankStatus?: string; rerank_status?: string }> }>('/admin/settings/web-search/test', {
       method: 'POST',
       body: JSON.stringify({ query: webSearchTestQuery.value.trim() || 'OpenAI news' })
     })
@@ -2528,7 +2889,9 @@ function applyConversationEvent(event: string, data: any) {
     createdAt: data.created_at || data.createdAt || new Date().toISOString(),
     parentMessageId: data.user_message_id || data.userMessageId || data.parent_message_id || data.parentMessageId,
     webSearchSources: data.web_search_sources || data.webSearchSources || [],
-    web_search_sources: data.web_search_sources || data.webSearchSources || []
+    web_search_sources: data.web_search_sources || data.webSearchSources || [],
+    webSearchTrace: data.web_search_trace || data.webSearchTrace || null,
+    web_search_trace: data.web_search_trace || data.webSearchTrace || null
   }
   const message = findMessage(messageId) || findMessageForMerge(eventMessage)
   if (event === 'message_delta') {
@@ -2559,6 +2922,7 @@ function applyConversationEvent(event: string, data: any) {
       message.webSearchSources = data.web_search_sources || data.webSearchSources || []
       message.web_search_sources = message.webSearchSources
     }
+    syncMessageSearchTrace(message, data)
     applyRuntimeProgress(message, data)
     syncActiveRequestState()
     return
@@ -2663,6 +3027,7 @@ function applyConversationEvent(event: string, data: any) {
         message.webSearchSources = data.web_search_sources || data.webSearchSources || []
         message.web_search_sources = message.webSearchSources
       }
+      syncMessageSearchTrace(message, data)
       applyRuntimeProgress(message, { ...data, status: message.status })
       if (message.content.trim()) freezeFirstTokenSeconds(message, { ...data, status: message.status })
       if (event === 'message_failed' && !message.content.trim() && typeof data.message === 'string' && data.message.trim()) {
@@ -2827,21 +3192,45 @@ function syncImagePolling() {
 async function toggleWebSearch() {
   if (currentConversationStreaming.value) return
   if (!webSearchEnabled.value && !webSearchAvailable.value) return
-  const nextValue = !webSearchEnabled.value
+  webSearchModeDraft.value = webSearchMode.value || 'auto'
+  webSearchRoundDraft.value = Math.min(WEB_SEARCH_MAX_ROUNDS, Math.max(1, Math.round(Number(webSearchMaxRounds.value) || 3)))
+  webSearchModeDialogOpen.value = true
+}
+
+async function applyWebSearchChoice(enabled: boolean, mode: WebSearchMode, rounds: number) {
+  const nextValue = enabled
+  const nextMode: WebSearchMode = mode === 'deep' || mode === 'fast' ? mode : 'auto'
+  const nextRounds = Math.min(WEB_SEARCH_MAX_ROUNDS, Math.max(1, Math.round(Number(rounds) || 3)))
+  const previousEnabled = webSearchEnabled.value
+  const previousMode = webSearchMode.value
+  const previousRounds = webSearchMaxRounds.value
   webSearchEnabled.value = nextValue
+  webSearchMode.value = nextMode
+  webSearchMaxRounds.value = nextRounds
+  webSearchModeDialogOpen.value = false
   const conversationId = currentId.value
   if (!conversationId) return
-  conversations.value = conversations.value.map((item) => (item.id === conversationId ? { ...item, webSearchEnabled: nextValue } : item))
+  conversations.value = conversations.value.map((item) =>
+    item.id === conversationId
+      ? { ...item, webSearchEnabled: nextValue, webSearchMode: nextMode, webSearchMaxRounds: nextRounds }
+      : item
+  )
   try {
     const updated = normalizeConversation(await apiFetch<Conversation>(`/conversations/${conversationId}`, {
       method: 'PATCH',
-      body: JSON.stringify({ webSearchEnabled: nextValue })
+      body: JSON.stringify({ webSearchEnabled: nextValue, webSearchMode: nextMode, webSearchMaxRounds: nextRounds })
     }))
     conversations.value = sortConversationsByUpdatedAt(conversations.value.map((item) => (item.id === updated.id ? { ...item, ...updated } : item)))
   } catch (err) {
-    webSearchEnabled.value = !nextValue
-    conversations.value = conversations.value.map((item) => (item.id === conversationId ? { ...item, webSearchEnabled: !nextValue } : item))
-    error.value = err instanceof Error ? err.message : '联网搜索开关保存失败'
+    webSearchEnabled.value = previousEnabled
+    webSearchMode.value = previousMode
+    webSearchMaxRounds.value = previousRounds
+    conversations.value = conversations.value.map((item) =>
+      item.id === conversationId
+        ? { ...item, webSearchEnabled: previousEnabled, webSearchMode: previousMode, webSearchMaxRounds: previousRounds }
+        : item
+    )
+    error.value = err instanceof Error ? err.message : '联网搜索设置保存失败'
   }
 }
 
@@ -2854,7 +3243,7 @@ function newChat() {
   stopImagePolling()
   stopConversationEvents()
   currentId.value = null
-  window.localStorage.removeItem(CURRENT_CONVERSATION_STORAGE_KEY)
+  window.localStorage.removeItem(LEGACY_CURRENT_CONVERSATION_STORAGE_KEY)
   messages.value = []
   messagesLoading.value = false
   conversationAttachments.value = []
@@ -2866,6 +3255,9 @@ function newChat() {
   error.value = ''
   streaming.value = false
   webSearchEnabled.value = false
+  webSearchMode.value = 'auto'
+  webSearchMaxRounds.value = 3
+  webSearchModeDialogOpen.value = false
 }
 
 async function loadConversations() {
@@ -2976,7 +3368,6 @@ async function openConversation(id: string, focusMessageId?: string | null) {
   clearAllImageFinalizationTimers()
   stopImagePolling()
   currentId.value = id
-  window.localStorage.setItem(CURRENT_CONVERSATION_STORAGE_KEY, id)
   messages.value = []
   messagesLoading.value = true
   userHasScrolledUp = false
@@ -3100,12 +3491,7 @@ async function confirmDeleteConversation() {
     deleteConfirmOpen.value = false
     conversationPendingDelete.value = null
     if (currentId.value === conversation.id) {
-      const nextConversation = lastVisibleConversation()
-      if (nextConversation) {
-        await openConversation(nextConversation.id)
-      } else {
-        newChat()
-      }
+      newChat()
     }
   } catch (err) {
     error.value = err instanceof Error ? err.message : '删除对话失败'
@@ -3280,11 +3666,15 @@ async function send() {
     if (!targetConversationId && draftConversationAttachments.value.length) {
       const created = await apiFetch<Conversation>('/conversations', {
         method: 'POST',
-        body: JSON.stringify({ title: (userText.trim() || '新对话').slice(0, 30), webSearchEnabled: webSearchEnabled.value })
+        body: JSON.stringify({
+          title: (userText.trim() || '新对话').slice(0, 30),
+          webSearchEnabled: webSearchEnabled.value,
+          webSearchMode: webSearchMode.value,
+          webSearchMaxRounds: webSearchMaxRounds.value
+        })
       })
       targetConversationId = created.id
       currentId.value = created.id
-      window.localStorage.setItem(CURRENT_CONVERSATION_STORAGE_KEY, created.id)
       await bindDraftFileTreeToConversation(created.id)
     }
     const path = targetConversationId ? `/conversations/${targetConversationId}/messages` : '/conversations/new/messages'
@@ -3296,6 +3686,8 @@ async function send() {
         attachmentIds,
         referencedAttachmentIds,
         webSearchEnabled: webSearchEnabled.value,
+        webSearchMode: webSearchMode.value,
+        webSearchMaxRounds: webSearchMaxRounds.value,
         reasoningEffort: reasoningEffort.value
       })
     })
@@ -3304,7 +3696,6 @@ async function send() {
     const assistantMessage = result.assistantMessage || result.assistant_message
     if (newConversationId) {
       currentId.value = newConversationId
-      window.localStorage.setItem(CURRENT_CONVERSATION_STORAGE_KEY, newConversationId)
     }
     if (userMessage) replaceDraftWithMessage(draftUserId, userMessage, { clientKey: userClientKey })
     if (assistantMessage) {
@@ -3549,13 +3940,7 @@ onMounted(async () => {
   loadAppearance()
   loadFileTreePinned()
   await Promise.all([loadModels(), loadConversations(), loadWebSearchStatus()])
-  const storedConversationId = window.localStorage.getItem(CURRENT_CONVERSATION_STORAGE_KEY)
-  if (storedConversationId && conversations.value.some((conversation) => conversation.id === storedConversationId)) {
-    await openConversation(storedConversationId)
-  } else {
-    const fallbackConversation = lastVisibleConversation()
-    if (fallbackConversation) await openConversation(fallbackConversation.id)
-  }
+  window.localStorage.removeItem(LEGACY_CURRENT_CONVERSATION_STORAGE_KEY)
   await nextTick()
   observeChatFooter()
   resizeComposerInput()
@@ -3711,7 +4096,7 @@ onUnmounted(() => {
 
     <main
       class="chat-main flex flex-col min-w-0 min-h-0 overflow-hidden"
-      :class="{ 'has-messages': hasConversationFrame, 'is-empty-chat': isEmptyChat, 'composer-open': composerExpanded }"
+      :class="{ 'has-messages': hasConversationFrame, 'is-empty-chat': isEmptyChat, 'composer-open': composerExpanded, 'sources-open': sourceDrawerOpen, 'search-trace-open': searchTraceOpen }"
     >
       <header class="chat-header" :class="{ 'sources-open': sourceDrawerOpen }">
         <div class="top-model-controls" @click.stop>
@@ -3785,6 +4170,7 @@ onUnmounted(() => {
               :message="message"
               @preview-attachment="openAttachmentPreview"
               @open-sources="openWebSearchSources"
+              @open-search-trace="openWebSearchTrace"
             />
           </div>
         </section>
@@ -3826,6 +4212,69 @@ onUnmounted(() => {
             </button>
           </div>
         </aside>
+
+        <Transition name="modal-fade">
+          <div v-if="searchTraceOpen" class="settings-modal-backdrop search-trace-backdrop" @click.self="closeWebSearchTrace">
+            <section class="search-trace-modal" role="dialog" aria-modal="true" aria-label="联网搜索过程">
+              <div class="source-drawer-header">
+                <div>
+                  <span>证据审查摘要</span>
+                  <strong>搜索过程</strong>
+                </div>
+                <button class="source-drawer-close" type="button" title="关闭" aria-label="关闭搜索过程" @click="closeWebSearchTrace">
+                  <X :size="18" />
+                </button>
+              </div>
+              <div v-if="activeSearchTrace" class="search-trace-body">
+                <div class="search-trace-summary">
+                  <span v-for="item in webSearchTraceSummary(activeSearchTrace)" :key="item" class="search-trace-chip">{{ item }}</span>
+                </div>
+                <p v-if="webSearchTracePlannerSummary(activeSearchTrace)" class="search-trace-stop">{{ webSearchTracePlannerSummary(activeSearchTrace) }}</p>
+                <p v-if="webSearchTraceStopReason(activeSearchTrace)" class="search-trace-stop">{{ webSearchTraceStopReason(activeSearchTrace) }}</p>
+                <div class="search-trace-list" role="list">
+                  <article v-for="(event, index) in activeSearchTraceEvents" :key="`${event.round || 0}-${event.type || 'event'}-${index}`" class="search-trace-event">
+                    <div class="search-trace-event-main">
+                      <div class="search-trace-event-head">
+                        <div>
+                          <span>{{ traceEventTitle(event) }}</span>
+                          <strong v-if="traceEventMainText(event)">{{ traceEventMainText(event) }}</strong>
+                        </div>
+                        <em :class="{ failed: event.ok === false }">{{ traceEventStatus(event) }}</em>
+                      </div>
+                      <div class="search-trace-event-meta">
+                        <span v-if="event.tool">{{ event.tool }}</span>
+                        <span v-if="event.phase">{{ event.phase }}</span>
+                        <span v-if="traceEventAttempts(event) !== null">尝试 {{ traceEventAttempts(event) }}</span>
+                        <span v-if="traceEventSoftLimitReached(event)">已到用户轮数</span>
+                        <span v-if="traceEventResultCount(event) !== null">结果 {{ traceEventResultCount(event) }}</span>
+                        <span v-if="event.error" class="search-trace-error">失败：{{ event.error }}</span>
+                      </div>
+                      <p v-if="traceEventDecisionSummary(event)" class="search-trace-note">{{ traceEventDecisionSummary(event) }}</p>
+                      <p v-if="traceEventStopReason(event)" class="search-trace-note">{{ traceEventStopReason(event) }}</p>
+                    </div>
+                    <div v-if="traceEventLists(event).length || traceEventSources(event).length" class="search-trace-event-detail">
+                      <div v-if="traceEventLists(event).length" class="search-trace-review">
+                        <div v-for="group in traceEventLists(event)" :key="group.label" class="search-trace-review-group">
+                          <span>{{ group.label }}</span>
+                          <ul>
+                            <li v-for="item in group.values" :key="item">{{ item }}</li>
+                          </ul>
+                        </div>
+                      </div>
+                      <div v-if="traceEventSources(event).length" class="search-trace-sources">
+                        <a v-for="source in traceEventSources(event)" :key="traceSourceUrl(source)" :href="traceSourceUrl(source)" target="_blank" rel="noreferrer">
+                          <strong>{{ traceSourceTitle(source) }}</strong>
+                          <span v-if="traceSourceDiagnostics(source)">{{ traceSourceDiagnostics(source) }}</span>
+                        </a>
+                      </div>
+                    </div>
+                  </article>
+                </div>
+              </div>
+              <div v-else class="search-trace-empty">这条消息没有保存搜索过程。</div>
+            </section>
+          </div>
+        </Transition>
 
         <aside
           v-if="userQuestionNavItems.length > 0"
@@ -4104,6 +4553,7 @@ onUnmounted(() => {
                 @click="toggleWebSearch"
               >
                 <Globe :size="18" />
+                <span v-if="webSearchModeText" class="web-search-mode-text">{{ webSearchModeText }}</span>
               </button>
 
             </div>
@@ -4119,6 +4569,54 @@ onUnmounted(() => {
 
 
     </main>
+
+    <Transition name="modal-fade">
+      <div v-if="webSearchModeDialogOpen" class="settings-modal-backdrop web-search-mode-backdrop" @click.self="webSearchModeDialogOpen = false">
+        <section class="web-search-mode-modal" role="dialog" aria-modal="true" :aria-label="webSearchEnabled ? '管理联网搜索' : '选择联网搜索模式'">
+          <div class="web-search-mode-header">
+            <div>
+              <strong>{{ webSearchEnabled ? '管理联网搜索' : '选择联网搜索模式' }}</strong>
+              <span>{{ webSearchEnabled ? '修改本会话的联网搜索设置，或关闭联网搜索' : '本次会话会记住你的选择' }}</span>
+            </div>
+            <button class="source-drawer-close" type="button" title="关闭" aria-label="关闭" @click="webSearchModeDialogOpen = false">
+              <X :size="18" />
+            </button>
+          </div>
+          <div class="web-search-mode-options">
+            <button type="button" class="web-search-mode-option" :class="{ active: webSearchModeDraft === 'auto' }" @click="webSearchModeDraft = 'auto'">
+              <strong>自动</strong>
+              <span>按问题自动选择快速或深搜</span>
+            </button>
+            <button type="button" class="web-search-mode-option" :class="{ active: webSearchModeDraft === 'deep' }" @click="webSearchModeDraft = 'deep'">
+              <strong>深度优先</strong>
+              <span>多轮读取页面并补充关键词</span>
+            </button>
+            <button type="button" class="web-search-mode-option" :class="{ active: webSearchModeDraft === 'fast' }" @click="webSearchModeDraft = 'fast'">
+              <strong>快速回答</strong>
+              <span>单轮低延迟搜索</span>
+            </button>
+          </div>
+          <label v-if="webSearchModeDraft === 'deep'" class="web-search-round-field">
+            <span>最大深搜轮数</span>
+            <input v-model.number="webSearchRoundDraft" type="number" min="1" :max="WEB_SEARCH_MAX_ROUNDS" />
+          </label>
+          <div class="web-search-mode-actions">
+            <button
+              v-if="webSearchEnabled"
+              class="settings-secondary web-search-mode-danger"
+              type="button"
+              @click="applyWebSearchChoice(false, webSearchMode, webSearchMaxRounds)"
+            >
+              关闭联网搜索
+            </button>
+            <button class="settings-secondary" type="button" @click="webSearchModeDialogOpen = false">取消</button>
+            <button class="settings-primary" type="button" @click="applyWebSearchChoice(true, webSearchModeDraft, webSearchModeDraft === 'deep' ? webSearchRoundDraft : 3)">
+              {{ webSearchEnabled ? '保存设置' : '开启联网搜索' }}
+            </button>
+          </div>
+        </section>
+      </div>
+    </Transition>
 
     <Transition name="modal-fade">
       <div v-if="settingsOpen" class="settings-modal-backdrop" @click.self="settingsOpen = false">
@@ -4312,7 +4810,7 @@ onUnmounted(() => {
               <section v-else-if="settingsTab === 'web' && auth.user?.role === 'admin'" key="web" class="settings-pane">
                 <div class="settings-pane-heading">
                   <h2>联网搜索</h2>
-                  <p>配置 SearXNG 搜索源。用户在单个对话里开启后，模型可按需调用搜索和网页读取工具。</p>
+                  <p>启用内置直连搜索源。用户在单个对话里开启后，模型可按需调用搜索和网页读取工具。</p>
                 </div>
                 <form class="settings-card" @submit.prevent="saveWebSearchSettings">
                   <div v-if="webSearchSettingsLoading" class="settings-empty">正在加载联网搜索设置...</div>
@@ -4325,9 +4823,29 @@ onUnmounted(() => {
                       <span>SearXNG URL</span>
                       <input v-model="webSearchSettings.searxngBaseUrl" class="settings-input" placeholder="https://searxng.example.com/search" />
                     </label>
+                    <label class="settings-field settings-field-wide">
+                      <span>搜索源顺序</span>
+                      <input :value="listSettingText(webSearchSettings.providerOrder)" class="settings-input" placeholder="bocha, sougou, jina, searxng, direct, serper" @input="webSearchSettings.providerOrder = normalizeListSetting(($event.target as HTMLInputElement).value)" />
+                    </label>
+                    <label class="settings-field settings-field-wide">
+                      <span>SearXNG 引擎</span>
+                      <input :value="listSettingText(webSearchSettings.searxngEngines)" class="settings-input" placeholder="bing, baidu" @input="webSearchSettings.searxngEngines = normalizeListSetting(($event.target as HTMLInputElement).value)" />
+                    </label>
+                    <div class="settings-field settings-field-wide">
+                      <span>搜索源状态</span>
+                      <div class="settings-provider-status">
+                        <span v-for="provider in ['searxng', 'bocha', 'sougou', 'jina', 'direct', 'serper']" :key="provider" :class="{ active: provider === 'direct' || webSearchSettings.providerStatus?.[provider] }">
+                          {{ provider }} {{ webSearchSettings.providerStatus?.[provider] ? '已配置' : '未配置' }}
+                        </span>
+                      </div>
+                    </div>
                     <label class="settings-field">
                       <span>结果数</span>
-                      <input v-model.number="webSearchSettings.resultCount" class="settings-input" type="number" min="1" max="10" />
+                      <input v-model.number="webSearchSettings.resultCount" class="settings-input" type="number" min="1" max="30" />
+                    </label>
+                    <label class="settings-field">
+                      <span>候选数</span>
+                      <input v-model.number="webSearchSettings.candidateCount" class="settings-input" type="number" min="3" max="50" />
                     </label>
                     <label class="settings-field">
                       <span>语言</span>
@@ -4347,11 +4865,47 @@ onUnmounted(() => {
                     </label>
                     <label class="settings-field">
                       <span>最大工具调用次数</span>
-                      <input v-model.number="webSearchSettings.maxToolCalls" class="settings-input" type="number" min="1" max="10" />
+                      <input v-model.number="webSearchSettings.maxToolCalls" class="settings-input" type="number" min="1" max="20" />
                     </label>
                     <label class="settings-field">
                       <span>网页最大字符数</span>
                       <input v-model.number="webSearchSettings.fetchMaxChars" class="settings-input" type="number" min="1000" max="50000" />
+                    </label>
+                    <label class="settings-field">
+                      <span>正文读取页数</span>
+                      <input v-model.number="webSearchSettings.fetchTopN" class="settings-input" type="number" min="0" max="10" />
+                    </label>
+                    <label class="settings-field">
+                      <span>切块大小</span>
+                      <input v-model.number="webSearchSettings.chunkSize" class="settings-input" type="number" min="300" max="3000" />
+                    </label>
+                    <label class="settings-field">
+                      <span>切块重叠</span>
+                      <input v-model.number="webSearchSettings.chunkOverlap" class="settings-input" type="number" min="0" max="1000" />
+                    </label>
+                    <label class="settings-field">
+                      <span>证据片段数</span>
+                      <input v-model.number="webSearchSettings.maxEvidenceChunks" class="settings-input" type="number" min="1" max="20" />
+                    </label>
+                    <label class="settings-field">
+                      <span>最低相关度</span>
+                      <input v-model.number="webSearchSettings.minRelevanceScore" class="settings-input" type="number" min="0" max="1" step="0.05" />
+                    </label>
+                    <label class="settings-check">
+                      <input v-model="webSearchSettings.rerankEnabled" type="checkbox" />
+                      启用本地重排
+                    </label>
+                    <label class="settings-field settings-field-wide">
+                      <span>重排模型</span>
+                      <input v-model="webSearchSettings.rerankerModel" class="settings-input" placeholder="BAAI/bge-reranker-v2-m3" />
+                    </label>
+                    <label class="settings-field settings-field-wide">
+                      <span>可信域名</span>
+                      <textarea :value="listSettingText(webSearchSettings.trustedDomains)" class="settings-textarea" rows="2" placeholder="news.example.com, gov.cn" @input="webSearchSettings.trustedDomains = normalizeListSetting(($event.target as HTMLTextAreaElement).value)"></textarea>
+                    </label>
+                    <label class="settings-field settings-field-wide">
+                      <span>屏蔽域名</span>
+                      <textarea :value="listSettingText(webSearchSettings.blockedDomains)" class="settings-textarea" rows="2" placeholder="example.com, low-quality.example" @input="webSearchSettings.blockedDomains = normalizeListSetting(($event.target as HTMLTextAreaElement).value)"></textarea>
                     </label>
                   </div>
                   <div class="settings-api-card-footer">
@@ -4364,7 +4918,7 @@ onUnmounted(() => {
                   <div class="settings-card-header">
                     <div>
                       <h3>测试搜索</h3>
-                      <p>使用当前已保存配置测试 SearXNG 返回结果。</p>
+                      <p>使用当前已保存配置测试 Bing、搜狗、360 搜索和头条搜索返回结果。</p>
                     </div>
                   </div>
                   <div class="settings-inline-field">
@@ -4376,7 +4930,18 @@ onUnmounted(() => {
                   <div v-if="webSearchTestResults.length" class="settings-web-results">
                     <a v-for="item in webSearchTestResults" :key="item.url" :href="item.url" target="_blank" rel="noreferrer">
                       <strong>{{ item.title || item.url }}</strong>
-                      <span>{{ item.snippet || item.url }}</span>
+                      <small>
+                        {{ item.provider || 'source' }}
+                        <template v-if="typeof item.confidence === 'number'"> · {{ Math.round(item.confidence * 100) }}%</template>
+                        <template v-if="item.sourceTier || item.source_tier"> · tier:{{ item.sourceTier || item.source_tier }}</template>
+                        <template v-if="item.supportLevel || item.support_level"> · support:{{ item.supportLevel || item.support_level }}</template>
+                        <template v-if="item.searchDepth || item.search_depth"> · mode:{{ item.searchDepth || item.search_depth }}</template>
+                        <template v-if="item.rerankStatus || item.rerank_status"> · {{ item.rerankStatus || item.rerank_status }}</template>
+                        <template v-if="item.degraded"> · degraded</template>
+                        <template v-if="(item.matchedTerms || item.matched_terms)?.length"> · match:{{ (item.matchedTerms || item.matched_terms || []).slice(0, 4).join(',') }}</template>
+                        <template v-if="item.filterReason || item.filter_reason"> · {{ item.filterReason || item.filter_reason }}</template>
+                      </small>
+                      <span>{{ item.evidence || item.snippet || item.url }}</span>
                     </a>
                   </div>
                 </form>

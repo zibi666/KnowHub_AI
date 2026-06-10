@@ -33,7 +33,7 @@ from app.services.audit import write_audit
 from app.services.dead_letters import list_dead_letters
 from app.services.maintenance import preview_cleanup, purge_user, run_cleanup
 from app.services.runtime_settings import load_runtime_settings, save_runtime_settings
-from app.services.web_search import effective_web_search_config, save_web_search_settings, search_web
+from app.services.web_search import effective_web_search_config, save_web_search_settings, search_web, web_search_provider_status
 
 router = APIRouter(prefix="/admin", tags=["admin"])
 
@@ -268,13 +268,14 @@ async def update_reasoning_models(payload: ReasoningModelsRequest, admin: User =
 
 @router.get("/settings/web-search", response_model=WebSearchSettings)
 async def get_web_search_settings(admin: User = Depends(get_admin_user)) -> WebSearchSettings:
-    return WebSearchSettings(**effective_web_search_config().__dict__)
+    config = effective_web_search_config()
+    return WebSearchSettings(**config.__dict__, provider_status=web_search_provider_status(config))
 
 
 @router.patch("/settings/web-search", response_model=WebSearchSettings)
 async def update_web_search_settings(payload: WebSearchSettings, admin: User = Depends(get_admin_user)) -> WebSearchSettings:
     config = save_web_search_settings(payload.model_dump())
-    return WebSearchSettings(**config.__dict__)
+    return WebSearchSettings(**config.__dict__, provider_status=web_search_provider_status(config))
 
 
 @router.post("/settings/web-search/test")

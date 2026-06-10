@@ -1,10 +1,16 @@
 from __future__ import annotations
 
 from datetime import datetime
+from typing import Literal
+
+from pydantic import field_validator
 
 from app.schemas.attachments import AttachmentOut
 from app.schemas.base import ApiModel
 from app.services.image_generation import is_image_generation_model
+
+
+WEB_SEARCH_MAX_ROUNDS_LIMIT = 10
 
 
 class WebSearchSourceOut(ApiModel):
@@ -15,6 +21,15 @@ class WebSearchSourceOut(ApiModel):
     site_name: str | None = None
     published_at: str | None = None
     favicon_url: str | None = None
+    provider: str | None = None
+    confidence: float | None = None
+    rerank_status: str | None = None
+    source_tier: str | None = None
+    matched_terms: list[str] = []
+    support_level: str | None = None
+    search_depth: str | None = None
+    degraded: bool = False
+    filter_reason: str | None = None
 
 
 class ConversationOut(ApiModel):
@@ -22,6 +37,8 @@ class ConversationOut(ApiModel):
     title: str
     auto_compaction_enabled: bool
     web_search_enabled: bool = False
+    web_search_mode: Literal["auto", "deep", "fast"] = "auto"
+    web_search_max_rounds: int = 3
     created_at: datetime
     updated_at: datetime
 
@@ -29,12 +46,28 @@ class ConversationOut(ApiModel):
 class CreateConversationRequest(ApiModel):
     title: str | None = None
     web_search_enabled: bool = False
+    web_search_mode: Literal["auto", "deep", "fast"] = "auto"
+    web_search_max_rounds: int = 3
+
+    @field_validator("web_search_max_rounds")
+    @classmethod
+    def clamp_web_search_max_rounds(cls, value: int) -> int:
+        return max(1, min(WEB_SEARCH_MAX_ROUNDS_LIMIT, int(value)))
 
 
 class UpdateConversationRequest(ApiModel):
     title: str | None = None
     auto_compaction_enabled: bool | None = None
     web_search_enabled: bool | None = None
+    web_search_mode: Literal["auto", "deep", "fast"] | None = None
+    web_search_max_rounds: int | None = None
+
+    @field_validator("web_search_max_rounds")
+    @classmethod
+    def clamp_web_search_max_rounds(cls, value: int | None) -> int | None:
+        if value is None:
+            return None
+        return max(1, min(WEB_SEARCH_MAX_ROUNDS_LIMIT, int(value)))
 
 
 class MessageOut(ApiModel):
@@ -59,6 +92,7 @@ class MessageOut(ApiModel):
     progress_detail: str | None = None
     progress_phase: str | None = None
     web_search_sources: list[WebSearchSourceOut] = []
+    web_search_trace: dict | None = None
 
     @classmethod
     def from_message(cls, message: object, attachments: list[AttachmentOut] | None = None) -> "MessageOut":
@@ -105,6 +139,7 @@ class MessageOut(ApiModel):
             progress_detail=(image_progress or runtime_progress or {}).get("detail"),
             progress_phase=(image_progress or runtime_progress or {}).get("phase"),
             web_search_sources=getattr(message, "web_search_sources_json", None) or [],
+            web_search_trace=getattr(message, "web_search_trace_json", None) or None,
         )
 
 
@@ -138,9 +173,18 @@ class SendMessageRequest(ApiModel):
     referenced_attachment_ids: list[str] = []
     retry_of_message_id: str | None = None
     web_search_enabled: bool | None = None
+    web_search_mode: Literal["auto", "deep", "fast"] | None = None
+    web_search_max_rounds: int | None = None
     # Per-request overrides. None means "use server default".
     reasoning_effort: str | None = None
     max_completion_tokens: int | None = None
+
+    @field_validator("web_search_max_rounds")
+    @classmethod
+    def clamp_web_search_max_rounds(cls, value: int | None) -> int | None:
+        if value is None:
+            return None
+        return max(1, min(WEB_SEARCH_MAX_ROUNDS_LIMIT, int(value)))
 
 
 class SendMessageResponse(ApiModel):

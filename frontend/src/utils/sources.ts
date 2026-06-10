@@ -1,7 +1,8 @@
 import type { Message, WebSearchSource } from '../types'
 
 const SOURCE_LIST_RE = /(?:^|\n)#{3,}\s*(?:来源|Sources?)\s*\n([\s\S]*)$/i
-const SOURCE_ITEM_RE = /^\s*(?:\d+[\.)]\s*)?(?:\[([^\]]+)\]\((https?:\/\/[^\s)]+)\)|(https?:\/\/\S+))/i
+const WEB_SEARCH_SOURCE_DISPLAY_LIMIT = 30
+const SOURCE_ITEM_RE = /^\s*(?:(\d+)[\.)]\s*)?(?:\[([^\]]+)\]\((https?:\/\/[^\s)]+)\)|(https?:\/\/\S+))/i
 
 function normalizeUrl(value: string) {
   try {
@@ -142,9 +143,11 @@ function faviconProxyUrl(source: WebSearchSource) {
   return url ? `/api/web-search/favicon?url=${encodeURIComponent(url)}` : ''
 }
 
-function normalizeSource(raw: WebSearchSource, index: number): WebSearchSource | null {
+function normalizeSource(raw: WebSearchSource, fallbackIndex: number): WebSearchSource | null {
   const url = canonicalSourceUrl(raw.displayUrl || raw.display_url || raw.url || '')
   if (!url) return null
+  const rawIndex = Number(raw.index)
+  const index = Number.isInteger(rawIndex) && rawIndex > 0 ? rawIndex : fallbackIndex
   const title = sourceTitle(raw, url)
   const source: WebSearchSource = {
     index,
@@ -154,7 +157,16 @@ function normalizeSource(raw: WebSearchSource, index: number): WebSearchSource |
     snippet: sourceSnippet(raw, title, url),
     siteName: raw.siteName || raw.site_name || undefined,
     publishedAt: raw.publishedAt || raw.published_at || undefined,
-    faviconUrl: raw.faviconUrl || raw.favicon_url || undefined
+    faviconUrl: raw.faviconUrl || raw.favicon_url || undefined,
+    provider: raw.provider || undefined,
+    confidence: typeof raw.confidence === 'number' ? raw.confidence : undefined,
+    rerankStatus: raw.rerankStatus || raw.rerank_status || undefined,
+    sourceTier: raw.sourceTier || raw.source_tier || undefined,
+    matchedTerms: Array.isArray(raw.matchedTerms || raw.matched_terms) ? raw.matchedTerms || raw.matched_terms : undefined,
+    supportLevel: raw.supportLevel || raw.support_level || undefined,
+    searchDepth: raw.searchDepth || raw.search_depth || undefined,
+    degraded: Boolean(raw.degraded) || undefined,
+    filterReason: raw.filterReason || raw.filter_reason || undefined
   }
   const repo = githubRepoSource(raw, url)
   source.siteName = source.siteName || (repo ? 'GitHub' : sourceSiteName(source))
@@ -174,16 +186,18 @@ export function parseLegacySourcesMarkdown(content: string): WebSearchSource[] {
   for (const line of match[1].split('\n')) {
     const item = line.match(SOURCE_ITEM_RE)
     if (!item) continue
-    const title = item[1] || item[3] || ''
-    const href = item[2] || item[3] || ''
+    const rawIndex = Number(item[1])
+    const index = Number.isInteger(rawIndex) && rawIndex > 0 ? rawIndex : sources.length + 1
+    const title = item[2] || item[4] || ''
+    const href = item[3] || item[4] || ''
     const url = canonicalSourceUrl(href)
     if (!url || seen.has(url)) continue
-    const normalized = normalizeSource({ index: sources.length + 1, title, url: href }, sources.length + 1)
+    const normalized = normalizeSource({ index, title, url: href }, sources.length + 1)
     if (normalized) {
       seen.add(normalized.url)
       sources.push(normalized)
     }
-    if (sources.length >= 10) break
+    if (sources.length >= WEB_SEARCH_SOURCE_DISPLAY_LIMIT) break
   }
   return sources
 }
@@ -197,7 +211,7 @@ export function messageWebSearchSources(message: Message): WebSearchSource[] {
     if (!source || seen.has(source.url)) continue
     seen.add(source.url)
     normalized.push(source)
-    if (normalized.length >= 10) break
+    if (normalized.length >= WEB_SEARCH_SOURCE_DISPLAY_LIMIT) break
   }
   return normalized.length ? normalized : parseLegacySourcesMarkdown(message.content || '')
 }

@@ -140,6 +140,8 @@ class Conversation(Base, TimestampMixin):
     compaction_pending_since: Mapped[datetime | None] = mapped_column(DateTime(timezone=False), nullable=True)
     auto_compaction_enabled: Mapped[bool] = mapped_column(Boolean, default=True, nullable=False)
     web_search_enabled: Mapped[bool] = mapped_column(Boolean, default=False, nullable=False)
+    web_search_mode: Mapped[str] = mapped_column(String(20), default="auto", nullable=False)
+    web_search_max_rounds: Mapped[int] = mapped_column(Integer, default=3, nullable=False)
 
     messages: Mapped[list[Message]] = relationship(back_populates="conversation", cascade="all, delete-orphan")
 
@@ -162,6 +164,7 @@ class Message(Base, TimestampMixin):
     tokens_source: Mapped[str | None] = mapped_column(String(20), nullable=True)
     first_token_seconds: Mapped[int | None] = mapped_column(Integer, nullable=True)
     web_search_sources_json: Mapped[list | None] = mapped_column(JSON, nullable=True)
+    web_search_trace_json: Mapped[dict | None] = mapped_column(JSON, nullable=True)
 
     conversation: Mapped[Conversation] = relationship(back_populates="messages")
     attachments: Mapped[list[MessageAttachment]] = relationship(cascade="all, delete-orphan")

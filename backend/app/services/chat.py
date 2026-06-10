@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import asyncio
 import contextlib
+import html
 import json
 import logging
 import re
@@ -55,6 +56,8 @@ from app.services.web_search import (
     effective_web_search_config,
     format_search_results_for_context,
     json_tool_output,
+    normalize_max_rounds,
+    normalize_search_depth,
     run_web_search_tool,
     structured_web_search_sources,
     tool_result_sources,
@@ -92,11 +95,45 @@ WEB_SEARCH_FORCE_TERMS = (
 WEB_SEARCH_TOOL_POLICY = (
     "KnowHub web search policy: When web search is enabled, use search_web first for current events, news, "
     "recent facts, public external facts, or claims that may have changed. Use fetch_url only when search snippets "
-    "are not enough or a result needs closer reading. Do not invent sources; if search results are weak, missing, "
-    "or unrelated, say so clearly in the final answer. When sources are provided in the final-answer context, add "
-    "inline markers like [[1]] and [[2]] only next to claims directly supported by those exact sources. Do not add "
-    "a markdown source list."
+    "are not enough or a result needs closer reading. Judge relevance semantically, especially for Chinese queries "
+    "where synonyms, abbreviations, translations, and rewritten headlines may be relevant. Do not invent sources; "
+    "if search results are weak, missing, stale, contradictory, or only weakly related, say so clearly in the final "
+    "answer. For time-sensitive, legal, medical, financial, policy, death, or disputed claims, prefer body evidence "
+    "from official, primary, major-news, or multiple independent sources rather than title/snippet-only support. "
+    "When sources are provided in the final-answer context, add inline markers like [[1]] and [[2]] only next to "
+    "claims directly supported by those exact sources. Do not add a markdown source list."
 )
+WEB_SEARCH_DEEP_REVIEW_POLICY = (
+    "You are reviewing web-search evidence. Return JSON only, with keys: "
+    "needs_more (boolean), new_queries (array of strings), urls_to_fetch (array of URLs), "
+    "evidence_gaps (array of short strings), relevance_notes (array of short public notes), "
+    "accuracy_notes (array of short public notes), stop_reason (short string), reason_codes (array of short strings). "
+    "Judge Chinese relevance semantically; allow synonyms, abbreviations, translations, and headline rewrites. "
+    "Repeat or slightly vary a previous query only when this round's results for that exact keyword were imprecise, "
+    "noisy, off-target, stale, or lacked body-level evidence. If the searched keyword already returned precise "
+    "useful evidence, do not propose the same or a near-duplicate query again; explain any repeat-worthy gap in "
+    "evidence_gaps or relevance_notes. "
+    "Prefer new URLs over refetching pages already read successfully, and do not retry URLs listed as failed. "
+    "Do not include hidden reasoning or prose. Ask for more only when the current evidence is weak, stale, "
+    "contradictory, clearly unrelated, or missing primary/major-news support."
+)
+WEB_SEARCH_KEYWORD_PLAN_POLICY = (
+    "You are planning the first web-search pass for KnowHub. Return JSON only, with keys: "
+    "effective_depth (fast or deep), queries (array of 1 to 3 strings), reason_codes (array of short strings), "
+    "decision_summary (short public sentence). If the requested mode is auto, choose fast for stable/simple lookup "
+    "and deep for current, disputed, high-risk, fast-changing, legal, medical, financial, policy, death, or "
+    "multi-source evidence questions. If the requested mode is fast or deep, keep that exact effective_depth. "
+    "Convert the user's natural-language question into concise searchable keywords. Preserve important entities, "
+    "time words, locations, and source-quality hints. For Chinese questions, prefer Chinese keywords unless English "
+    "source terms are clearly useful. Do not answer the question, do not include hidden reasoning, and do not call tools."
+)
+WEB_SEARCH_REVIEW_MAX_QUERIES_PER_ROUND = 2
+WEB_SEARCH_REVIEW_MAX_URLS_PER_ROUND = 2
+WEB_SEARCH_REVIEW_MAX_ACTIONS_PER_ROUND = 3
+WEB_SEARCH_INITIAL_MAX_QUERIES = 3
+WEB_SEARCH_DEEP_HARD_MAX_ROUNDS = 10
+WEB_SEARCH_PLANNER_MAX_ATTEMPTS = 3
+WEB_SEARCH_REVIEW_MAX_ATTEMPTS = 3
 _STREAM_END = object()
 EMPTY_CHAT_RESPONSE_MESSAGE = (
     "模型返回了空回复：上游接口请求已完成，但没有返回任何可显示的文本。"
@@ -270,10 +307,23 @@ def chat_generation_error_message(exc: HTTPException) -> str:
         return message or "当前模型不可用，请切换模型或联系管理员。"
     if code == "KEY_REQUIRED":
         return message or "请先绑定模型 API Key。"
+    if code in {"UPSTREAM_TRANSPORT_ERROR", "UPSTREAM_ERROR"}:
+        lowered = message.lower()
+        if (
+            "server disconnected" in lowered
+            or "without sending a response" in lowered
+            or "remote protocol" in lowered
+            or "connection reset" in lowered
+        ):
+            return "上游模型连接在生成回答前中断。可能是模型服务或代理临时断开，也可能是联网搜索证据上下文过长；系统已保留本次搜索过程，请重试或降低深搜轮数。"
     return message or code or "回复生成失败，请稍后重试。"
 
 
 def is_transient_image_generation_error(exc: Exception | None) -> bool:
+    return isinstance(exc, (httpx.RemoteProtocolError, httpx.ReadError, httpx.ConnectError, httpx.TimeoutException))
+
+
+def is_transient_chat_generation_error(exc: Exception | None) -> bool:
     return isinstance(exc, (httpx.RemoteProtocolError, httpx.ReadError, httpx.ConnectError, httpx.TimeoutException))
 
 
@@ -417,6 +467,14 @@ def remaining_completed_text(completed_text: str, streamed_text: str) -> str:
     return completed_text
 
 
+def strip_visible_tool_call_markup(text: str) -> str:
+    if not text:
+        return ""
+    cleaned = re.sub(r"<tool_call(?:\s+code)?\s*>.*?</tool_call\s*>", "", text, flags=re.I | re.S)
+    cleaned = re.sub(r"</?tool_call(?:\s+code)?\s*>", "", cleaned, flags=re.I)
+    return cleaned
+
+
 def preferred_model(models: list[str], configured: str | None) -> str:
     if configured and image_model_is_available(configured, models):
         return configured
@@ -426,6 +484,18 @@ def preferred_model(models: list[str], configured: str | None) -> str:
         if DEFAULT_CHAT_MODEL.lower() in model.lower():
             return model
     return models[0] if models else DEFAULT_CHAT_MODEL
+
+
+def preferred_web_search_review_model(model: str, available: list[str] | None = None) -> str:
+    preferred = get_settings().preferred_compaction_models
+    if not preferred or not available:
+        return model
+    available_by_lower = {item.lower(): item for item in available}
+    for candidate in preferred:
+        resolved = available_by_lower.get(candidate.lower())
+        if resolved:
+            return resolved
+    return model
 
 
 def attachment_event_data(attachment: Attachment) -> dict:
@@ -477,6 +547,14 @@ def should_force_web_search(context: list[dict]) -> bool:
     return any(term in lowered for term in WEB_SEARCH_FORCE_TERMS)
 
 
+def normalized_web_search_mode(value: str | None) -> str:
+    return normalize_search_depth(value, default="auto")
+
+
+def normalized_web_search_rounds(value: int | None) -> int:
+    return normalize_max_rounds(value, default=3)
+
+
 def latest_user_text(context: list[dict]) -> str:
     for message in reversed(context):
         if message.get("role") != "user":
@@ -502,36 +580,233 @@ def inject_web_search_policy(context: list[dict]) -> None:
     context.insert(insert_at, {"role": "system", "content": WEB_SEARCH_TOOL_POLICY})
 
 
-def inject_web_search_final_answer_context(context: list[dict], sources: list[dict]) -> None:
+def _source_brief_summary(source: dict, *, limit: int = 220) -> str:
+    text = str(source.get("evidence") or source.get("snippet") or "").strip()
+    text = re.sub(r"\s+", " ", text)
+    if not text:
+        return ""
+    if re.search(r"\b(?:tier|support|rerank|confidence|provider|mode):", text, flags=re.I):
+        fallback = str(source.get("snippet") or "").strip()
+        if fallback and fallback != text and not re.search(r"\b(?:tier|support|rerank|confidence|provider|mode):", fallback, flags=re.I):
+            text = fallback
+        else:
+            return ""
+    sentence = re.match(r"^(.+?[。！？!?]|.+?[.;；])", text)
+    if sentence and len(sentence.group(1)) >= 40:
+        text = sentence.group(1)
+    if len(text) > limit:
+        text = text[:limit].rstrip(" ,，.。;；:：") + "..."
+    return text
+
+
+def _source_brief_score(source: dict) -> tuple[float, float, int]:
+    tier = str(source.get("source_tier") or "").strip()
+    support = str(source.get("support_level") or "").strip()
+    confidence = float(source.get("confidence") or 0.0)
+    evidence_len = len(str(source.get("evidence") or source.get("snippet") or ""))
+    tier_bonus = {"official": 4.0, "major_news": 3.0, "normal": 1.0}.get(tier, 0.0)
+    support_bonus = {"high": 1.0, "medium": 0.5}.get(support, 0.0)
+    penalty = -3.0 if tier in {"ugc_low", "spam_low"} or source.get("degraded") else 0.0
+    return (tier_bonus + support_bonus + confidence + penalty, min(evidence_len, 1000) / 1000, -int(source.get("index") or 0))
+
+
+def _source_brief_meta(source: dict) -> str:
+    parts: list[str] = []
+    tier = str(source.get("source_tier") or "").strip()
+    confidence = source.get("confidence")
+    if tier:
+        parts.append(f'tier="{html.escape(tier, quote=True)}"')
+    if isinstance(confidence, (int, float)):
+        parts.append(f'confidence="{float(confidence):.2f}"')
+    return (" " + " ".join(parts)) if parts else ""
+
+
+def _select_web_search_brief_sources(
+    sources: list[dict],
+    *,
+    max_sources: int = 10,
+    per_domain_limit: int = 2,
+) -> tuple[list[dict], int]:
+    candidates: list[dict] = []
+    seen_urls: set[str] = set()
+    for source in sources:
+        if not isinstance(source, dict):
+            continue
+        url = str(source.get("url") or "").strip()
+        if not url or url in seen_urls:
+            continue
+        seen_urls.add(url)
+        if not _source_brief_summary(source):
+            continue
+        if str(source.get("source_tier") or "") in {"ugc_low", "spam_low"} and float(source.get("confidence") or 0.0) < 0.55:
+            continue
+        candidates.append(source)
+    ranked = sorted(candidates, key=_source_brief_score, reverse=True)
+    selected: list[dict] = []
+    domain_counts: dict[str, int] = {}
+    for source in ranked:
+        domain = urlparse(str(source.get("url") or "")).hostname or ""
+        if domain and domain_counts.get(domain, 0) >= per_domain_limit:
+            continue
+        selected.append(source)
+        if domain:
+            domain_counts[domain] = domain_counts.get(domain, 0) + 1
+        if len(selected) >= max_sources:
+            break
+    return selected, max(0, len(candidates) - len(selected))
+
+
+def inject_web_search_final_answer_context(
+    context: list[dict],
+    sources: list[dict],
+    *,
+    user_query: str = "",
+    max_sources: int = 10,
+    max_total_chars: int = 12000,
+) -> None:
     if not sources:
+        context.append(
+            {
+                "role": "system",
+                "content": (
+                    "Web search was enabled, but no sufficiently relevant evidence passed the quality threshold. "
+                    "Do not present uncertain or time-sensitive claims as confirmed; say that the search results were insufficient."
+                ),
+            }
+        )
         return
+    selected_sources, omitted_count = _select_web_search_brief_sources(sources, max_sources=max_sources)
+    high_confidence_count = sum(1 for source in selected_sources if float(source.get("confidence") or 0) >= 0.5)
+    quality_count = sum(1 for source in selected_sources if source.get("source_tier") in {"official", "major_news"})
+    independent_domains = {
+        urlparse(str(source.get("url") or "")).hostname
+        for source in selected_sources
+        if float(source.get("confidence") or 0) >= 0.5 and source.get("url")
+    }
     lines = [
-        "Web search sources for the final answer:",
-        "Use the exact source numbers below for inline citations, for example [[1]] or [[2]].",
-        "Place each marker immediately after the specific claim that is directly supported by that source.",
-        "Do not cite a sentence unless the matching source actually supports it.",
-        "If sources are weak, unrelated, or do not support a claim, say so instead of adding a citation.",
-        "Never add a citation marker just to satisfy formatting.",
-        "Do not append a separate markdown source list.",
+        "Web search brief for the final answer.",
+        f"User question: {_compact_trace_text(user_query, 500) or latest_user_text(context)}",
+        "What the user needs: synthesize the relevant websites below into a direct answer to the user question.",
+        "Citation rules: cite factual claims with the exact source marker like [[1]]. Cite only sources that directly support the claim. Do not output a separate source list.",
+        "Do not call tools or output tool-call markup. Never write <tool_call>, <tool_call code>, JSON tool arguments, or search queries in the final answer.",
+        "Relevant sources:",
     ]
-    for source in sources[:10]:
+    if high_confidence_count < 2:
+        lines.append("Note: fewer than two high-confidence sources were selected; avoid definitive conclusions for contested or time-sensitive claims.")
+    if len({domain for domain in independent_domains if domain}) < 2 or quality_count < 1:
+        lines.append("Note: independent or high-quality source coverage is limited; state uncertainty when evidence is insufficient.")
+    used_chars = sum(len(line) for line in lines)
+    included_sources = 0
+    for source in selected_sources:
         index = int(source.get("index") or 0)
         title = str(source.get("title") or source.get("url") or "").strip()
         url = str(source.get("url") or "").strip()
-        snippet = str(source.get("snippet") or "").strip()
         if not index or not url:
             continue
-        lines.append(f"[[{index}]] {title}")
-        lines.append(f"URL: {url}")
-        if snippet:
-            lines.append(f"Snippet: {snippet[:700]}")
-    context.append({"role": "system", "content": "\n".join(lines)})
+        evidence = _source_brief_summary(source, limit=220)
+        if not evidence:
+            continue
+        meta = _source_brief_meta(source)
+        source_lines = [
+            (
+                f'<source id="{index}" name="{html.escape(title[:160], quote=True)}" '
+                f'url="{html.escape(url[:500], quote=True)}"{meta}>'
+            ),
+            html.escape(evidence, quote=False),
+            "</source>",
+        ]
+        next_chars = sum(len(line) for line in source_lines)
+        if used_chars + next_chars > max_total_chars:
+            omitted_count += len(selected_sources) - included_sources
+            lines.append("More relevant sources are saved in the source panel but omitted here to keep generation stable.")
+            break
+        lines.extend(source_lines)
+        used_chars += next_chars
+        included_sources += 1
+    if omitted_count > 0:
+        lines.append(f"{omitted_count} additional relevant sources are available in the source panel but not included in this generation brief.")
+    brief = "\n".join(lines)
+    perf_logger.info(
+        "web_search_final_brief source_count=%d included_sources=%d chars=%d omitted_sources=%d",
+        len(sources),
+        included_sources,
+        len(brief),
+        omitted_count,
+    )
+    if len(brief) > 12000:
+        perf_logger.warning("web_search_final_brief_large chars=%d source_count=%d", len(brief), len(sources))
+    context.append({"role": "system", "content": brief})
+
+
+def compact_web_search_tool_context(query: str, payload: dict, *, max_results: int = 8, max_chars: int = 6000) -> str:
+    text = format_search_results_for_context(query, payload)
+    if len(text) <= max_chars:
+        return text
+    lines = text.splitlines()
+    compact_lines: list[str] = []
+    current_result = 0
+    for line in lines:
+        if re.match(r"^\d+\. ", line):
+            current_result += 1
+            if current_result > max_results:
+                break
+        if line.strip().startswith("Evidence:"):
+            line = line[:260]
+        compact_lines.append(line)
+        if sum(len(item) for item in compact_lines) >= max_chars:
+            compact_lines.append("Results truncated to keep the final model request stable; use saved source metadata for auditing.")
+            break
+    return "\n".join(compact_lines)
+
+
+def compact_web_search_payload_for_model(payload: dict, *, max_results: int = 8) -> dict:
+    if not isinstance(payload, dict):
+        return {"ok": False, "error": "Invalid web search payload"}
+    compact: dict = {"ok": bool(payload.get("ok"))}
+    if payload.get("error"):
+        compact["error"] = str(payload.get("error") or "")[:300]
+    if payload.get("title"):
+        compact["title"] = str(payload.get("title") or "")[:180]
+    if payload.get("url"):
+        compact["url"] = str(payload.get("url") or "")[:500]
+    if payload.get("content"):
+        compact["content"] = str(payload.get("content") or "")[:1800]
+    results = payload.get("results")
+    if isinstance(results, list):
+        compact_results: list[dict] = []
+        for item in results[:max_results]:
+            if not isinstance(item, dict):
+                continue
+            row: dict = {
+                "title": str(item.get("title") or item.get("url") or "")[:180],
+                "url": str(item.get("url") or "")[:500],
+            }
+            text = str(item.get("evidence") or item.get("snippet") or item.get("content") or "")
+            if text:
+                row["evidence"] = text[:420]
+            aliases = {
+                "source_tier": "sourceTier",
+                "support_level": "supportLevel",
+                "search_depth": "searchDepth",
+                "rerank_status": "rerankStatus",
+            }
+            for key in ("provider", "confidence", "source_tier", "support_level", "search_depth", "rerank_status", "degraded"):
+                value = item.get(key) if key in item else item.get(aliases.get(key, key))
+                if value is not None:
+                    row[key] = value
+            compact_results.append(row)
+        compact["results"] = compact_results
+        if len(results) > len(compact_results):
+            compact["truncated_results"] = len(results) - len(compact_results)
+    return compact
 
 
 def web_search_cache_key(tool_name: str, arguments: dict) -> tuple[str, str] | None:
     if tool_name == "search_web":
         query = re.sub(r"\s+", " ", str(arguments.get("query") or "")).strip().lower()
-        return ("search_web", query) if query else None
+        depth = normalize_search_depth(arguments.get("search_depth") or arguments.get("searchDepth"))
+        rounds = normalize_max_rounds(arguments.get("max_rounds") or arguments.get("maxRounds"))
+        return ("search_web", f"{query}|{depth}|{rounds}") if query else None
     if tool_name == "fetch_url":
         url = str(arguments.get("url") or "").strip()
         return ("fetch_url", url) if url else None
@@ -585,6 +860,666 @@ def web_search_status_payload(
     return data
 
 
+def _web_search_result_support_is_enough(sources: list) -> bool:
+    if not sources:
+        return False
+    high_confidence = [
+        source
+        for source in sources
+        if float(getattr(source, "confidence", 0.0) or 0.0) >= 0.55
+        and getattr(source, "source_tier", None) not in {"ugc_low", "spam_low"}
+    ]
+    domains = {
+        urlparse(str(getattr(source, "url", "") or "")).hostname
+        for source in high_confidence
+        if str(getattr(source, "url", "") or "").strip()
+    }
+    quality_sources = [
+        source for source in high_confidence if getattr(source, "source_tier", None) in {"official", "major_news"}
+    ]
+    return len({domain for domain in domains if domain}) >= 2 and bool(quality_sources)
+
+
+def _parse_search_review_json(text: str) -> dict:
+    raw = (text or "").strip()
+    if not raw:
+        return {}
+    match = re.search(r"\{.*\}", raw, flags=re.S)
+    if match:
+        raw = match.group(0)
+    try:
+        payload = json.loads(raw)
+    except (TypeError, ValueError):
+        return {}
+    return payload if isinstance(payload, dict) else {}
+
+
+def _clean_search_queries(values: object, *, limit: int = 4) -> list[str]:
+    if not isinstance(values, list):
+        return []
+    queries: list[str] = []
+    for item in values:
+        query = re.sub(r"\s+", " ", str(item or "")).strip()
+        if query and query not in queries:
+            queries.append(query[:180])
+        if len(queries) >= limit:
+            break
+    return queries
+
+
+def _clean_fetch_urls(values: object, *, limit: int = 4) -> list[str]:
+    if not isinstance(values, list):
+        return []
+    urls: list[str] = []
+    for item in values:
+        url = str(item or "").strip()
+        if url.startswith(("http://", "https://")) and url not in urls:
+            urls.append(url[:1000])
+        if len(urls) >= limit:
+            break
+    return urls
+
+
+def _compact_trace_text(value: object, limit: int = 220) -> str:
+    return re.sub(r"\s+", " ", str(value or "")).strip()[:limit]
+
+
+def _clean_review_notes(values: object, *, limit: int = 6, item_limit: int = 220) -> list[str]:
+    if not isinstance(values, list):
+        return []
+    notes: list[str] = []
+    for item in values:
+        note = _compact_trace_text(item, item_limit)
+        if note and note not in notes:
+            notes.append(note)
+        if len(notes) >= limit:
+            break
+    return notes
+
+
+def _append_unique_compact(items: list[str], value: object, *, limit: int) -> None:
+    text = _compact_trace_text(value, limit)
+    if text and text not in items:
+        items.append(text)
+
+
+def _search_history_from_trace(trace: dict | None, sources: list | None = None) -> dict:
+    history: dict[str, list] = {
+        "searched_queries": [],
+        "read_urls": [],
+        "failed_urls": [],
+        "source_domains": [],
+        "source_titles": [],
+    }
+    if isinstance(trace, dict):
+        for event in trace.get("events") or []:
+            if not isinstance(event, dict):
+                continue
+            query = event.get("query")
+            url = event.get("url")
+            ok = event.get("ok")
+            if query:
+                _append_unique_compact(history["searched_queries"], query, limit=180)
+            if url:
+                target = history["failed_urls"] if ok is False else history["read_urls"]
+                _append_unique_compact(target, url, limit=500)
+            for source in event.get("sources") or []:
+                if not isinstance(source, dict):
+                    continue
+                source_url = _compact_trace_text(source.get("url"), 500)
+                if source_url:
+                    _append_unique_compact(history["read_urls"], source_url, limit=500)
+                    domain = urlparse(source_url).hostname
+                    if domain:
+                        _append_unique_compact(history["source_domains"], domain, limit=120)
+                _append_unique_compact(history["source_titles"], source.get("title"), limit=160)
+    for source in sources or []:
+        source_url = _compact_trace_text(getattr(source, "url", ""), 500)
+        if source_url:
+            _append_unique_compact(history["read_urls"], source_url, limit=500)
+            domain = urlparse(source_url).hostname
+            if domain:
+                _append_unique_compact(history["source_domains"], domain, limit=120)
+        _append_unique_compact(history["source_titles"], getattr(source, "title", ""), limit=160)
+    history["searched_queries"] = history["searched_queries"][:12]
+    history["read_urls"] = history["read_urls"][:16]
+    history["failed_urls"] = history["failed_urls"][:12]
+    history["source_domains"] = history["source_domains"][:12]
+    history["source_titles"] = history["source_titles"][:12]
+    return history
+
+
+def _search_history_lines(history: dict | None) -> list[str]:
+    if not history:
+        return []
+    sections = [
+        ("Searched queries", history.get("searched_queries") or []),
+        ("Read or discovered URLs", history.get("read_urls") or []),
+        ("Failed URLs to avoid", history.get("failed_urls") or []),
+        ("Current source domains", history.get("source_domains") or []),
+        ("Current source titles", history.get("source_titles") or []),
+    ]
+    lines: list[str] = []
+    for label, values in sections:
+        clean_values = [_compact_trace_text(value, 500) for value in values if _compact_trace_text(value, 500)]
+        if clean_values:
+            lines.append(f"{label}:")
+            lines.extend(f"- {value}" for value in clean_values[:16])
+    return lines
+
+
+def _public_search_result(item: object) -> dict | None:
+    if not isinstance(item, dict):
+        return None
+    url = _compact_trace_text(item.get("url"), 500)
+    if not url:
+        return None
+    row = {
+        "title": _compact_trace_text(item.get("title"), 140) or url,
+        "url": url,
+    }
+    for source_key, target_key in (
+        ("provider", "provider"),
+        ("confidence", "confidence"),
+        ("source_tier", "source_tier"),
+        ("sourceTier", "source_tier"),
+        ("support_level", "support_level"),
+        ("supportLevel", "support_level"),
+        ("search_depth", "search_depth"),
+        ("searchDepth", "search_depth"),
+        ("filter_reason", "filter_reason"),
+        ("filterReason", "filter_reason"),
+    ):
+        if source_key in item and item.get(source_key) not in (None, "", []):
+            row[target_key] = item.get(source_key)
+    if item.get("degraded"):
+        row["degraded"] = True
+    return row
+
+
+def _trace_tool_event(
+    *,
+    round_index: int,
+    phase: str,
+    tool: str,
+    arguments: dict,
+    payload: dict,
+    cached: bool = False,
+) -> dict:
+    query = _compact_trace_text(arguments.get("query"), 220)
+    url = _compact_trace_text(arguments.get("url"), 500)
+    ok = bool(payload.get("ok"))
+    event = {
+        "round": round_index,
+        "phase": phase,
+        "type": "read" if tool == "fetch_url" else "search",
+        "tool": tool,
+        "ok": ok,
+    }
+    if cached:
+        event["cached"] = True
+    if query:
+        event["query"] = query
+    if url:
+        event["url"] = url
+    if not ok:
+        event["error"] = _compact_trace_text(payload.get("error"), 300)
+        return event
+    if isinstance(payload.get("results"), list):
+        results = payload["results"]
+        event["result_count"] = len(results)
+        event["sources"] = [
+            source
+            for source in (_public_search_result(item) for item in results[:8])
+            if source
+        ]
+    elif payload.get("url"):
+        event["result_count"] = 1
+        if payload.get("partial"):
+            event["partial"] = True
+        if payload.get("truncated"):
+            event["truncated"] = True
+        event["sources"] = [
+            {
+                "title": _compact_trace_text(payload.get("title"), 140) or _compact_trace_text(payload.get("url"), 500),
+                "url": _compact_trace_text(payload.get("url"), 500),
+            }
+        ]
+    return event
+
+
+def _trace_review_event(round_index: int, review_payload: dict, search_history: dict | None = None) -> dict:
+    needs_more_value = review_payload.get("needs_more")
+    event = {
+        "round": round_index,
+        "phase": "reviewing",
+        "type": "review",
+        "needs_more": needs_more_value if isinstance(needs_more_value, bool) else None,
+        "new_queries": _clean_search_queries(review_payload.get("new_queries"), limit=6),
+        "urls_to_fetch": _clean_fetch_urls(review_payload.get("urls_to_fetch"), limit=6),
+        "evidence_gaps": _clean_review_notes(review_payload.get("evidence_gaps")),
+        "relevance_notes": _clean_review_notes(review_payload.get("relevance_notes")),
+        "accuracy_notes": _clean_review_notes(review_payload.get("accuracy_notes")),
+        "reason_codes": _clean_review_notes(review_payload.get("reason_codes"), item_limit=80),
+        "stop_reason": _compact_trace_text(review_payload.get("stop_reason"), 220),
+    }
+    if review_payload.get("attempts") is not None:
+        event["attempts"] = int(review_payload.get("attempts") or 0)
+    if review_payload.get("soft_max_rounds_reached"):
+        event["soft_max_rounds_reached"] = True
+    if search_history:
+        event["searched_queries"] = [
+            _compact_trace_text(query, 180)
+            for query in (search_history.get("searched_queries") or [])[:8]
+            if _compact_trace_text(query, 180)
+        ]
+        event["read_urls"] = [
+            _compact_trace_text(url, 500)
+            for url in (search_history.get("read_urls") or [])[:8]
+            if _compact_trace_text(url, 500)
+        ]
+        event["failed_urls"] = [
+            _compact_trace_text(url, 500)
+            for url in (search_history.get("failed_urls") or [])[:6]
+            if _compact_trace_text(url, 500)
+        ]
+        event["source_domains"] = [
+            _compact_trace_text(domain, 120)
+            for domain in (search_history.get("source_domains") or [])[:8]
+            if _compact_trace_text(domain, 120)
+        ]
+    return {key: value for key, value in event.items() if value not in (None, "", [])}
+
+
+def _trace_keyword_plan_event(
+    *,
+    round_index: int,
+    user_query: str,
+    search_mode: str,
+    effective_depth: str,
+    queries: list[str],
+    ok: bool,
+    reason: str | list[str] | None = None,
+    error: str | None = None,
+    decision_summary: str | None = None,
+    attempts: int | None = None,
+) -> dict:
+    event: dict = {
+        "round": round_index,
+        "phase": "planning_queries",
+        "type": "planning",
+        "ok": ok,
+        "query": _compact_trace_text(user_query, 220),
+        "search_mode": _compact_trace_text(search_mode, 40),
+        "effective_depth": _compact_trace_text(effective_depth, 40),
+        "new_queries": [_compact_trace_text(query, 180) for query in queries if _compact_trace_text(query, 180)],
+    }
+    if reason:
+        event["reason_codes"] = _clean_review_notes(reason if isinstance(reason, list) else [reason], item_limit=80)
+    if error:
+        event["error"] = _compact_trace_text(error, 300)
+    if decision_summary:
+        event["decision_summary"] = _compact_trace_text(decision_summary, 220)
+    if attempts is not None:
+        event["attempts"] = int(attempts)
+    return {key: value for key, value in event.items() if value not in (None, "", [])}
+
+
+async def _keyword_plan_stream_json(
+    provider: OpenAICompatibleProvider,
+    *,
+    api_key: str,
+    model: str,
+    messages: list[dict],
+) -> tuple[dict, dict | None]:
+    content_parts: list[str] = []
+    usage: dict | None = None
+    async for event in provider.chat_stream(
+        api_key=api_key,
+        model=model,
+        messages=messages,
+        include_usage=True,
+        max_completion_tokens=180,
+        reasoning_effort="low",
+    ):
+        if event.event == "token":
+            content_parts.append(str(event.data.get("text") or ""))
+        elif event.event == "completed_text":
+            content_parts = [str(event.data.get("text") or "")]
+        elif event.event == "usage":
+            usage = event.data
+    content = "".join(content_parts)
+    return _parse_search_review_json(content), usage
+
+
+def _normalize_planned_depth(value: object, search_mode: str) -> str:
+    requested = normalized_web_search_mode(search_mode)
+    if requested in {"fast", "deep"}:
+        return requested
+    candidate = normalize_search_depth(value, default="fast")
+    return candidate if candidate in {"fast", "deep"} else "fast"
+
+
+async def plan_initial_web_search(
+    *,
+    provider: OpenAICompatibleProvider,
+    api_key: str,
+    model: str,
+    user_query: str,
+    search_mode: str,
+    config_timeout: int,
+    max_attempts: int = WEB_SEARCH_PLANNER_MAX_ATTEMPTS,
+) -> tuple[dict, dict | None]:
+    search_mode = normalized_web_search_mode(search_mode)
+    messages = [
+        {"role": "system", "content": WEB_SEARCH_KEYWORD_PLAN_POLICY},
+        {
+            "role": "user",
+            "content": (
+                f"User question: {user_query}\n"
+                f"Search mode: {search_mode}\n"
+                "Choose effective_depth and generate first-round search keywords. If the question is broad or "
+                "conversational, make the queries specific enough for search engines. Include recency terms when the "
+                "user asks for latest/current facts."
+            ),
+        },
+    ]
+    timeout_seconds = float(min(10, max(6, int(config_timeout or 0))))
+    attempts = max(1, int(max_attempts or 1))
+    usage_total: dict | None = None
+    last_error = "keyword_plan_failed"
+    for attempt in range(1, attempts + 1):
+        started = time.perf_counter()
+        try:
+            payload, usage = await asyncio.wait_for(
+                _keyword_plan_stream_json(provider, api_key=api_key, model=model, messages=messages),
+                timeout=timeout_seconds,
+            )
+            usage_total = add_usage_totals(usage_total, usage)
+            elapsed_ms = int((time.perf_counter() - started) * 1000)
+            queries = _clean_search_queries(payload.get("queries"), limit=WEB_SEARCH_INITIAL_MAX_QUERIES)
+            effective_depth = _normalize_planned_depth(payload.get("effective_depth") or payload.get("effectiveDepth"), search_mode)
+            reason_codes = _clean_review_notes(payload.get("reason_codes") or payload.get("reasonCodes"), item_limit=80)
+            decision_summary = _compact_trace_text(payload.get("decision_summary") or payload.get("decisionSummary"), 220)
+            if not queries:
+                last_error = "keyword_plan_empty"
+                perf_logger.warning(
+                    "web_search_keyword_plan_empty model=%s attempt=%d/%d elapsed_ms=%d user_query_chars=%d",
+                    model,
+                    attempt,
+                    attempts,
+                    elapsed_ms,
+                    len(user_query),
+                )
+                continue
+            perf_logger.info(
+                "web_search_keyword_plan_done model=%s attempt=%d/%d elapsed_ms=%d depth=%s queries=%d",
+                model,
+                attempt,
+                attempts,
+                elapsed_ms,
+                effective_depth,
+                len(queries),
+            )
+            return {
+                "ok": True,
+                "effective_depth": effective_depth,
+                "queries": queries,
+                "reason_codes": reason_codes,
+                "decision_summary": decision_summary,
+                "attempts": attempt,
+            }, usage_total
+        except asyncio.TimeoutError:
+            elapsed_ms = int((time.perf_counter() - started) * 1000)
+            last_error = "keyword_plan_timeout"
+            perf_logger.warning("web_search_keyword_plan_timeout model=%s attempt=%d/%d elapsed_ms=%d", model, attempt, attempts, elapsed_ms)
+        except Exception as exc:
+            elapsed_ms = int((time.perf_counter() - started) * 1000)
+            last_error = "keyword_plan_failed"
+            perf_logger.warning(
+                "web_search_keyword_plan_failed model=%s attempt=%d/%d elapsed_ms=%d error=%s",
+                model,
+                attempt,
+                attempts,
+                elapsed_ms,
+                str(exc)[:300],
+            )
+    fallback_depth = normalized_web_search_mode(search_mode)
+    if fallback_depth == "auto":
+        fallback_depth = "fast"
+    return {
+        "ok": False,
+        "effective_depth": fallback_depth,
+        "queries": [user_query] if user_query else [],
+        "reason_codes": [last_error],
+        "decision_summary": "自动搜索规划失败，已回退为快速搜索。",
+        "attempts": attempts,
+        "error": last_error,
+    }, usage_total
+
+
+async def plan_initial_web_search_queries(
+    *,
+    provider: OpenAICompatibleProvider,
+    api_key: str,
+    model: str,
+    user_query: str,
+    search_mode: str,
+    effective_depth: str,
+    config_timeout: int,
+) -> tuple[list[str], dict | None, str | None]:
+    payload, usage = await plan_initial_web_search(
+        provider=provider,
+        api_key=api_key,
+        model=model,
+        user_query=user_query,
+        search_mode=search_mode if search_mode != "auto" else effective_depth,
+        config_timeout=config_timeout,
+    )
+    reason_codes = payload.get("reason_codes") if isinstance(payload, dict) else []
+    reason = reason_codes[0] if isinstance(reason_codes, list) and reason_codes else None
+    return _clean_search_queries(payload.get("queries"), limit=WEB_SEARCH_INITIAL_MAX_QUERIES), usage, None if payload.get("ok") else reason
+
+
+async def _review_stream_json(
+    provider: OpenAICompatibleProvider,
+    *,
+    api_key: str,
+    model: str,
+    messages: list[dict],
+) -> tuple[dict, dict | None]:
+    content_parts: list[str] = []
+    usage: dict | None = None
+    async for event in provider.chat_stream(
+        api_key=api_key,
+        model=model,
+        messages=messages,
+        include_usage=True,
+        max_completion_tokens=300,
+        reasoning_effort="low",
+    ):
+        if event.event == "token":
+            content_parts.append(str(event.data.get("text") or ""))
+        elif event.event == "completed_text":
+            content_parts = [str(event.data.get("text") or "")]
+        elif event.event == "usage":
+            usage = event.data
+    content = "".join(content_parts)
+    return _parse_search_review_json(content), usage
+
+
+async def review_web_search_evidence(
+    *,
+    provider: OpenAICompatibleProvider,
+    api_key: str,
+    model: str,
+    user_query: str,
+    sources: list,
+    search_history: dict | None = None,
+    round_index: int,
+    max_rounds: int,
+    reasoning_effort: str | None,
+    config_timeout: int,
+    available_models: list[str] | None = None,
+    soft_max_rounds: int | None = None,
+    max_attempts: int = WEB_SEARCH_REVIEW_MAX_ATTEMPTS,
+) -> tuple[dict, dict | None]:
+    review_reasoning_effort = "low"
+    soft_limit_reached = bool(soft_max_rounds and round_index >= soft_max_rounds)
+    evidence_lines = []
+    for index, source in enumerate(sources[:8], start=1):
+        evidence_lines.append(
+            "\n".join(
+                [
+                    f"[{index}] {getattr(source, 'title', '')}",
+                    f"URL: {getattr(source, 'url', '')}",
+                    f"provider={getattr(source, 'provider', '') or 'unknown'} confidence={getattr(source, 'confidence', '') or 'unknown'} tier={getattr(source, 'source_tier', '') or 'unknown'}",
+                    f"evidence={str(getattr(source, 'evidence', '') or getattr(source, 'snippet', '') or '')[:800]}",
+                ]
+            )
+        )
+    history_lines = _search_history_lines(search_history)
+    if review_reasoning_effort == "low":
+        action_policy = (
+            "The user's current reasoning effort is LOW. Be conservative and cheap: prefer stopping with the "
+            "current evidence unless there is a clear evidence gap. Repeat or slightly vary a searched keyword only "
+            "when this round's results for that keyword were imprecise, noisy, off-target, stale, or lacked "
+            "body-level evidence. If the keyword already returned precise useful evidence, do not repeat it. If more "
+            "work is required, propose at most one high-value query or one unread authoritative URL."
+        )
+    else:
+        action_policy = (
+            "The user's current reasoning effort is not LOW. Repeat or slightly vary a searched keyword only when "
+            "this round's results for that keyword were imprecise, noisy, off-target, stale, or lacked body-level "
+            "evidence; name that repeat-worthy gap in evidence_gaps or relevance_notes. Prefer clearly new angles "
+            "and unread authoritative URLs when the previous keyword already returned precise useful evidence."
+        )
+    if soft_limit_reached:
+        action_policy += (
+            " The user-selected deep-search round target has been reached. Continue past this soft limit only if "
+            "there is a concrete, high-value evidence gap that prevents a reliable answer; otherwise set needs_more "
+            "to false and explain that the evidence is sufficient or that remaining uncertainty should be stated."
+        )
+    messages = [
+        {"role": "system", "content": WEB_SEARCH_DEEP_REVIEW_POLICY},
+        {
+            "role": "user",
+            "content": (
+                f"User query: {user_query}\n"
+                f"Round: {round_index}/{max_rounds}\n"
+                f"User-selected soft max rounds: {soft_max_rounds or max_rounds}\n"
+                f"Soft max reached: {'yes' if soft_limit_reached else 'no'}\n"
+                f"Review reasoning effort: {review_reasoning_effort}\n"
+                "Search history so far:\n"
+                + ("\n".join(history_lines) if history_lines else "No search history was recorded yet.")
+                + "\n\n"
+                + action_policy
+                + " Avoid URLs already listed as failed.\n"
+                "Current evidence:\n"
+                + ("\n\n".join(evidence_lines) if evidence_lines else "No evidence yet.")
+            ),
+        },
+    ]
+    review_model = model
+    timeout_seconds = float(min(18, max(10, int(config_timeout or 0))))
+    payload_chars = sum(len(str(item)) for item in messages)
+    attempts = max(1, int(max_attempts or 1))
+    usage_total: dict | None = None
+    last_failure = "review_failed"
+    for attempt in range(1, attempts + 1):
+        started = time.perf_counter()
+        perf_logger.info(
+            "web_search_review_start model=%s round=%d max_rounds=%d attempt=%d/%d source_count=%d payload_chars=%d timeout_seconds=%.1f",
+            review_model,
+            round_index,
+            max_rounds,
+            attempt,
+            attempts,
+            len(sources),
+            payload_chars,
+            timeout_seconds,
+        )
+        try:
+            payload, usage = await asyncio.wait_for(
+                _review_stream_json(provider, api_key=api_key, model=review_model, messages=messages),
+                timeout=timeout_seconds,
+            )
+            usage_total = add_usage_totals(usage_total, usage)
+            elapsed_ms = int((time.perf_counter() - started) * 1000)
+            if not payload:
+                last_failure = "review_unparseable"
+                perf_logger.warning(
+                    "web_search_review_failed model=%s round=%d attempt=%d/%d elapsed_ms=%d reason=empty_or_unparseable",
+                    review_model,
+                    round_index,
+                    attempt,
+                    attempts,
+                    elapsed_ms,
+                )
+                continue
+            payload["attempts"] = attempt
+            if soft_limit_reached:
+                payload["soft_max_rounds_reached"] = True
+            perf_logger.info(
+                "web_search_review_done model=%s round=%d attempt=%d/%d elapsed_ms=%d needs_more=%s new_queries=%d urls=%d",
+                review_model,
+                round_index,
+                attempt,
+                attempts,
+                elapsed_ms,
+                bool(payload.get("needs_more", True)),
+                len(_clean_search_queries(payload.get("new_queries"), limit=WEB_SEARCH_REVIEW_MAX_QUERIES_PER_ROUND)),
+                len(_clean_fetch_urls(payload.get("urls_to_fetch"), limit=WEB_SEARCH_REVIEW_MAX_URLS_PER_ROUND)),
+            )
+            return payload, usage_total
+        except asyncio.TimeoutError:
+            elapsed_ms = int((time.perf_counter() - started) * 1000)
+            last_failure = "review_timeout"
+            perf_logger.warning(
+                "web_search_review_timeout model=%s round=%d attempt=%d/%d elapsed_ms=%d timeout_seconds=%.1f",
+                review_model,
+                round_index,
+                attempt,
+                attempts,
+                elapsed_ms,
+                timeout_seconds,
+            )
+        except Exception as exc:
+            elapsed_ms = int((time.perf_counter() - started) * 1000)
+            last_failure = "review_failed"
+            perf_logger.warning(
+                "web_search_review_failed model=%s round=%d attempt=%d/%d elapsed_ms=%d error=%s",
+                review_model,
+                round_index,
+                attempt,
+                attempts,
+                elapsed_ms,
+                str(exc)[:300],
+            )
+    stop_reason_by_failure = {
+        "review_timeout": "证据审查连续超时，已停止补充搜索并使用现有证据回答。",
+        "review_unparseable": "证据审查结果连续不可解析，已停止补充搜索并使用现有证据回答。",
+        "review_failed": "证据审查连续失败，已停止补充搜索并使用现有证据回答。",
+    }
+    evidence_gap_by_failure = {
+        "review_timeout": "review timed out after retries",
+        "review_unparseable": "review returned no parseable JSON after retries",
+        "review_failed": "review failed after retries",
+    }
+    payload = {
+        "needs_more": False,
+        "new_queries": [],
+        "urls_to_fetch": [],
+        "evidence_gaps": [evidence_gap_by_failure.get(last_failure, "review failed after retries")],
+        "reason_codes": [last_failure],
+        "stop_reason": stop_reason_by_failure.get(last_failure, stop_reason_by_failure["review_failed"]),
+        "attempts": attempts,
+    }
+    if soft_limit_reached:
+        payload["soft_max_rounds_reached"] = True
+    return payload, usage_total
+
+
 async def run_web_search_tool_loop(
     *,
     provider: OpenAICompatibleProvider,
@@ -594,12 +1529,15 @@ async def run_web_search_tool_loop(
     conversation_id: str,
     assistant_message_id: str,
     reasoning_effort: str | None,
-) -> tuple[list, dict | None]:
+    search_mode: str = "auto",
+    max_rounds: int = 3,
+    available_models: list[str] | None = None,
+) -> tuple[list, dict | None, dict | None]:
     config = effective_web_search_config()
     if not config.configured:
         raise HTTPException(
             status_code=400,
-            detail={"code": "WEB_SEARCH_NOT_CONFIGURED", "message": "联网搜索尚未配置 SearXNG，无法启用。"},
+            detail={"code": "WEB_SEARCH_NOT_CONFIGURED", "message": "联网搜索尚未启用，无法使用。"},
         )
     tools = web_search_tools()
     sources: list = []
@@ -607,19 +1545,116 @@ async def run_web_search_tool_loop(
     executed_calls = 0
     saw_tool_calls = False
     had_tool_error = False
+    tool_turn_failed = False
+    should_stop_after_batch = False
     tool_cache: dict[tuple[str, str], dict] = {}
+    search_mode = normalized_web_search_mode(search_mode)
+    requested_max_rounds = normalized_web_search_rounds(max_rounds)
+    hard_max_rounds = WEB_SEARCH_DEEP_HARD_MAX_ROUNDS
+    base_user_query = web_search_fallback_query(context)
+    effective_depth = search_mode if search_mode in {"fast", "deep"} else "fast"
+    iterative_deep_search = False
+    trace: dict = {
+        "mode": search_mode,
+        "effective_depth": effective_depth,
+        "requested_max_rounds": requested_max_rounds,
+        "max_rounds": hard_max_rounds,
+        "planning_attempts": 0,
+        "review_reasoning_effort": "low",
+        "events": [],
+    }
     inject_web_search_policy(context)
-    should_force_search = should_force_web_search(context)
-    for _ in range(max(1, config.max_tool_calls)):
-        turn = await provider.tool_call_turn(
+    should_force_search = search_mode in {"auto", "fast", "deep"} or should_force_web_search(context)
+    planned_queries: list[str] = []
+    planner_failed = False
+    planner_payload: dict | None = None
+    if search_mode == "auto" and should_force_search and base_user_query:
+        await publish_conversation_event(
+            conversation_id,
+            "web_search_status",
+            web_search_status_payload(
+                conversation_id=conversation_id,
+                assistant_message_id=assistant_message_id,
+                phase="planning_queries",
+                detail="正在规划联网搜索策略和首轮关键词。",
+            ),
+        )
+        planner_payload, plan_usage = await plan_initial_web_search(
+            provider=provider,
             api_key=api_key,
             model=model,
-            messages=context,
-            tools=tools,
-            max_completion_tokens=768,
-            reasoning_effort=reasoning_effort,
-            timeout_seconds=max(10, config.timeout_seconds + config.fetch_timeout_seconds),
+            user_query=base_user_query,
+            search_mode=search_mode,
+            config_timeout=config.timeout_seconds,
         )
+        usage_total = add_usage_totals(usage_total, plan_usage)
+        planner_failed = not bool(planner_payload.get("ok"))
+        effective_depth = _normalize_planned_depth(planner_payload.get("effective_depth"), search_mode)
+        planned_queries = _clean_search_queries(planner_payload.get("queries"), limit=WEB_SEARCH_INITIAL_MAX_QUERIES)
+        trace["effective_depth"] = effective_depth
+        trace["planning_attempts"] = int(planner_payload.get("attempts") or 0)
+        trace["planner_reason_codes"] = _clean_review_notes(planner_payload.get("reason_codes"), item_limit=80)
+        trace["planner_summary"] = _compact_trace_text(planner_payload.get("decision_summary"), 220)
+        trace["events"].append(
+            _trace_keyword_plan_event(
+                round_index=1,
+                user_query=base_user_query,
+                search_mode=search_mode,
+                effective_depth=effective_depth,
+                queries=planned_queries,
+                ok=not planner_failed,
+                reason=trace["planner_reason_codes"],
+                error=planner_payload.get("error"),
+                decision_summary=trace["planner_summary"],
+                attempts=trace["planning_attempts"],
+            )
+        )
+        if planner_failed and not planned_queries:
+            planned_queries = [base_user_query]
+        if not planned_queries and base_user_query:
+            planned_queries = [base_user_query]
+    iterative_deep_search = effective_depth == "deep"
+    should_try_tool_turn = not (search_mode == "auto" and planned_queries)
+    for _ in range(max(1, config.max_tool_calls)) if should_try_tool_turn else []:
+        try:
+            turn = await provider.tool_call_turn(
+                api_key=api_key,
+                model=model,
+                messages=context,
+                tools=tools,
+                max_completion_tokens=768,
+                reasoning_effort="low",
+                timeout_seconds=max(10, config.timeout_seconds + config.fetch_timeout_seconds),
+            )
+        except Exception as exc:
+            tool_turn_failed = True
+            trace["events"].append(
+                {
+                    "round": 1,
+                    "phase": "tool_call_turn",
+                    "type": "planning",
+                    "ok": False,
+                    "error": _compact_trace_text(str(exc), 300),
+                    "attempts": 1,
+                }
+            )
+            perf_logger.warning(
+                "web_search_tool_turn_failed model=%s reasoning_effort=low error=%s",
+                model,
+                str(exc)[:300],
+            )
+            await publish_conversation_event(
+                conversation_id,
+                "web_search_status",
+                web_search_status_payload(
+                    conversation_id=conversation_id,
+                    assistant_message_id=assistant_message_id,
+                    phase="planning_queries",
+                    detail="模型工具调用决策失败，已改用自动规划关键词继续搜索。",
+                    error=str(exc)[:300],
+                ),
+            )
+            break
         usage_total = add_usage_totals(usage_total, turn.usage)
         if not turn.tool_calls:
             break
@@ -627,9 +1662,16 @@ async def run_web_search_tool_loop(
         if turn.assistant_message:
             context.append(turn.assistant_message)
         for call in turn.tool_calls:
-            cache_key = web_search_cache_key(call.name, call.arguments)
+            effective_arguments = dict(call.arguments)
+            if call.name == "search_web":
+                effective_arguments.setdefault("search_depth", effective_depth)
+                if effective_depth == "deep":
+                    effective_arguments.setdefault("max_rounds", hard_max_rounds)
+            cache_key = web_search_cache_key(call.name, effective_arguments)
+            cached_payload = False
             if cache_key and cache_key in tool_cache:
                 payload = tool_cache[cache_key]
+                cached_payload = True
             elif executed_calls >= config.max_tool_calls:
                 payload = {"ok": False, "error": "Web search tool call limit reached"}
             else:
@@ -643,16 +1685,18 @@ async def run_web_search_tool_loop(
                         assistant_message_id=assistant_message_id,
                         phase=phase,
                         tool=call.name,
-                        arguments=call.arguments,
+                        arguments=effective_arguments,
                     ),
                 )
-                payload = await run_web_search_tool(call.name, call.arguments, config)
+                payload = await run_web_search_tool(call.name, effective_arguments, config)
                 if cache_key:
                     tool_cache[cache_key] = payload
                 if payload.get("ok"):
                     sources.extend(tool_result_sources(payload))
                     if call.name == "search_web" and isinstance(payload.get("results"), list):
                         result_count = len(payload["results"])
+                        if result_count > 0:
+                            should_stop_after_batch = True
                         await publish_conversation_event(
                             conversation_id,
                             "web_search_status",
@@ -661,7 +1705,7 @@ async def run_web_search_tool_loop(
                                 assistant_message_id=assistant_message_id,
                                 phase=phase,
                                 tool=call.name,
-                                arguments=call.arguments,
+                                arguments=effective_arguments,
                                 payload=payload,
                                 detail=f"搜索返回 {result_count} 条结果",
                             ),
@@ -676,25 +1720,83 @@ async def run_web_search_tool_loop(
                             assistant_message_id=assistant_message_id,
                             phase="failed",
                             tool=call.name,
-                            arguments=call.arguments,
+                            arguments=effective_arguments,
                             payload=payload,
                             error=str(payload.get("error") or ""),
                         ),
                     )
+            trace["events"].append(
+                _trace_tool_event(
+                    round_index=1,
+                    phase="tool_call",
+                    tool=call.name,
+                    arguments=effective_arguments,
+                    payload=payload,
+                    cached=cached_payload,
+                )
+            )
             context.append(
                 {
                     "role": "tool",
                     "tool_call_id": call.id,
                     "name": call.name,
-                    "content": json_tool_output(payload),
+                    "content": json_tool_output(compact_web_search_payload_for_model(payload)),
                 }
             )
-        if executed_calls >= config.max_tool_calls:
+        if should_stop_after_batch or executed_calls >= config.max_tool_calls:
             break
-    if not saw_tool_calls and should_force_search:
-        query = web_search_fallback_query(context)
-        if query:
+    if (not saw_tool_calls or tool_turn_failed) and should_force_search:
+        if not planned_queries and base_user_query:
+            await publish_conversation_event(
+                conversation_id,
+                "web_search_status",
+                web_search_status_payload(
+                    conversation_id=conversation_id,
+                    assistant_message_id=assistant_message_id,
+                    phase="planning_queries",
+                    detail="正在规划联网搜索策略和首轮关键词。",
+                ),
+            )
+            planner_payload, plan_usage = await plan_initial_web_search(
+                provider=provider,
+                api_key=api_key,
+                model=model,
+                user_query=base_user_query,
+                search_mode=search_mode,
+                config_timeout=config.timeout_seconds,
+            )
+            usage_total = add_usage_totals(usage_total, plan_usage)
+            planner_failed = not bool(planner_payload.get("ok"))
+            effective_depth = _normalize_planned_depth(planner_payload.get("effective_depth"), search_mode)
+            planned_queries = _clean_search_queries(planner_payload.get("queries"), limit=WEB_SEARCH_INITIAL_MAX_QUERIES)
+            trace["effective_depth"] = effective_depth
+            trace["planning_attempts"] = int(planner_payload.get("attempts") or 0)
+            trace["planner_reason_codes"] = _clean_review_notes(planner_payload.get("reason_codes"), item_limit=80)
+            trace["planner_summary"] = _compact_trace_text(planner_payload.get("decision_summary"), 220)
+            trace["events"].append(
+                _trace_keyword_plan_event(
+                    round_index=1,
+                    user_query=base_user_query,
+                    search_mode=search_mode,
+                    effective_depth=effective_depth,
+                    queries=planned_queries,
+                    ok=not planner_failed,
+                    reason=trace["planner_reason_codes"],
+                    error=planner_payload.get("error"),
+                    decision_summary=trace["planner_summary"],
+                    attempts=trace["planning_attempts"],
+                )
+            )
+            if planner_failed and not planned_queries:
+                planned_queries = [base_user_query]
+            if not planned_queries and base_user_query:
+                planned_queries = [base_user_query]
+            iterative_deep_search = effective_depth == "deep"
+        for query in planned_queries:
             arguments = {"query": query}
+            arguments["search_depth"] = effective_depth
+            if effective_depth == "deep":
+                arguments["max_rounds"] = hard_max_rounds
             executed_calls += 1
             await publish_conversation_event(
                 conversation_id,
@@ -708,6 +1810,15 @@ async def run_web_search_tool_loop(
                 ),
             )
             payload = await run_web_search_tool("search_web", arguments, config)
+            trace["events"].append(
+                _trace_tool_event(
+                    round_index=1,
+                    phase="auto_fallback" if planner_failed else "keyword_plan",
+                    tool="search_web",
+                    arguments=arguments,
+                    payload=payload,
+                )
+            )
             if payload.get("ok"):
                 sources.extend(tool_result_sources(payload))
                 if isinstance(payload.get("results"), list):
@@ -727,16 +1838,134 @@ async def run_web_search_tool_loop(
                     )
             else:
                 had_tool_error = True
-            context.append(
-                {
-                    "role": "user",
-                    "content": (
-                        "Web search was enabled and the model did not call tools, so the backend ran search_web automatically. "
-                        "Use the formatted results below only if relevant; if they are weak or unrelated, say so.\n\n"
-                        f"{format_search_results_for_context(query, payload)}"
-                    ),
-                }
+    if iterative_deep_search and hard_max_rounds > 1:
+        user_query = base_user_query
+        failed_urls: set[str] = set()
+        for round_index in range(2, hard_max_rounds + 1):
+            search_history = _search_history_from_trace(trace, sources)
+            failed_urls.update(str(url) for url in search_history.get("failed_urls") or [])
+            await publish_conversation_event(
+                conversation_id,
+                "web_search_status",
+                web_search_status_payload(
+                    conversation_id=conversation_id,
+                    assistant_message_id=assistant_message_id,
+                    phase="reviewing",
+                    detail=f"正在审查第 {round_index - 1} 轮证据，判断是否需要继续深搜。",
+                ),
             )
+            review_payload, review_usage = await review_web_search_evidence(
+                provider=provider,
+                api_key=api_key,
+                model=model,
+                user_query=user_query,
+                sources=sources,
+                search_history=search_history,
+                round_index=round_index - 1,
+                max_rounds=hard_max_rounds,
+                reasoning_effort=reasoning_effort,
+                config_timeout=config.timeout_seconds,
+                available_models=available_models,
+                soft_max_rounds=requested_max_rounds,
+            )
+            usage_total = add_usage_totals(usage_total, review_usage)
+            if review_payload.get("soft_max_rounds_reached"):
+                trace["soft_max_rounds_reached"] = True
+            if review_payload.get("attempts") is not None:
+                trace["review_attempts"] = max(int(trace.get("review_attempts") or 0), int(review_payload.get("attempts") or 0))
+            needs_more = bool(review_payload.get("needs_more", True))
+            new_queries = _clean_search_queries(
+                review_payload.get("new_queries"),
+                limit=WEB_SEARCH_REVIEW_MAX_QUERIES_PER_ROUND,
+            )
+            trace["events"].append(_trace_review_event(round_index - 1, review_payload, search_history))
+            urls_to_fetch = _clean_fetch_urls(
+                review_payload.get("urls_to_fetch"),
+                limit=WEB_SEARCH_REVIEW_MAX_URLS_PER_ROUND,
+            )
+            if not needs_more:
+                trace["early_stop"] = True
+                reason_codes = set(_clean_review_notes(review_payload.get("reason_codes"), item_limit=80))
+                if "review_timeout" in reason_codes:
+                    trace["stop_code"] = "review_timeout"
+                elif "review_failed" in reason_codes:
+                    trace["stop_code"] = "review_failed"
+                elif "review_unparseable" in reason_codes:
+                    trace["stop_code"] = "review_unparseable"
+                else:
+                    trace["stop_code"] = "evidence_enough"
+                trace["stop_reason"] = _compact_trace_text(review_payload.get("stop_reason"), 220) or f"模型判断第 {round_index - 1} 轮证据已足够。"
+                break
+            new_queries = new_queries[:WEB_SEARCH_REVIEW_MAX_QUERIES_PER_ROUND]
+            remaining_actions = max(0, WEB_SEARCH_REVIEW_MAX_ACTIONS_PER_ROUND - len(new_queries))
+            urls_to_fetch = [
+                url for url in urls_to_fetch if url not in failed_urls
+            ][: min(WEB_SEARCH_REVIEW_MAX_URLS_PER_ROUND, remaining_actions)]
+            if not new_queries and not urls_to_fetch:
+                trace["stop_code"] = "review_no_actions"
+                trace["stop_reason"] = "模型判断仍需更多证据，但未提出新的搜索关键词或读取 URL，深搜已停止。"
+                break
+            await publish_conversation_event(
+                conversation_id,
+                "web_search_status",
+                web_search_status_payload(
+                    conversation_id=conversation_id,
+                    assistant_message_id=assistant_message_id,
+                    phase="deepening",
+                    detail=f"正在进行第 {round_index} 轮深搜：{', '.join(new_queries[:3]) or '读取补充页面'}",
+                ),
+            )
+            round_payloads: list[tuple[str, dict, dict]] = []
+            for query in new_queries:
+                arguments = {"query": query, "search_depth": "deep", "max_rounds": hard_max_rounds}
+                await publish_conversation_event(
+                    conversation_id,
+                    "web_search_status",
+                    web_search_status_payload(
+                        conversation_id=conversation_id,
+                        assistant_message_id=assistant_message_id,
+                        phase="searching",
+                        tool="search_web",
+                        arguments=arguments,
+                        detail=f"第 {round_index} 轮搜索：{query}",
+                    ),
+                )
+                payload = await run_web_search_tool("search_web", arguments, config)
+                round_payloads.append(("search_web", arguments, payload))
+            for url in urls_to_fetch:
+                arguments = {"url": url, "focus": user_query}
+                await publish_conversation_event(
+                    conversation_id,
+                    "web_search_status",
+                    web_search_status_payload(
+                        conversation_id=conversation_id,
+                        assistant_message_id=assistant_message_id,
+                        phase="reading",
+                        tool="fetch_url",
+                        arguments=arguments,
+                        detail=f"第 {round_index} 轮读取：{url}",
+                    ),
+                )
+                payload = await run_web_search_tool("fetch_url", arguments, config)
+                round_payloads.append(("fetch_url", arguments, payload))
+                if not payload.get("ok"):
+                    failed_urls.add(url)
+            for tool_name, arguments, payload in round_payloads:
+                executed_calls += 1
+                if payload.get("ok"):
+                    sources.extend(tool_result_sources(payload))
+                trace["events"].append(
+                    _trace_tool_event(
+                        round_index=round_index,
+                        phase="deepening",
+                        tool=tool_name,
+                        arguments=arguments,
+                        payload=payload,
+                    )
+                )
+        if "stop_reason" not in trace and trace["events"]:
+            trace["stop_code"] = "max_deep_rounds_reached"
+            trace["stop_reason"] = f"已达到深搜硬上限 {hard_max_rounds} 轮，使用现有证据回答。"
     if executed_calls:
         failed_without_sources = had_tool_error and not sources
         source_count = len({getattr(source, "url", "") for source in sources})
@@ -751,7 +1980,14 @@ async def run_web_search_tool_loop(
                 detail="联网搜索失败，正在整理回答。" if failed_without_sources else "联网搜索已完成，正在整理回答。",
             ),
         )
-    return sources, usage_total
+    trace["source_count"] = len({getattr(source, "url", "") for source in sources if getattr(source, "url", "")})
+    trace["search_history"] = _search_history_from_trace(trace, sources)
+    trace["executed_rounds"] = max((int(event.get("round") or 0) for event in trace["events"]), default=0)
+    if "early_stop" not in trace:
+        trace["early_stop"] = False
+    if "stop_reason" not in trace and executed_calls:
+        trace["stop_reason"] = "搜索完成，正在整理回答。"
+    return sources, usage_total, trace if trace["events"] else None
 
 
 def model_supports_vision(model: str | None) -> bool:
@@ -945,6 +2181,8 @@ async def prepare_chat_messages(user_id: str, payload: SendMessageRequest, conve
                 user_id=user_id,
                 title=title,
                 web_search_enabled=bool(payload.web_search_enabled),
+                web_search_mode=normalized_web_search_mode(payload.web_search_mode),
+                web_search_max_rounds=normalized_web_search_rounds(payload.web_search_max_rounds),
             )
             db.add(conversation)
             await db.flush()
@@ -956,6 +2194,10 @@ async def prepare_chat_messages(user_id: str, payload: SendMessageRequest, conve
                 raise HTTPException(status_code=403, detail={"code": "FORBIDDEN", "message": "会话不存在"})
             if payload.web_search_enabled is not None:
                 conversation.web_search_enabled = payload.web_search_enabled
+            if payload.web_search_mode is not None:
+                conversation.web_search_mode = normalized_web_search_mode(payload.web_search_mode)
+            if payload.web_search_max_rounds is not None:
+                conversation.web_search_max_rounds = normalized_web_search_rounds(payload.web_search_max_rounds)
 
         upload_attachments, referenced_attachments = await resolve_message_attachments(
             db,
@@ -1148,6 +2390,8 @@ async def stream_chat(user_id: str, payload: SendMessageRequest, conversation_id
                 user_id=user_id,
                 title=title,
                 web_search_enabled=bool(payload.web_search_enabled),
+                web_search_mode=normalized_web_search_mode(payload.web_search_mode),
+                web_search_max_rounds=normalized_web_search_rounds(payload.web_search_max_rounds),
             )
             db.add(conversation)
             await db.flush()
@@ -1160,6 +2404,10 @@ async def stream_chat(user_id: str, payload: SendMessageRequest, conversation_id
                 return
             if payload.web_search_enabled is not None:
                 conversation.web_search_enabled = payload.web_search_enabled
+            if payload.web_search_mode is not None:
+                conversation.web_search_mode = normalized_web_search_mode(payload.web_search_mode)
+            if payload.web_search_max_rounds is not None:
+                conversation.web_search_max_rounds = normalized_web_search_rounds(payload.web_search_max_rounds)
 
         try:
             upload_attachments, referenced_attachments = await resolve_message_attachments(
@@ -1426,7 +2674,9 @@ async def stream_chat(user_id: str, payload: SendMessageRequest, conversation_id
                 pending_next = asyncio.ensure_future(_safe_anext(stream))
 
                 if event.event == "token":
-                    text = event.data["text"]
+                    text = strip_visible_tool_call_markup(event.data["text"])
+                    if not text:
+                        continue
                     buffer.append(text)
                     if not first_token_logged:
                         first_token_logged = True
@@ -1446,7 +2696,7 @@ async def stream_chat(user_id: str, payload: SendMessageRequest, conversation_id
                         },
                     )
                 elif event.event == "completed_text":
-                    text = event.data.get("text") or ""
+                    text = strip_visible_tool_call_markup(event.data.get("text") or "")
                     current = "".join(buffer)
                     remaining = remaining_completed_text(text, current)
                     if remaining:
@@ -1551,6 +2801,7 @@ async def stream_chat(user_id: str, payload: SendMessageRequest, conversation_id
                 assistant.tokens_source = tokens_source
                 assistant.first_token_seconds = first_token_seconds
                 assistant.web_search_sources_json = structured_sources or None
+                assistant.web_search_trace_json = None
                 await db.commit()
         except Exception as exc:
             logger.exception(
@@ -1611,6 +2862,8 @@ async def stream_chat(user_id: str, payload: SendMessageRequest, conversation_id
                 "status": "completed",
                 "web_search_sources": structured_sources,
                 "webSearchSources": structured_sources,
+                "web_search_trace": None,
+                "webSearchTrace": None,
                 "finished_at": datetime.utcnow().isoformat(),
             },
         )
@@ -2205,6 +3458,8 @@ async def _persist_assistant_partial(
     total_tokens: int | None = None,
     tokens_source: str | None = None,
     first_token_seconds: int | None = None,
+    web_search_sources: list | None = None,
+    web_search_trace: dict | None = None,
 ) -> None:
     async with SessionLocal() as db:
         assistant = await db.get(Message, assistant_message_id)
@@ -2220,6 +3475,10 @@ async def _persist_assistant_partial(
             assistant.tokens_source = tokens_source
         if first_token_seconds is not None and assistant.first_token_seconds is None:
             assistant.first_token_seconds = max(0, int(first_token_seconds))
+        if web_search_sources is not None:
+            assistant.web_search_sources_json = web_search_sources or None
+        if web_search_trace is not None:
+            assistant.web_search_trace_json = web_search_trace or None
         await db.commit()
 
 
@@ -2240,8 +3499,12 @@ async def run_chat_generation_job(
     usage: dict | None = None
     tool_usage: dict | None = None
     web_search_sources: list = []
+    web_search_trace: dict | None = None
+    structured_sources: list[dict] = []
     context_event: dict | None = None
     web_search_enabled = False
+    web_search_mode = "auto"
+    web_search_max_rounds = 3
     try:
         assistant_started_at: datetime | None = None
         async with SessionLocal() as db:
@@ -2301,6 +3564,8 @@ async def run_chat_generation_job(
             quota = await db.get(UserQuota, user_id)
             conversation = await db.get(Conversation, conversation_id)
             web_search_enabled = bool(conversation.web_search_enabled) if conversation else False
+            web_search_mode = normalized_web_search_mode(getattr(conversation, "web_search_mode", "auto") if conversation else "auto")
+            web_search_max_rounds = normalized_web_search_rounds(getattr(conversation, "web_search_max_rounds", 3) if conversation else 3)
             referenced_ids = unique_ids(payload.referenced_attachment_ids)
             context_bundle = await build_context_bundle(
                 db,
@@ -2369,9 +3634,9 @@ async def run_chat_generation_job(
         request_reasoning_effort = requested_effort if requested_effort and requested_effort in allowed_reasoning else settings.model_reasoning_effort
 
         provider = OpenAICompatibleProvider(api_key_row.base_url)
-        structured_sources: list[dict] = []
+        structured_sources = []
         if web_search_enabled:
-            web_search_sources, tool_usage = await run_web_search_tool_loop(
+            web_search_sources, tool_usage, web_search_trace = await run_web_search_tool_loop(
                 provider=provider,
                 api_key=api_key,
                 model=model,
@@ -2379,9 +3644,22 @@ async def run_chat_generation_job(
                 conversation_id=conversation_id,
                 assistant_message_id=assistant_message_id,
                 reasoning_effort=request_reasoning_effort,
+                search_mode=web_search_mode,
+                max_rounds=web_search_max_rounds,
+                available_models=api_key_row.available_models_json,
             )
             structured_sources = structured_web_search_sources(web_search_sources)
-            inject_web_search_final_answer_context(context, structured_sources)
+            inject_web_search_final_answer_context(
+                context,
+                structured_sources,
+                user_query=web_search_fallback_query(context),
+            )
+            await _persist_assistant_partial(
+                assistant_message_id,
+                "".join(buffer),
+                web_search_sources=structured_sources,
+                web_search_trace=web_search_trace,
+            )
         stream = provider.chat_stream(
             api_key=api_key,
             model=model,
@@ -2411,6 +3689,8 @@ async def run_chat_generation_job(
                             "status": "streaming",
                             "web_search_sources": structured_sources,
                             "webSearchSources": structured_sources,
+                            "web_search_trace": web_search_trace,
+                            "webSearchTrace": web_search_trace,
                             **message_progress_event_data(assistant),
                         },
                     )
@@ -2422,7 +3702,9 @@ async def run_chat_generation_job(
                 pending_next = asyncio.ensure_future(_safe_anext(stream))
 
                 if event.event == "token":
-                    text = event.data["text"]
+                    text = strip_visible_tool_call_markup(event.data["text"])
+                    if not text:
+                        continue
                     if first_token_seconds is None:
                         first_token_seconds = int(time.perf_counter() - request_started)
                     buffer.append(text)
@@ -2449,7 +3731,7 @@ async def run_chat_generation_job(
                         },
                     )
                 elif event.event == "completed_text":
-                    text = event.data.get("text") or ""
+                    text = strip_visible_tool_call_markup(event.data.get("text") or "")
                     current = "".join(buffer)
                     remaining = remaining_completed_text(text, current)
                     if remaining:
@@ -2505,6 +3787,8 @@ async def run_chat_generation_job(
                 completion_tokens=0,
                 total_tokens=0,
                 tokens_source=None,
+                web_search_sources=structured_sources,
+                web_search_trace=web_search_trace,
             )
             async with SessionLocal() as db:
                 assistant = await db.get(Message, assistant_message_id)
@@ -2518,6 +3802,10 @@ async def run_chat_generation_job(
                     "status": "failed_no_output",
                     "code": "UPSTREAM_ERROR",
                     "message": message,
+                    "web_search_sources": structured_sources,
+                    "webSearchSources": structured_sources,
+                    "web_search_trace": web_search_trace,
+                    "webSearchTrace": web_search_trace,
                     **message_progress_event_data(assistant),
                 },
             )
@@ -2558,6 +3846,7 @@ async def run_chat_generation_job(
             assistant.tokens_source = tokens_source
             assistant.first_token_seconds = first_token_seconds
             assistant.web_search_sources_json = structured_sources or None
+            assistant.web_search_trace_json = web_search_trace or None
             await db.commit()
             progress = first_token_progress_event_data(assistant)
 
@@ -2610,6 +3899,8 @@ async def run_chat_generation_job(
                 "status": "completed",
                 "web_search_sources": structured_sources,
                 "webSearchSources": structured_sources,
+                "web_search_trace": web_search_trace,
+                "webSearchTrace": web_search_trace,
                 "finished_at": datetime.utcnow().isoformat(),
                 **progress,
             },
@@ -2642,6 +3933,8 @@ async def run_chat_generation_job(
             completion_tokens=estimate_tokens_text(content) if content else 0,
             total_tokens=estimate_tokens_text(content) if content else 0,
             tokens_source="estimated" if content else None,
+            web_search_sources=structured_sources,
+            web_search_trace=web_search_trace,
         )
         async with SessionLocal() as db:
             assistant = await db.get(Message, assistant_message_id)
@@ -2655,13 +3948,20 @@ async def run_chat_generation_job(
                 "status": "failed_partial" if content else "failed_no_output",
                 "code": code,
                 "message": message,
+                "web_search_sources": structured_sources,
+                "webSearchSources": structured_sources,
+                "web_search_trace": web_search_trace,
+                "webSearchTrace": web_search_trace,
                 **message_progress_event_data(assistant),
             },
         )
     except Exception as exc:
         logger.exception("chat_generation unexpected error user=%s conv=%s msg=%s", user_id, conversation_id, assistant_message_id)
         content = "".join(buffer)
-        message = str(exc)[:500] or "回复生成失败，请稍后重试。"
+        if is_transient_chat_generation_error(exc):
+            message = "上游模型连接在生成回答前中断。系统已保留本次搜索过程和来源，请重试；如果仍失败，可以降低深搜轮数或切换模型。"
+        else:
+            message = str(exc)[:500] or "回复生成失败，请稍后重试。"
         failed_content = content or message
         await _persist_assistant_partial(
             assistant_message_id,
@@ -2670,6 +3970,8 @@ async def run_chat_generation_job(
             completion_tokens=estimate_tokens_text(content) if content else 0,
             total_tokens=estimate_tokens_text(content) if content else 0,
             tokens_source="estimated" if content else None,
+            web_search_sources=structured_sources,
+            web_search_trace=web_search_trace,
         )
         async with SessionLocal() as db:
             assistant = await db.get(Message, assistant_message_id)
@@ -2683,6 +3985,10 @@ async def run_chat_generation_job(
                 "status": "failed_partial" if content else "failed_no_output",
                 "code": "UPSTREAM_ERROR",
                 "message": message,
+                "web_search_sources": structured_sources,
+                "webSearchSources": structured_sources,
+                "web_search_trace": web_search_trace,
+                "webSearchTrace": web_search_trace,
                 **message_progress_event_data(assistant),
             },
         )

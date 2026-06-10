@@ -14,9 +14,15 @@ export interface Conversation {
   autoCompactionEnabled: boolean
   webSearchEnabled?: boolean
   web_search_enabled?: boolean
+  webSearchMode?: WebSearchMode
+  web_search_mode?: WebSearchMode
+  webSearchMaxRounds?: number
+  web_search_max_rounds?: number
   createdAt: string
   updatedAt: string
 }
+
+export type WebSearchMode = 'auto' | 'deep' | 'fast'
 
 export interface Message {
   id: string
@@ -50,6 +56,8 @@ export interface Message {
   progress_phase?: string
   webSearchSources?: WebSearchSource[]
   web_search_sources?: WebSearchSource[]
+  webSearchTrace?: WebSearchTrace | null
+  web_search_trace?: WebSearchTrace | null
 }
 
 export interface WebSearchSource {
@@ -57,6 +65,7 @@ export interface WebSearchSource {
   title: string
   url: string
   snippet?: string
+  evidence?: string
   siteName?: string | null
   site_name?: string | null
   publishedAt?: string | null
@@ -65,11 +74,117 @@ export interface WebSearchSource {
   favicon_url?: string | null
   displayUrl?: string
   display_url?: string
+  provider?: string | null
+  confidence?: number | null
+  rerankStatus?: string | null
+  rerank_status?: string | null
+  sourceTier?: string | null
+  source_tier?: string | null
+  matchedTerms?: string[]
+  matched_terms?: string[]
+  supportLevel?: string | null
+  support_level?: string | null
+  searchDepth?: string | null
+  search_depth?: string | null
+  degraded?: boolean
+  filterReason?: string | null
+  filter_reason?: string | null
 }
 
 export interface WebSearchStatus {
   enabled: boolean
   configured: boolean
+}
+
+export interface WebSearchTraceSource {
+  title?: string
+  url?: string
+  provider?: string | null
+  confidence?: number | null
+  sourceTier?: string | null
+  source_tier?: string | null
+  supportLevel?: string | null
+  support_level?: string | null
+  searchDepth?: string | null
+  search_depth?: string | null
+  degraded?: boolean
+  filterReason?: string | null
+  filter_reason?: string | null
+}
+
+export interface WebSearchTraceEvent {
+  round?: number
+  phase?: string
+  type?: 'search' | 'read' | 'review' | string
+  tool?: string
+  ok?: boolean
+  cached?: boolean
+  query?: string
+  url?: string
+  result_count?: number
+  resultCount?: number
+  sources?: WebSearchTraceSource[]
+  needs_more?: boolean
+  needsMore?: boolean
+  new_queries?: string[]
+  newQueries?: string[]
+  urls_to_fetch?: string[]
+  urlsToFetch?: string[]
+  searched_queries?: string[]
+  searchedQueries?: string[]
+  read_urls?: string[]
+  readUrls?: string[]
+  failed_urls?: string[]
+  failedUrls?: string[]
+  source_domains?: string[]
+  sourceDomains?: string[]
+  evidence_gaps?: string[]
+  evidenceGaps?: string[]
+  relevance_notes?: string[]
+  relevanceNotes?: string[]
+  accuracy_notes?: string[]
+  accuracyNotes?: string[]
+  reason_codes?: string[]
+  reasonCodes?: string[]
+  decision_summary?: string
+  decisionSummary?: string
+  attempts?: number
+  soft_max_rounds_reached?: boolean
+  softMaxRoundsReached?: boolean
+  stop_reason?: string
+  stopReason?: string
+  error?: string
+}
+
+export interface WebSearchTrace {
+  mode?: WebSearchMode | string
+  effective_depth?: string
+  effectiveDepth?: string
+  max_rounds?: number
+  maxRounds?: number
+  requested_max_rounds?: number
+  requestedMaxRounds?: number
+  executed_rounds?: number
+  executedRounds?: number
+  planning_attempts?: number
+  planningAttempts?: number
+  planner_reason_codes?: string[]
+  plannerReasonCodes?: string[]
+  planner_summary?: string
+  plannerSummary?: string
+  review_attempts?: number
+  reviewAttempts?: number
+  soft_max_rounds_reached?: boolean
+  softMaxRoundsReached?: boolean
+  stop_code?: string
+  stopCode?: string
+  source_count?: number
+  sourceCount?: number
+  early_stop?: boolean
+  earlyStop?: boolean
+  stop_reason?: string
+  stopReason?: string
+  events?: WebSearchTraceEvent[]
 }
 
 export interface WebSearchSettings {
@@ -88,6 +203,32 @@ export interface WebSearchSettings {
   max_tool_calls?: number
   fetchMaxChars: number
   fetch_max_chars?: number
+  providerOrder: string[]
+  provider_order?: string[]
+  searxngEngines: string[]
+  searxng_engines?: string[]
+  candidateCount: number
+  candidate_count?: number
+  fetchTopN: number
+  fetch_top_n?: number
+  chunkSize: number
+  chunk_size?: number
+  chunkOverlap: number
+  chunk_overlap?: number
+  maxEvidenceChunks: number
+  max_evidence_chunks?: number
+  rerankEnabled: boolean
+  rerank_enabled?: boolean
+  rerankerModel: string
+  reranker_model?: string
+  minRelevanceScore: number
+  min_relevance_score?: number
+  trustedDomains: string[]
+  trusted_domains?: string[]
+  blockedDomains: string[]
+  blocked_domains?: string[]
+  providerStatus?: Record<string, boolean>
+  provider_status?: Record<string, boolean>
 }
 
 export interface SendMessageResponse {
