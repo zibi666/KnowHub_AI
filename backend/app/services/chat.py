@@ -321,7 +321,7 @@ def chat_generation_error_message(exc: HTTPException) -> str:
             or "remote protocol" in lowered
             or "connection reset" in lowered
         ):
-            return "上游模型连接在生成回答前中断。可能是模型服务或代理临时断开，也可能是联网搜索证据上下文过长；系统已保留本次搜索过程，请重试或降低深搜轮数。"
+            return "上游模型连接在生成回答前中断。可能是模型服务或代理临时断开，也可能是联网搜索证据上下文过长；系统已保留本次搜索过程，请重试、切换快速回答或切换模型。"
     return message or code or "回复生成失败，请稍后重试。"
 
 
@@ -554,7 +554,8 @@ def should_force_web_search(context: list[dict]) -> bool:
 
 
 def normalized_web_search_mode(value: str | None) -> str:
-    return normalize_search_depth(value, default="auto")
+    candidate = normalize_search_depth(value, default="auto")
+    return "fast" if candidate == "fast" else "auto"
 
 
 def normalized_web_search_rounds(value: int | None) -> int:
@@ -4255,7 +4256,7 @@ async def run_chat_generation_job(
         logger.exception("chat_generation unexpected error user=%s conv=%s msg=%s", user_id, conversation_id, assistant_message_id)
         content = "".join(buffer)
         if is_transient_chat_generation_error(exc):
-            message = "上游模型连接在生成回答前中断。系统已保留本次搜索过程和来源，请重试；如果仍失败，可以降低深搜轮数或切换模型。"
+            message = "上游模型连接在生成回答前中断。系统已保留本次搜索过程和来源，请重试；如果仍失败，可以切换快速回答或切换模型。"
         else:
             message = str(exc)[:500] or "回复生成失败，请稍后重试。"
         failed_content = content or message

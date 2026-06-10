@@ -13,6 +13,13 @@ from app.services.image_generation import is_image_generation_model
 WEB_SEARCH_MAX_ROUNDS_LIMIT = 10
 
 
+def normalize_user_web_search_mode(value: str | None) -> str:
+    candidate = str(value or "auto").strip().lower()
+    if candidate == "fast":
+        return "fast"
+    return "auto"
+
+
 class WebSearchSourceOut(ApiModel):
     index: int
     title: str
@@ -37,17 +44,27 @@ class ConversationOut(ApiModel):
     title: str
     auto_compaction_enabled: bool
     web_search_enabled: bool = False
-    web_search_mode: Literal["auto", "deep", "fast"] = "auto"
+    web_search_mode: Literal["auto", "fast"] = "auto"
     web_search_max_rounds: int = 3
     created_at: datetime
     updated_at: datetime
+
+    @field_validator("web_search_mode", mode="before")
+    @classmethod
+    def normalize_web_search_mode(cls, value: str | None) -> str:
+        return normalize_user_web_search_mode(value)
 
 
 class CreateConversationRequest(ApiModel):
     title: str | None = None
     web_search_enabled: bool = False
-    web_search_mode: Literal["auto", "deep", "fast"] = "auto"
+    web_search_mode: str = "auto"
     web_search_max_rounds: int = 3
+
+    @field_validator("web_search_mode", mode="before")
+    @classmethod
+    def normalize_web_search_mode(cls, value: str | None) -> str:
+        return normalize_user_web_search_mode(value)
 
     @field_validator("web_search_max_rounds")
     @classmethod
@@ -59,8 +76,15 @@ class UpdateConversationRequest(ApiModel):
     title: str | None = None
     auto_compaction_enabled: bool | None = None
     web_search_enabled: bool | None = None
-    web_search_mode: Literal["auto", "deep", "fast"] | None = None
+    web_search_mode: str | None = None
     web_search_max_rounds: int | None = None
+
+    @field_validator("web_search_mode", mode="before")
+    @classmethod
+    def normalize_web_search_mode(cls, value: str | None) -> str | None:
+        if value is None:
+            return None
+        return normalize_user_web_search_mode(value)
 
     @field_validator("web_search_max_rounds")
     @classmethod
@@ -173,11 +197,18 @@ class SendMessageRequest(ApiModel):
     referenced_attachment_ids: list[str] = []
     retry_of_message_id: str | None = None
     web_search_enabled: bool | None = None
-    web_search_mode: Literal["auto", "deep", "fast"] | None = None
+    web_search_mode: str | None = None
     web_search_max_rounds: int | None = None
     # Per-request overrides. None means "use server default".
     reasoning_effort: str | None = None
     max_completion_tokens: int | None = None
+
+    @field_validator("web_search_mode", mode="before")
+    @classmethod
+    def normalize_web_search_mode(cls, value: str | None) -> str | None:
+        if value is None:
+            return None
+        return normalize_user_web_search_mode(value)
 
     @field_validator("web_search_max_rounds")
     @classmethod

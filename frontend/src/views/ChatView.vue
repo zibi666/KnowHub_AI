@@ -79,7 +79,6 @@ const WELCOME_SIZE_STORAGE_KEY = 'private-gpt-welcome-font-size'
 const LEGACY_CURRENT_CONVERSATION_STORAGE_KEY = 'private-gpt-current-conversation'
 const FILE_TREE_PIN_STORAGE_KEY = 'private-gpt-file-tree-pinned'
 const IMAGE_FINALIZATION_MIN_MS = 800
-const WEB_SEARCH_MAX_ROUNDS = 10
 const ATTACHMENT_IMAGE_MAX_EDGE = 1920
 const ATTACHMENT_IMAGE_QUALITY = 0.82
 const ATTACHMENT_IMAGE_MIN_COMPRESS_BYTES = 450 * 1024
@@ -309,7 +308,6 @@ const webSearchMode = ref<WebSearchMode>('auto')
 const webSearchMaxRounds = ref(3)
 const webSearchModeDialogOpen = ref(false)
 const webSearchModeDraft = ref<WebSearchMode>('auto')
-const webSearchRoundDraft = ref(3)
 const webSearchStatus = ref<WebSearchStatus>({ enabled: false, configured: false })
 const webSearchSettingsLoading = ref(false)
 const webSearchSettingsSaving = ref(false)
@@ -389,7 +387,6 @@ const webSearchToggleLabel = computed(() => {
 })
 const webSearchModeText = computed(() => {
   if (!webSearchEnabled.value) return ''
-  if (webSearchMode.value === 'deep') return `深搜 ${webSearchMaxRounds.value}轮`
   if (webSearchMode.value === 'fast') return '快速'
   return '自动'
 })
@@ -574,7 +571,7 @@ function closeWebSearchTrace() {
 
 function webSearchTraceModeLabel(trace: WebSearchTrace | null) {
   const mode = String(trace?.mode || '').toLowerCase()
-  if (mode === 'deep') return '深度优先'
+  if (mode === 'deep') return '自动'
   if (mode === 'fast') return '快速回答'
   if (mode === 'auto') return '自动'
   if (mode === 'legacy') return '旧消息来源'
@@ -598,7 +595,7 @@ function webSearchTraceSummary(trace: WebSearchTrace | null) {
   const executedRounds = traceNumber(trace.executed_rounds ?? trace.executedRounds)
   if (executedRounds !== null) items.push(`已执行轮次：${executedRounds}`)
   const requestedRounds = traceNumber(trace.requested_max_rounds ?? trace.requestedMaxRounds)
-  if (depth === '深搜' && requestedRounds !== null) items.push(`用户轮数：${requestedRounds}`)
+  if (depth === '深搜' && requestedRounds !== null) items.push(`兼容轮数：${requestedRounds}`)
   const maxRounds = traceNumber(trace.max_rounds ?? trace.maxRounds)
   if (depth === '深搜' && maxRounds !== null) items.push(`硬上限：${maxRounds}`)
   const reviewAttempts = traceNumber(trace.review_attempts ?? trace.reviewAttempts)
@@ -1847,9 +1844,9 @@ function conversationUpdatedAtMs(conversation: Conversation) {
 
 function normalizeConversation(conversation: Conversation): Conversation {
   const rawMode = conversation.webSearchMode ?? conversation.web_search_mode
-  const mode: WebSearchMode = rawMode === 'deep' || rawMode === 'fast' || rawMode === 'auto' ? rawMode : 'auto'
+  const mode: WebSearchMode = rawMode === 'fast' ? 'fast' : 'auto'
   const rounds = Number(conversation.webSearchMaxRounds ?? conversation.web_search_max_rounds ?? 3)
-  const normalizedRounds = Number.isFinite(rounds) ? Math.min(WEB_SEARCH_MAX_ROUNDS, Math.max(1, Math.round(rounds))) : 3
+  const normalizedRounds = Number.isFinite(rounds) ? Math.max(1, Math.round(rounds)) : 3
   return {
     ...conversation,
     webSearchEnabled: Boolean(conversation.webSearchEnabled ?? conversation.web_search_enabled),
@@ -3255,15 +3252,14 @@ function syncImagePolling() {
 async function toggleWebSearch() {
   if (currentConversationStreaming.value) return
   if (!webSearchEnabled.value && !webSearchAvailable.value) return
-  webSearchModeDraft.value = webSearchMode.value || 'auto'
-  webSearchRoundDraft.value = Math.min(WEB_SEARCH_MAX_ROUNDS, Math.max(1, Math.round(Number(webSearchMaxRounds.value) || 3)))
+  webSearchModeDraft.value = webSearchMode.value === 'fast' ? 'fast' : 'auto'
   webSearchModeDialogOpen.value = true
 }
 
 async function applyWebSearchChoice(enabled: boolean, mode: WebSearchMode, rounds: number) {
   const nextValue = enabled
-  const nextMode: WebSearchMode = mode === 'deep' || mode === 'fast' ? mode : 'auto'
-  const nextRounds = Math.min(WEB_SEARCH_MAX_ROUNDS, Math.max(1, Math.round(Number(rounds) || 3)))
+  const nextMode: WebSearchMode = mode === 'fast' ? 'fast' : 'auto'
+  const nextRounds = Math.max(1, Math.round(Number(rounds) || 3))
   const previousEnabled = webSearchEnabled.value
   const previousMode = webSearchMode.value
   const previousRounds = webSearchMaxRounds.value
@@ -4650,21 +4646,13 @@ onUnmounted(() => {
           <div class="web-search-mode-options">
             <button type="button" class="web-search-mode-option" :class="{ active: webSearchModeDraft === 'auto' }" @click="webSearchModeDraft = 'auto'">
               <strong>自动</strong>
-              <span>按问题自动选择快速或深搜</span>
-            </button>
-            <button type="button" class="web-search-mode-option" :class="{ active: webSearchModeDraft === 'deep' }" @click="webSearchModeDraft = 'deep'">
-              <strong>深度优先</strong>
-              <span>多轮读取页面并补充关键词</span>
+              <span>由 AI 判断是否需要补充搜索</span>
             </button>
             <button type="button" class="web-search-mode-option" :class="{ active: webSearchModeDraft === 'fast' }" @click="webSearchModeDraft = 'fast'">
               <strong>快速回答</strong>
               <span>单轮低延迟搜索</span>
             </button>
           </div>
-          <label v-if="webSearchModeDraft === 'deep'" class="web-search-round-field">
-            <span>最大深搜轮数</span>
-            <input v-model.number="webSearchRoundDraft" type="number" min="1" :max="WEB_SEARCH_MAX_ROUNDS" />
-          </label>
           <div class="web-search-mode-actions">
             <button
               v-if="webSearchEnabled"
@@ -4675,7 +4663,7 @@ onUnmounted(() => {
               关闭联网搜索
             </button>
             <button class="settings-secondary" type="button" @click="webSearchModeDialogOpen = false">取消</button>
-            <button class="settings-primary" type="button" @click="applyWebSearchChoice(true, webSearchModeDraft, webSearchModeDraft === 'deep' ? webSearchRoundDraft : 3)">
+            <button class="settings-primary" type="button" @click="applyWebSearchChoice(true, webSearchModeDraft, 3)">
               {{ webSearchEnabled ? '保存设置' : '开启联网搜索' }}
             </button>
           </div>

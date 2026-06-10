@@ -83,6 +83,22 @@ def _key(user_id: str, group_id: str) -> UserApiKey:
     )
 
 
+async def _auto_deep_plan(**kwargs):
+    user_query = kwargs.get("user_query") or ""
+    assert kwargs.get("search_mode") == "auto"
+    return (
+        {
+            "ok": True,
+            "effective_depth": "deep",
+            "queries": [user_query],
+            "reason_codes": ["ai_planned_deep"],
+            "decision_summary": "需要补充证据",
+            "attempts": 1,
+        },
+        {"prompt_tokens": 1, "completion_tokens": 0, "total_tokens": 1},
+    )
+
+
 def test_normalize_searxng_url_defaults_search_path():
     assert normalize_searxng_url("https://search.example.com") == "https://search.example.com/search"
     assert normalize_searxng_url("https://search.example.com/search?q=<query>") == "https://search.example.com/search"
@@ -1083,13 +1099,15 @@ def test_web_search_mode_request_defaults_and_round_clamp():
     create_payload = CreateConversationRequest()
     update_payload = UpdateConversationRequest(web_search_mode="deep", web_search_max_rounds=99)
     send_payload = SendMessageRequest(content="search", web_search_mode="fast", web_search_max_rounds=0)
+    legacy_send_payload = SendMessageRequest(content="search", web_search_mode="deep")
 
     assert create_payload.web_search_mode == "auto"
     assert create_payload.web_search_max_rounds == 3
-    assert update_payload.web_search_mode == "deep"
+    assert update_payload.web_search_mode == "auto"
     assert update_payload.web_search_max_rounds == 10
     assert send_payload.web_search_mode == "fast"
     assert send_payload.web_search_max_rounds == 1
+    assert legacy_send_payload.web_search_mode == "auto"
 
 
 def test_auto_search_depth_prefers_deep_for_current_conflict_topics():
@@ -1809,6 +1827,7 @@ def test_deep_tool_loop_runs_until_model_says_evidence_is_enough(monkeypatch):
         monkeypatch.setattr(chat, "publish_conversation_event", fake_publish)
         monkeypatch.setattr(chat, "run_web_search_tool", fake_run_web_search_tool)
         monkeypatch.setattr(chat, "review_web_search_evidence", fake_review)
+        monkeypatch.setattr(chat, "plan_initial_web_search", _auto_deep_plan)
 
         sources, usage, trace = await chat.run_web_search_tool_loop(
             provider=FakeProvider(),
@@ -1818,7 +1837,7 @@ def test_deep_tool_loop_runs_until_model_says_evidence_is_enough(monkeypatch):
             conversation_id="conv-1",
             assistant_message_id="msg-assistant",
             reasoning_effort=None,
-            search_mode="deep",
+            search_mode="auto",
             max_rounds=3,
         )
 
@@ -2505,6 +2524,7 @@ def test_deep_tool_loop_stops_early_when_ai_review_says_enough(monkeypatch):
         monkeypatch.setattr(chat, "publish_conversation_event", lambda *args, **kwargs: asyncio.sleep(0))
         monkeypatch.setattr(chat, "run_web_search_tool", fake_run_web_search_tool)
         monkeypatch.setattr(chat, "review_web_search_evidence", fake_review)
+        monkeypatch.setattr(chat, "plan_initial_web_search", _auto_deep_plan)
 
         sources, usage, trace = await chat.run_web_search_tool_loop(
             provider=FakeProvider(),
@@ -2514,7 +2534,7 @@ def test_deep_tool_loop_stops_early_when_ai_review_says_enough(monkeypatch):
             conversation_id="conv-1",
             assistant_message_id="msg-assistant",
             reasoning_effort=None,
-            search_mode="deep",
+            search_mode="auto",
             max_rounds=5,
         )
 
@@ -2934,6 +2954,7 @@ def test_deep_tool_loop_review_timeout_stops_without_duplicate_fallback_query(mo
         monkeypatch.setattr(chat, "publish_conversation_event", lambda *args, **kwargs: asyncio.sleep(0))
         monkeypatch.setattr(chat, "run_web_search_tool", fake_run_web_search_tool)
         monkeypatch.setattr(chat, "review_web_search_evidence", fake_review)
+        monkeypatch.setattr(chat, "plan_initial_web_search", _auto_deep_plan)
 
         sources, usage, trace = await chat.run_web_search_tool_loop(
             provider=FakeProvider(),
@@ -2943,7 +2964,7 @@ def test_deep_tool_loop_review_timeout_stops_without_duplicate_fallback_query(mo
             conversation_id="conv-1",
             assistant_message_id="msg-assistant",
             reasoning_effort=None,
-            search_mode="deep",
+            search_mode="auto",
             max_rounds=3,
         )
 
@@ -3011,6 +3032,7 @@ def test_deep_tool_loop_needs_more_without_actions_stops_without_fallback_query(
         monkeypatch.setattr(chat, "publish_conversation_event", lambda *args, **kwargs: asyncio.sleep(0))
         monkeypatch.setattr(chat, "run_web_search_tool", fake_run_web_search_tool)
         monkeypatch.setattr(chat, "review_web_search_evidence", fake_review)
+        monkeypatch.setattr(chat, "plan_initial_web_search", _auto_deep_plan)
 
         sources, usage, trace = await chat.run_web_search_tool_loop(
             provider=FakeProvider(),
@@ -3020,7 +3042,7 @@ def test_deep_tool_loop_needs_more_without_actions_stops_without_fallback_query(
             conversation_id="conv-1",
             assistant_message_id="msg-assistant",
             reasoning_effort=None,
-            search_mode="deep",
+            search_mode="auto",
             max_rounds=3,
         )
 
@@ -3087,6 +3109,7 @@ def test_deep_tool_loop_continues_until_hard_limit_when_model_keeps_requesting_m
         monkeypatch.setattr(chat, "publish_conversation_event", lambda *args, **kwargs: asyncio.sleep(0))
         monkeypatch.setattr(chat, "run_web_search_tool", fake_run_web_search_tool)
         monkeypatch.setattr(chat, "review_web_search_evidence", fake_review)
+        monkeypatch.setattr(chat, "plan_initial_web_search", _auto_deep_plan)
 
         sources, usage, trace = await chat.run_web_search_tool_loop(
             provider=FakeProvider(),
@@ -3096,7 +3119,7 @@ def test_deep_tool_loop_continues_until_hard_limit_when_model_keeps_requesting_m
             conversation_id="conv-1",
             assistant_message_id="msg-assistant",
             reasoning_effort=None,
-            search_mode="deep",
+            search_mode="auto",
             max_rounds=3,
         )
 
@@ -3174,6 +3197,7 @@ def test_deep_tool_loop_marks_soft_limit_when_review_continues(monkeypatch):
         monkeypatch.setattr(chat, "publish_conversation_event", lambda *args, **kwargs: asyncio.sleep(0))
         monkeypatch.setattr(chat, "run_web_search_tool", fake_run_web_search_tool)
         monkeypatch.setattr(chat, "review_web_search_evidence", fake_review)
+        monkeypatch.setattr(chat, "plan_initial_web_search", _auto_deep_plan)
 
         sources, usage, trace = await chat.run_web_search_tool_loop(
             provider=FakeProvider(),
@@ -3183,7 +3207,7 @@ def test_deep_tool_loop_marks_soft_limit_when_review_continues(monkeypatch):
             conversation_id="conv-1",
             assistant_message_id="msg-assistant",
             reasoning_effort=None,
-            search_mode="deep",
+            search_mode="auto",
             max_rounds=3,
         )
 
@@ -3263,6 +3287,7 @@ def test_deep_tool_loop_allows_repeated_review_query(monkeypatch):
         monkeypatch.setattr(chat, "publish_conversation_event", lambda *args, **kwargs: asyncio.sleep(0))
         monkeypatch.setattr(chat, "run_web_search_tool", fake_run_web_search_tool)
         monkeypatch.setattr(chat, "review_web_search_evidence", fake_review)
+        monkeypatch.setattr(chat, "plan_initial_web_search", _auto_deep_plan)
 
         sources, usage, trace = await chat.run_web_search_tool_loop(
             provider=FakeProvider(),
@@ -3272,7 +3297,7 @@ def test_deep_tool_loop_allows_repeated_review_query(monkeypatch):
             conversation_id="conv-1",
             assistant_message_id="msg-assistant",
             reasoning_effort="high",
-            search_mode="deep",
+            search_mode="auto",
             max_rounds=2,
         )
 
@@ -3360,6 +3385,7 @@ def test_deep_tool_loop_limits_review_actions_and_skips_failed_urls_next_round(m
         monkeypatch.setattr(chat, "publish_conversation_event", lambda *args, **kwargs: asyncio.sleep(0))
         monkeypatch.setattr(chat, "run_web_search_tool", fake_run_web_search_tool)
         monkeypatch.setattr(chat, "review_web_search_evidence", fake_review)
+        monkeypatch.setattr(chat, "plan_initial_web_search", _auto_deep_plan)
 
         sources, usage, trace = await chat.run_web_search_tool_loop(
             provider=FakeProvider(),
@@ -3369,7 +3395,7 @@ def test_deep_tool_loop_limits_review_actions_and_skips_failed_urls_next_round(m
             conversation_id="conv-1",
             assistant_message_id="msg-assistant",
             reasoning_effort=None,
-            search_mode="deep",
+            search_mode="auto",
             max_rounds=3,
         )
 

@@ -22,7 +22,7 @@ export interface Conversation {
   updatedAt: string
 }
 
-export type WebSearchMode = 'auto' | 'deep' | 'fast'
+export type WebSearchMode = 'auto' | 'fast'
 
 export interface Message {
   id: string
