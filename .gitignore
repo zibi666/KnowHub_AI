@@ -36,3 +36,8 @@ Thumbs.db
 # Internal planning drafts
 plan_*.md
 部署服务器规划.md
+
+# wrangler files
+.wrangler
+.dev.vars*
+!.dev.vars.example
