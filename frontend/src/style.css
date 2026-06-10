@@ -4060,11 +4060,22 @@ body,
   word-break: break-word;
 }
 
-.search-trace-sources span {
+.search-trace-sources span,
+.search-trace-sources small {
   color: var(--muted);
   font-size: 0.74rem;
   overflow-wrap: anywhere;
   word-break: break-word;
+}
+
+.search-trace-sources small {
+  display: -webkit-box;
+  color: color-mix(in srgb, var(--muted) 82%, var(--text));
+  font-size: 0.78rem;
+  line-height: 1.45;
+  overflow: hidden;
+  -webkit-box-orient: vertical;
+  -webkit-line-clamp: 2;
 }
 
 .chat-shell.theme-light .search-trace-modal {
@@ -4091,7 +4102,8 @@ body,
 .chat-shell.theme-light .search-trace-event-head span,
 .chat-shell.theme-light .search-trace-review-group span,
 .chat-shell.theme-light .search-trace-event-meta span,
-.chat-shell.theme-light .search-trace-sources span {
+.chat-shell.theme-light .search-trace-sources span,
+.chat-shell.theme-light .search-trace-sources small {
   color: #64748b;
 }
 

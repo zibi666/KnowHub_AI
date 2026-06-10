@@ -105,7 +105,8 @@ WEB_SEARCH_TOOL_POLICY = (
 )
 WEB_SEARCH_DEEP_REVIEW_POLICY = (
     "You are reviewing web-search evidence. Return JSON only, with keys: "
-    "needs_more (boolean), new_queries (array of strings), urls_to_fetch (array of URLs), "
+    "needs_more (boolean), new_queries (array of strings), source_ids_to_fetch (array of source_id strings), "
+    "urls_to_fetch (array of short authoritative URLs only when no source_id exists), "
     "evidence_gaps (array of short strings), relevance_notes (array of short public notes), "
     "accuracy_notes (array of short public notes), stop_reason (short string), reason_codes (array of short strings). "
     "Judge Chinese relevance semantically; allow synonyms, abbreviations, translations, and headline rewrites. "
@@ -113,9 +114,10 @@ WEB_SEARCH_DEEP_REVIEW_POLICY = (
     "noisy, off-target, stale, or lacked body-level evidence. If the searched keyword already returned precise "
     "useful evidence, do not propose the same or a near-duplicate query again; explain any repeat-worthy gap in "
     "evidence_gaps or relevance_notes. "
-    "Prefer new URLs over refetching pages already read successfully, and do not retry URLs listed as failed. "
+    "Prefer source_ids_to_fetch over URLs when asking to read a known source, and do not retry failed source domains. "
     "Do not include hidden reasoning or prose. Ask for more only when the current evidence is weak, stale, "
-    "contradictory, clearly unrelated, or missing primary/major-news support."
+    "contradictory, clearly unrelated, or missing primary/major-news support. Continue only with 1-2 concrete "
+    "high-value actions; otherwise stop."
 )
 WEB_SEARCH_KEYWORD_PLAN_POLICY = (
     "You are planning the first web-search pass for KnowHub. Return JSON only, with keys: "
@@ -134,6 +136,10 @@ WEB_SEARCH_INITIAL_MAX_QUERIES = 3
 WEB_SEARCH_DEEP_HARD_MAX_ROUNDS = 10
 WEB_SEARCH_PLANNER_MAX_ATTEMPTS = 3
 WEB_SEARCH_REVIEW_MAX_ATTEMPTS = 3
+WEB_SEARCH_REVIEW_CONTEXT_BUDGETS = (6000, 4000, 2500)
+WEB_SEARCH_REVIEW_CONTEXT_HARD_LIMIT = 8000
+WEB_SEARCH_REVIEW_MAX_HISTORY_QUERIES = 20
+WEB_SEARCH_REVIEW_MAX_SOURCE_BRIEFS = 20
 _STREAM_END = object()
 EMPTY_CHAT_RESPONSE_MESSAGE = (
     "模型返回了空回复：上游接口请求已完成，但没有返回任何可显示的文本。"
@@ -1008,16 +1014,314 @@ def _search_history_lines(history: dict | None) -> list[str]:
     return lines
 
 
+def _review_source_domain(url: str) -> str:
+    host = urlparse(str(url or "")).hostname or ""
+    return host.removeprefix("www.")[:120]
+
+
+def _review_brief_text(value: object, limit: int) -> str:
+    text = _compact_trace_text(value, limit)
+    if not text:
+        return ""
+    text = re.sub(r"https?://\S+", "[link]", text)
+    text = re.sub(r"\bwww\.\S+", "[link]", text)
+    return _compact_trace_text(text, limit)
+
+
+def _review_source_quality(source: object) -> int:
+    score = 0
+    tier = str(getattr(source, "source_tier", "") or "").lower()
+    support = str(getattr(source, "support_level", "") or "").lower()
+    confidence = getattr(source, "confidence", None)
+    if tier in {"official", "primary"}:
+        score += 50
+    elif tier in {"major_news", "trusted"}:
+        score += 35
+    elif tier:
+        score += 10
+    if support == "high":
+        score += 20
+    elif support == "medium":
+        score += 10
+    if isinstance(confidence, (int, float)):
+        score += int(max(0.0, min(1.0, float(confidence))) * 20)
+    if getattr(source, "evidence", ""):
+        score += 15
+    if getattr(source, "snippet", ""):
+        score += 5
+    if getattr(source, "degraded", False):
+        score -= 20
+    return score
+
+
+def _review_source_briefs(sources: list, *, limit: int) -> tuple[list[dict], dict[str, str]]:
+    best_by_domain: dict[str, tuple[int, int, object]] = {}
+    no_domain: list[tuple[int, int, object]] = []
+    for index, source in enumerate(sources or [], start=1):
+        url = str(getattr(source, "url", "") or "")
+        if not url:
+            continue
+        domain = _review_source_domain(url)
+        rank = _review_source_quality(source)
+        entry = (rank, index, source)
+        if domain:
+            current = best_by_domain.get(domain)
+            if current is None or entry[0] > current[0]:
+                best_by_domain[domain] = entry
+        else:
+            no_domain.append(entry)
+    ranked = sorted([*best_by_domain.values(), *no_domain], key=lambda item: (-item[0], item[1]))
+    selected = ranked[: max(1, int(limit or 1))]
+    briefs: list[dict] = []
+    id_to_url: dict[str, str] = {}
+    for source_id, (_, original_index, source) in enumerate(selected, start=1):
+        sid = f"S{source_id}"
+        url = str(getattr(source, "url", "") or "")
+        domain = _review_source_domain(url) or "unknown"
+        id_to_url[sid] = url
+        raw_title = str(getattr(source, "title", "") or "").strip()
+        title = _review_brief_text(raw_title, 140)
+        if raw_title.lower().startswith(("http://", "https://")) or title == "[link]":
+            title = f"source from {domain}"
+        evidence = _review_brief_text(getattr(source, "evidence", "") or getattr(source, "snippet", ""), 220)
+        brief = {
+            "source_id": sid,
+            "domain": domain,
+            "title": title or f"source {original_index}",
+            "provider": _review_brief_text(getattr(source, "provider", ""), 60),
+            "tier": _review_brief_text(getattr(source, "source_tier", ""), 60),
+            "support": _review_brief_text(getattr(source, "support_level", ""), 60),
+            "read": bool(getattr(source, "evidence", "") or getattr(source, "snippet", "")),
+            "failed": False,
+            "summary": evidence,
+        }
+        briefs.append({key: value for key, value in brief.items() if value not in (None, "", [])})
+    return briefs, id_to_url
+
+
+def _review_lines_from_briefs(briefs: list[dict]) -> list[str]:
+    lines: list[str] = []
+    for item in briefs:
+        meta = ", ".join(
+            str(part)
+            for part in (
+                item.get("domain"),
+                f"tier={item.get('tier')}" if item.get("tier") else "",
+                f"support={item.get('support')}" if item.get("support") else "",
+                "read" if item.get("read") else "",
+                "failed" if item.get("failed") else "",
+            )
+            if part
+        )
+        line = f"- {item.get('source_id')}: {item.get('title')}"
+        if meta:
+            line += f" ({meta})"
+        if item.get("summary"):
+            line += f" evidence: {item.get('summary')}"
+        lines.append(line)
+    return lines
+
+
+def _review_history_by_round(trace: dict | None) -> dict[int, dict[str, list[str]]]:
+    rounds: dict[int, dict[str, list[str]]] = {}
+    if not isinstance(trace, dict):
+        return rounds
+    for event in trace.get("events") or []:
+        if not isinstance(event, dict):
+            continue
+        round_index = int(event.get("round") or 1)
+        bucket = rounds.setdefault(round_index, {"queries": [], "planned_queries": [], "requested_queries": [], "urls": []})
+        event_type = str(event.get("type") or "")
+        query = event.get("query")
+        if query:
+            _append_unique_compact(bucket["queries"], query, limit=180)
+        if event_type == "planning":
+            for query in event.get("new_queries") or []:
+                _append_unique_compact(bucket["planned_queries"], query, limit=180)
+        elif event_type == "review":
+            for query in event.get("new_queries") or []:
+                _append_unique_compact(bucket["requested_queries"], query, limit=180)
+        for url in event.get("urls_to_fetch") or []:
+            _append_unique_compact(bucket["urls"], _review_source_domain(url) or url, limit=180)
+    return rounds
+
+
+def _review_query_lines(
+    *,
+    user_query: str,
+    search_history: dict | None,
+    trace: dict | None,
+    round_index: int,
+    query_limit: int,
+) -> tuple[list[str], list[str], list[str]]:
+    rounds = _review_history_by_round(trace)
+    lines = []
+    seen: set[str] = set()
+    if user_query:
+        text = _compact_trace_text(user_query, 180)
+        if text:
+            seen.add(text)
+            lines.append(f"- original question: {text}")
+    for query in (rounds.get(1, {}).get("planned_queries") or [])[:WEB_SEARCH_INITIAL_MAX_QUERIES]:
+        if query not in seen and len(lines) < query_limit:
+            seen.add(query)
+            lines.append(f"- planner first-round keyword: {query}")
+    for current_round in sorted(rounds.keys(), reverse=True):
+        for query in rounds.get(current_round, {}).get("queries") or []:
+            if query not in seen and len(lines) < query_limit:
+                seen.add(query)
+                lines.append(f"- round {current_round} searched: {query}")
+    for query in _clean_search_queries((search_history or {}).get("searched_queries"), limit=query_limit):
+        if query not in seen and len(lines) < query_limit:
+            seen.add(query)
+            lines.append(f"- searched: {query}")
+    previous_round = rounds.get(max(1, round_index - 1), {})
+    requested = previous_round.get("requested_queries") or []
+    actual = rounds.get(round_index, {}).get("queries") or []
+    return lines, requested[:6], actual[:6]
+
+
+def _review_payload_char_count(messages: list[dict]) -> int:
+    return sum(len(str(message.get("content") or "")) for message in messages)
+
+
+def _build_review_messages(
+    *,
+    user_query: str,
+    search_history: dict | None,
+    trace: dict | None,
+    sources: list,
+    round_index: int,
+    max_rounds: int,
+    soft_max_rounds: int | None,
+    review_reasoning_effort: str,
+    action_policy: str,
+    budget: int,
+    compaction_level: int,
+) -> tuple[list[dict], dict, dict[str, str]]:
+    soft_limit_reached = bool(soft_max_rounds and round_index >= soft_max_rounds)
+    source_limit = max(8, WEB_SEARCH_REVIEW_MAX_SOURCE_BRIEFS - (compaction_level * 5))
+    query_limit = max(10, WEB_SEARCH_REVIEW_MAX_HISTORY_QUERIES - (compaction_level * 5))
+    source_briefs, source_id_map = _review_source_briefs(sources, limit=source_limit)
+    searched_lines, requested_queries, actual_queries = _review_query_lines(
+        user_query=user_query,
+        search_history=search_history,
+        trace=trace,
+        round_index=round_index,
+        query_limit=query_limit,
+    )
+    failed_domains = []
+    for url in (search_history or {}).get("failed_urls") or []:
+        domain = _review_source_domain(url)
+        _append_unique_compact(failed_domains, domain or url, limit=180)
+    sections = [
+        f"User query: {user_query}",
+        f"Round: {round_index}/{max_rounds}",
+        f"User-selected soft max rounds: {soft_max_rounds or max_rounds}",
+        f"Soft max reached: {'yes' if soft_limit_reached else 'no'}",
+        f"Review reasoning effort: {review_reasoning_effort}",
+        "",
+        "Previously searched keywords:",
+        "\n".join(searched_lines) if searched_lines else "- none recorded",
+        "",
+        "Previous review asked to investigate:",
+        "\n".join(f"- {query}" for query in requested_queries) if requested_queries else "- none",
+        "",
+        "This round actually investigated:",
+        "\n".join(f"- {query}" for query in actual_queries) if actual_queries else "- first review or no new query recorded",
+        "",
+        "Discovered evidence sources (use source_id, not full URLs):",
+        "\n".join(_review_lines_from_briefs(source_briefs)) if source_briefs else "- no evidence sources yet",
+    ]
+    if failed_domains:
+        sections.extend(["", "Failed source domains to avoid:", "\n".join(f"- {domain}" for domain in failed_domains[:8])])
+    sections.extend(
+        [
+            "",
+            action_policy,
+            (
+                "Return JSON only. If you need a known source read, use source_ids_to_fetch with source_id values "
+                "from Discovered evidence sources. Use urls_to_fetch only for short authoritative URLs not already "
+                "represented by a source_id. Do not output full long redirect URLs."
+            ),
+        ]
+    )
+    content = "\n".join(sections)
+    if len(content) > budget:
+        source_briefs = source_briefs[: max(6, source_limit // 2)]
+        searched_lines = searched_lines[: max(8, query_limit // 2)]
+        sections = [
+            f"User query: {user_query}",
+            f"Round: {round_index}/{max_rounds}; soft max={soft_max_rounds or max_rounds}; soft reached={'yes' if soft_limit_reached else 'no'}; reasoning={review_reasoning_effort}",
+            "Previously searched keywords:",
+            "\n".join(searched_lines) if searched_lines else "- none recorded",
+            "Previous review asked to investigate:",
+            "\n".join(f"- {query}" for query in requested_queries[:4]) if requested_queries else "- none",
+            "This round actually investigated:",
+            "\n".join(f"- {query}" for query in actual_queries[:4]) if actual_queries else "- first review or no new query recorded",
+            "Discovered evidence sources (source_id, domain, title, short evidence only):",
+            "\n".join(_review_lines_from_briefs(source_briefs)) if source_briefs else "- no evidence sources yet",
+            action_policy,
+            "Return JSON only. Prefer stopping unless a concrete high-value gap remains. Use source_ids_to_fetch for known sources.",
+        ]
+        content = "\n".join(sections)
+    system_overhead = len(WEB_SEARCH_DEEP_REVIEW_POLICY) + 80
+    target_total_chars = min(int(budget or WEB_SEARCH_REVIEW_CONTEXT_HARD_LIMIT), WEB_SEARCH_REVIEW_CONTEXT_HARD_LIMIT)
+    target_user_chars = max(900, target_total_chars - system_overhead)
+    if len(content) > target_user_chars:
+        suffix = (
+            "\n[review brief truncated by budget]\n"
+            "Return JSON only. Prefer stopping unless a concrete high-value gap remains. "
+            "Use source_ids_to_fetch for known sources."
+        )
+        prefix_limit = max(500, target_user_chars - len(suffix))
+        content = content[:prefix_limit].rstrip() + suffix
+    messages = [
+        {"role": "system", "content": WEB_SEARCH_DEEP_REVIEW_POLICY},
+        {"role": "user", "content": content},
+    ]
+    meta = {
+        "review_context_budget": budget,
+        "review_compaction_level": compaction_level,
+        "review_context_compressed": True,
+        "review_payload_chars": _review_payload_char_count(messages),
+        "review_source_count": len(source_briefs),
+        "review_keyword_count": len(searched_lines),
+        "source_id_map": source_id_map,
+    }
+    return messages, meta, source_id_map
+
+
+def _map_review_source_ids_to_urls(payload: dict, source_id_map: dict[str, str]) -> None:
+    ids = payload.get("source_ids_to_fetch") or payload.get("sourceIdsToFetch") or []
+    if not isinstance(ids, list):
+        ids = []
+    urls = list(payload.get("urls_to_fetch") or payload.get("urlsToFetch") or [])
+    for item in ids:
+        key = str(item or "").strip()
+        url = source_id_map.get(key)
+        if url and url not in urls:
+            urls.append(url)
+    payload["source_ids_to_fetch"] = [str(item or "").strip() for item in ids if str(item or "").strip()]
+    payload["urls_to_fetch"] = urls
+
+
 def _public_search_result(item: object) -> dict | None:
     if not isinstance(item, dict):
         return None
     url = _compact_trace_text(item.get("url"), 500)
     if not url:
         return None
+    summary = _review_brief_text(item.get("snippet") or item.get("evidence") or item.get("content"), 220)
+    domain = _review_source_domain(url)
     row = {
-        "title": _compact_trace_text(item.get("title"), 140) or url,
+        "title": _compact_trace_text(item.get("title"), 140) or domain or url,
         "url": url,
+        "domain": domain,
     }
+    if summary:
+        row["summary"] = summary
+        row["snippet"] = summary
     for source_key, target_key in (
         ("provider", "provider"),
         ("confidence", "confidence"),
@@ -1081,8 +1385,10 @@ def _trace_tool_event(
             event["truncated"] = True
         event["sources"] = [
             {
-                "title": _compact_trace_text(payload.get("title"), 140) or _compact_trace_text(payload.get("url"), 500),
+                "title": _compact_trace_text(payload.get("title"), 140) or _review_source_domain(payload.get("url")) or _compact_trace_text(payload.get("url"), 500),
                 "url": _compact_trace_text(payload.get("url"), 500),
+                "domain": _review_source_domain(payload.get("url")),
+                "summary": _review_brief_text(payload.get("content") or payload.get("snippet"), 220),
             }
         ]
     return event
@@ -1097,6 +1403,7 @@ def _trace_review_event(round_index: int, review_payload: dict, search_history: 
         "needs_more": needs_more_value if isinstance(needs_more_value, bool) else None,
         "new_queries": _clean_search_queries(review_payload.get("new_queries"), limit=6),
         "urls_to_fetch": _clean_fetch_urls(review_payload.get("urls_to_fetch"), limit=6),
+        "source_ids_to_fetch": _clean_review_notes(review_payload.get("source_ids_to_fetch"), limit=6, item_limit=40),
         "evidence_gaps": _clean_review_notes(review_payload.get("evidence_gaps")),
         "relevance_notes": _clean_review_notes(review_payload.get("relevance_notes")),
         "accuracy_notes": _clean_review_notes(review_payload.get("accuracy_notes")),
@@ -1107,19 +1414,19 @@ def _trace_review_event(round_index: int, review_payload: dict, search_history: 
         event["attempts"] = int(review_payload.get("attempts") or 0)
     if review_payload.get("soft_max_rounds_reached"):
         event["soft_max_rounds_reached"] = True
+    for key in ("review_payload_chars", "review_context_budget", "review_compaction_level", "review_source_count", "review_keyword_count"):
+        if review_payload.get(key) is not None:
+            event[key] = int(review_payload.get(key) or 0)
+    if review_payload.get("review_context_compressed"):
+        event["review_context_compressed"] = True
     if search_history:
         event["searched_queries"] = [
             _compact_trace_text(query, 180)
             for query in (search_history.get("searched_queries") or [])[:8]
             if _compact_trace_text(query, 180)
         ]
-        event["read_urls"] = [
-            _compact_trace_text(url, 500)
-            for url in (search_history.get("read_urls") or [])[:8]
-            if _compact_trace_text(url, 500)
-        ]
         event["failed_urls"] = [
-            _compact_trace_text(url, 500)
+            _review_source_domain(url) or _compact_trace_text(url, 160)
             for url in (search_history.get("failed_urls") or [])[:6]
             if _compact_trace_text(url, 500)
         ]
@@ -1362,74 +1669,52 @@ async def review_web_search_evidence(
     config_timeout: int,
     available_models: list[str] | None = None,
     soft_max_rounds: int | None = None,
+    trace: dict | None = None,
     max_attempts: int = WEB_SEARCH_REVIEW_MAX_ATTEMPTS,
 ) -> tuple[dict, dict | None]:
     review_reasoning_effort = "low"
     soft_limit_reached = bool(soft_max_rounds and round_index >= soft_max_rounds)
-    evidence_lines = []
-    for index, source in enumerate(sources[:8], start=1):
-        evidence_lines.append(
-            "\n".join(
-                [
-                    f"[{index}] {getattr(source, 'title', '')}",
-                    f"URL: {getattr(source, 'url', '')}",
-                    f"provider={getattr(source, 'provider', '') or 'unknown'} confidence={getattr(source, 'confidence', '') or 'unknown'} tier={getattr(source, 'source_tier', '') or 'unknown'}",
-                    f"evidence={str(getattr(source, 'evidence', '') or getattr(source, 'snippet', '') or '')[:800]}",
-                ]
-            )
-        )
-    history_lines = _search_history_lines(search_history)
-    if review_reasoning_effort == "low":
-        action_policy = (
-            "The user's current reasoning effort is LOW. Be conservative and cheap: prefer stopping with the "
-            "current evidence unless there is a clear evidence gap. Repeat or slightly vary a searched keyword only "
-            "when this round's results for that keyword were imprecise, noisy, off-target, stale, or lacked "
-            "body-level evidence. If the keyword already returned precise useful evidence, do not repeat it. If more "
-            "work is required, propose at most one high-value query or one unread authoritative URL."
-        )
-    else:
-        action_policy = (
-            "The user's current reasoning effort is not LOW. Repeat or slightly vary a searched keyword only when "
-            "this round's results for that keyword were imprecise, noisy, off-target, stale, or lacked body-level "
-            "evidence; name that repeat-worthy gap in evidence_gaps or relevance_notes. Prefer clearly new angles "
-            "and unread authoritative URLs when the previous keyword already returned precise useful evidence."
-        )
+    action_policy = (
+        "The user's current reasoning effort is LOW. Make an action decision, not a full answer. First consider what "
+        "was searched before, what the prior review asked to investigate, what was actually investigated this round, "
+        "and what the current source coverage proves. Prefer stopping with the current evidence unless there is a "
+        "clear high-value evidence gap. Repeat or slightly vary a searched keyword only when this round's results for "
+        "that keyword were imprecise, noisy, off-target, stale, or lacked body-level evidence. If the keyword already "
+        "returned useful evidence, do not repeat it. If more work is required, propose at most one or two high-value "
+        "actions via new_queries or source_ids_to_fetch."
+    )
     if soft_limit_reached:
         action_policy += (
             " The user-selected deep-search round target has been reached. Continue past this soft limit only if "
             "there is a concrete, high-value evidence gap that prevents a reliable answer; otherwise set needs_more "
             "to false and explain that the evidence is sufficient or that remaining uncertainty should be stated."
         )
-    messages = [
-        {"role": "system", "content": WEB_SEARCH_DEEP_REVIEW_POLICY},
-        {
-            "role": "user",
-            "content": (
-                f"User query: {user_query}\n"
-                f"Round: {round_index}/{max_rounds}\n"
-                f"User-selected soft max rounds: {soft_max_rounds or max_rounds}\n"
-                f"Soft max reached: {'yes' if soft_limit_reached else 'no'}\n"
-                f"Review reasoning effort: {review_reasoning_effort}\n"
-                "Search history so far:\n"
-                + ("\n".join(history_lines) if history_lines else "No search history was recorded yet.")
-                + "\n\n"
-                + action_policy
-                + " Avoid URLs already listed as failed.\n"
-                "Current evidence:\n"
-                + ("\n\n".join(evidence_lines) if evidence_lines else "No evidence yet.")
-            ),
-        },
-    ]
     review_model = model
     timeout_seconds = float(min(18, max(10, int(config_timeout or 0))))
-    payload_chars = sum(len(str(item)) for item in messages)
     attempts = max(1, int(max_attempts or 1))
     usage_total: dict | None = None
     last_failure = "review_failed"
+    last_meta: dict = {}
     for attempt in range(1, attempts + 1):
+        budget = WEB_SEARCH_REVIEW_CONTEXT_BUDGETS[min(attempt - 1, len(WEB_SEARCH_REVIEW_CONTEXT_BUDGETS) - 1)]
+        messages, review_meta, source_id_map = _build_review_messages(
+            user_query=user_query,
+            search_history=search_history,
+            trace=trace,
+            sources=sources,
+            round_index=round_index,
+            max_rounds=max_rounds,
+            soft_max_rounds=soft_max_rounds,
+            review_reasoning_effort=review_reasoning_effort,
+            action_policy=action_policy,
+            budget=budget,
+            compaction_level=attempt - 1,
+        )
+        last_meta = review_meta
+        payload_chars = int(review_meta.get("review_payload_chars") or 0)
         started = time.perf_counter()
         perf_logger.info(
-            "web_search_review_start model=%s round=%d max_rounds=%d attempt=%d/%d source_count=%d payload_chars=%d timeout_seconds=%.1f",
+            "web_search_review_start model=%s round=%d max_rounds=%d attempt=%d/%d source_count=%d payload_chars=%d timeout_seconds=%.1f budget=%d compaction=%d",
             review_model,
             round_index,
             max_rounds,
@@ -1438,6 +1723,8 @@ async def review_web_search_evidence(
             len(sources),
             payload_chars,
             timeout_seconds,
+            budget,
+            attempt - 1,
         )
         try:
             payload, usage = await asyncio.wait_for(
@@ -1457,7 +1744,9 @@ async def review_web_search_evidence(
                     elapsed_ms,
                 )
                 continue
+            _map_review_source_ids_to_urls(payload, source_id_map)
             payload["attempts"] = attempt
+            payload.update({key: value for key, value in review_meta.items() if key != "source_id_map"})
             if soft_limit_reached:
                 payload["soft_max_rounds_reached"] = True
             perf_logger.info(
@@ -1515,6 +1804,7 @@ async def review_web_search_evidence(
         "stop_reason": stop_reason_by_failure.get(last_failure, stop_reason_by_failure["review_failed"]),
         "attempts": attempts,
     }
+    payload.update({key: value for key, value in last_meta.items() if key != "source_id_map"})
     if soft_limit_reached:
         payload["soft_max_rounds_reached"] = True
     return payload, usage_total
@@ -1867,12 +2157,18 @@ async def run_web_search_tool_loop(
                 config_timeout=config.timeout_seconds,
                 available_models=available_models,
                 soft_max_rounds=requested_max_rounds,
+                trace=trace,
             )
             usage_total = add_usage_totals(usage_total, review_usage)
             if review_payload.get("soft_max_rounds_reached"):
                 trace["soft_max_rounds_reached"] = True
             if review_payload.get("attempts") is not None:
                 trace["review_attempts"] = max(int(trace.get("review_attempts") or 0), int(review_payload.get("attempts") or 0))
+            for key in ("review_payload_chars", "review_context_budget", "review_compaction_level", "review_source_count", "review_keyword_count"):
+                if review_payload.get(key) is not None:
+                    trace[key] = int(review_payload.get(key) or 0)
+            if review_payload.get("review_context_compressed"):
+                trace["review_context_compressed"] = True
             needs_more = bool(review_payload.get("needs_more", True))
             new_queries = _clean_search_queries(
                 review_payload.get("new_queries"),

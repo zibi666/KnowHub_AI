@@ -506,6 +506,16 @@ function traceList(value: unknown): string[] {
     .slice(0, 8)
 }
 
+function traceDomainList(value: unknown): string[] {
+  return traceList(value).map((item) => {
+    try {
+      return new URL(item).hostname.replace(/^www\./u, '')
+    } catch {
+      return item.replace(/^https?:\/\//iu, '').replace(/^www\./iu, '').split(/[/?#]/u)[0] || item
+    }
+  })
+}
+
 function traceNumber(value: unknown): number | null {
   const numberValue = Number(value)
   return Number.isFinite(numberValue) ? numberValue : null
@@ -593,6 +603,17 @@ function webSearchTraceSummary(trace: WebSearchTrace | null) {
   if (depth === '深搜' && maxRounds !== null) items.push(`硬上限：${maxRounds}`)
   const reviewAttempts = traceNumber(trace.review_attempts ?? trace.reviewAttempts)
   if (reviewAttempts !== null && reviewAttempts > 0) items.push(`审查尝试：${reviewAttempts}`)
+  const reviewPayloadChars = traceNumber(trace.review_payload_chars ?? trace.reviewPayloadChars)
+  const reviewContextBudget = traceNumber(trace.review_context_budget ?? trace.reviewContextBudget)
+  const reviewCompactionLevel = traceNumber(trace.review_compaction_level ?? trace.reviewCompactionLevel)
+  const reviewContextCompressed = Boolean(trace.review_context_compressed ?? trace.reviewContextCompressed)
+  if (reviewPayloadChars !== null) {
+    const budgetText = reviewContextBudget !== null ? ` / 预算 ${reviewContextBudget}` : ''
+    items.push(`审查上下文：${reviewContextCompressed ? '压缩' : '未压缩'} ${reviewPayloadChars}字${budgetText}`)
+  } else if (reviewContextCompressed) {
+    items.push('审查上下文：已压缩')
+  }
+  if (reviewCompactionLevel !== null) items.push(`压缩等级：${reviewCompactionLevel}`)
   const sourceCount = traceNumber(trace.source_count ?? trace.sourceCount)
   if (sourceCount !== null) items.push(`来源：${sourceCount}`)
   const softLimitReached = Boolean(trace.soft_max_rounds_reached ?? trace.softMaxRoundsReached)
@@ -639,7 +660,15 @@ function traceEventStatus(event: WebSearchTraceEvent) {
 }
 
 function traceEventMainText(event: WebSearchTraceEvent) {
-  return String(event.query || event.url || event.tool || event.phase || '').trim()
+  if (event.query) return String(event.query).trim()
+  if (event.url) {
+    try {
+      return new URL(String(event.url)).hostname.replace(/^www\./u, '')
+    } catch {
+      return String(event.url).replace(/^https?:\/\//iu, '').split(/[/?#]/u)[0] || String(event.url)
+    }
+  }
+  return String(event.tool || event.phase || '').trim()
 }
 
 function traceEventResultCount(event: WebSearchTraceEvent) {
@@ -658,6 +687,22 @@ function traceEventSoftLimitReached(event: WebSearchTraceEvent) {
   return Boolean(event.soft_max_rounds_reached ?? event.softMaxRoundsReached)
 }
 
+function traceEventReviewMeta(event: WebSearchTraceEvent) {
+  const items: string[] = []
+  const payloadChars = traceNumber(event.review_payload_chars ?? event.reviewPayloadChars)
+  const budget = traceNumber(event.review_context_budget ?? event.reviewContextBudget)
+  const compaction = traceNumber(event.review_compaction_level ?? event.reviewCompactionLevel)
+  const sourceCount = traceNumber(event.review_source_count ?? event.reviewSourceCount)
+  const keywordCount = traceNumber(event.review_keyword_count ?? event.reviewKeywordCount)
+  const compressed = Boolean(event.review_context_compressed ?? event.reviewContextCompressed)
+  if (payloadChars !== null) items.push(`审查 ${compressed ? '压缩' : '未压缩'} ${payloadChars}字`)
+  if (budget !== null) items.push(`预算 ${budget}`)
+  if (compaction !== null) items.push(`压缩等级 ${compaction}`)
+  if (keywordCount !== null) items.push(`关键词 ${keywordCount}`)
+  if (sourceCount !== null) items.push(`来源 brief ${sourceCount}`)
+  return items
+}
+
 function traceEventSources(event: WebSearchTraceEvent) {
   return Array.isArray(event.sources) ? event.sources : []
 }
@@ -668,11 +713,12 @@ function traceEventLists(event: WebSearchTraceEvent) {
     { label: '相关性判断', values: traceList(event.relevance_notes ?? event.relevanceNotes) },
     { label: '准确性判断', values: traceList(event.accuracy_notes ?? event.accuracyNotes) },
     { label: '已搜索关键词', values: traceList(event.searched_queries ?? event.searchedQueries) },
-    { label: '已读取 URL', values: traceList(event.read_urls ?? event.readUrls) },
-    { label: '失败 URL', values: traceList(event.failed_urls ?? event.failedUrls) },
+    { label: '已读取来源', values: traceDomainList(event.read_urls ?? event.readUrls) },
+    { label: '失败来源', values: traceDomainList(event.failed_urls ?? event.failedUrls) },
     { label: '来源域名', values: traceList(event.source_domains ?? event.sourceDomains) },
     { label: '后续关键词', values: traceList(event.new_queries ?? event.newQueries) },
-    { label: '待读取 URL', values: traceList(event.urls_to_fetch ?? event.urlsToFetch) }
+    { label: '待读取来源 ID', values: traceList(event.source_ids_to_fetch ?? event.sourceIdsToFetch) },
+    { label: '待读取链接', values: traceDomainList(event.urls_to_fetch ?? event.urlsToFetch) }
   ].filter((item) => item.values.length > 0)
 }
 
@@ -688,6 +734,21 @@ function traceSourceUrl(source: WebSearchTraceSource) {
   return String(source.url || '').trim()
 }
 
+function traceSourceDomain(source: WebSearchTraceSource) {
+  if (source.domain) return String(source.domain).trim()
+  const url = traceSourceUrl(source)
+  if (!url) return ''
+  try {
+    return new URL(url).hostname.replace(/^www\./u, '')
+  } catch {
+    return url.replace(/^https?:\/\//iu, '').split(/[/?#]/u)[0]
+  }
+}
+
+function traceSourceSummary(source: WebSearchTraceSource) {
+  return cleanSourceText(source.summary || source.snippet).slice(0, 160)
+}
+
 function traceSourceDiagnostics(source: WebSearchTraceSource) {
   const parts: string[] = []
   const confidence = typeof source.confidence === 'number' ? source.confidence : null
@@ -695,6 +756,8 @@ function traceSourceDiagnostics(source: WebSearchTraceSource) {
   const support = source.supportLevel || source.support_level
   const depth = source.searchDepth || source.search_depth
   const filterReason = source.filterReason || source.filter_reason
+  const domain = traceSourceDomain(source)
+  if (domain) parts.push(domain)
   if (source.provider) parts.push(source.provider)
   if (confidence !== null) parts.push(`${Math.round(confidence * 100)}%`)
   if (tier) parts.push(`tier:${tier}`)
@@ -4247,6 +4310,7 @@ onUnmounted(() => {
                         <span v-if="traceEventAttempts(event) !== null">尝试 {{ traceEventAttempts(event) }}</span>
                         <span v-if="traceEventSoftLimitReached(event)">已到用户轮数</span>
                         <span v-if="traceEventResultCount(event) !== null">结果 {{ traceEventResultCount(event) }}</span>
+                        <span v-for="item in traceEventReviewMeta(event)" :key="item">{{ item }}</span>
                         <span v-if="event.error" class="search-trace-error">失败：{{ event.error }}</span>
                       </div>
                       <p v-if="traceEventDecisionSummary(event)" class="search-trace-note">{{ traceEventDecisionSummary(event) }}</p>
@@ -4264,7 +4328,8 @@ onUnmounted(() => {
                       <div v-if="traceEventSources(event).length" class="search-trace-sources">
                         <a v-for="source in traceEventSources(event)" :key="traceSourceUrl(source)" :href="traceSourceUrl(source)" target="_blank" rel="noreferrer">
                           <strong>{{ traceSourceTitle(source) }}</strong>
-                          <span v-if="traceSourceDiagnostics(source)">{{ traceSourceDiagnostics(source) }}</span>
+                          <span v-if="traceSourceDiagnostics(source)" class="search-trace-source-meta">{{ traceSourceDiagnostics(source) }}</span>
+                          <small v-if="traceSourceSummary(source)" class="search-trace-source-summary">{{ traceSourceSummary(source) }}</small>
                         </a>
                       </div>
                     </div>

@@ -16,6 +16,7 @@ from app.schemas.chat import CreateConversationRequest, MessageOut, SendMessageR
 from app.security.crypto import encrypt_api_key
 from app.services import api_keys, chat
 from app.services import web_search
+from app.services.web_search import WebSearchResult
 from app.services.web_search import (
     WebSearchConfig,
     WebSearchError,
@@ -2564,13 +2565,29 @@ def test_review_web_search_evidence_uses_current_model_low_reasoning_and_timeout
             api_key="sk-test",
             model="gpt-5.5",
             user_query="today AI news",
-            sources=[],
+            sources=[
+                WebSearchResult(
+                    title="AI News",
+                    url="https://example.com/ai?utm_source=very-long-review-url",
+                    snippet="Body evidence about AI news.",
+                    provider="major",
+                    confidence=0.9,
+                    source_tier="major_news",
+                    support_level="high",
+                )
+            ],
             search_history={
                 "searched_queries": ["today AI news"],
                 "read_urls": ["https://example.com/ai"],
                 "failed_urls": ["https://bad.example/ai"],
                 "source_domains": ["example.com"],
                 "source_titles": ["AI News"],
+            },
+            trace={
+                "events": [
+                    {"round": 1, "type": "planning", "new_queries": ["today AI news official"]},
+                    {"round": 1, "type": "search", "query": "today AI news official"},
+                ]
             },
             round_index=1,
             max_rounds=3,
@@ -2586,13 +2603,24 @@ def test_review_web_search_evidence_uses_current_model_low_reasoning_and_timeout
         assert captured["max_completion_tokens"] == 300
         assert captured["timeout"] == 18
         prompt = "\n".join(str(message.get("content") or "") for message in captured["messages"])
-        assert "Search history so far:" in prompt
+        assert "Previously searched keywords:" in prompt
+        assert "Previous review asked to investigate:" in prompt
+        assert "This round actually investigated:" in prompt
+        assert "Discovered evidence sources" in prompt
         assert "Review reasoning effort: low" in prompt
         assert "today AI news" in prompt
-        assert "https://example.com/ai" in prompt
-        assert "https://bad.example/ai" in prompt
+        assert "S1" in prompt
+        assert "example.com" in prompt
+        assert "AI News" in prompt
+        assert "https://example.com/ai" not in prompt
+        assert "https://bad.example/ai" not in prompt
+        assert "bad.example" in prompt
+        assert "source_ids_to_fetch" in prompt
         assert "Repeat or slightly vary a searched keyword only when this round's results for that keyword were imprecise" in prompt
-        assert "If the keyword already returned precise useful evidence, do not repeat it." in prompt
+        assert "do not repeat it" in prompt
+        assert payload["review_context_budget"] == 6000
+        assert payload["review_compaction_level"] == 0
+        assert payload["review_payload_chars"] <= 8000
 
     asyncio.run(run())
 
@@ -2670,6 +2698,186 @@ def test_review_web_search_evidence_retries_unparseable_three_times(monkeypatch)
         assert payload["soft_max_rounds_reached"] is True
         assert "review_unparseable" in payload["reason_codes"]
         assert "已停止补充搜索" in payload["stop_reason"]
+
+    asyncio.run(run())
+
+
+def test_review_web_search_evidence_budgeted_brief_excludes_full_source_urls():
+    async def run():
+        captured = {}
+        long_urls = [
+            f"https://source{i}.example.com/articles/{'very-long-segment-' * 8}{i}?utm_source=newsletter&tracking={i}"
+            for i in range(25)
+        ]
+
+        class FakeProvider:
+            async def chat_stream(self, **kwargs):
+                captured.update(kwargs)
+                yield StreamEvent(
+                    "completed_text",
+                    {
+                        "text": (
+                            '{"needs_more": false, "new_queries": [], "urls_to_fetch": [], '
+                            '"evidence_gaps": [], "reason_codes": ["enough"], "stop_reason": "enough"}'
+                        )
+                    },
+                )
+
+        sources = [
+            WebSearchResult(
+                title=f"Detailed source {i}",
+                url=url,
+                snippet=("Evidence sentence for the searched topic. " * 15) + url,
+                evidence=("Long body evidence for review compression. " * 20) + url,
+                provider="provider",
+                confidence=0.7,
+                source_tier="major_news" if i % 2 else "official",
+                support_level="high",
+            )
+            for i, url in enumerate(long_urls)
+        ]
+        trace_events = [{"round": 1, "type": "planning", "new_queries": ["first planned keyword"]}]
+        for i in range(24):
+            trace_events.append({"round": (i // 3) + 1, "type": "search", "query": f"searched keyword {i}"})
+        trace = {"events": trace_events}
+
+        payload, _usage = await chat.review_web_search_evidence(
+            provider=FakeProvider(),
+            api_key="sk-test",
+            model="gpt-5.5",
+            user_query="complex current topic",
+            sources=sources,
+            search_history={
+                "searched_queries": [f"searched keyword {i}" for i in range(24)],
+                "failed_urls": [long_urls[0]],
+            },
+            trace=trace,
+            round_index=8,
+            max_rounds=10,
+            reasoning_effort="high",
+            config_timeout=5,
+        )
+
+        prompt = "\n".join(str(message.get("content") or "") for message in captured["messages"])
+        assert payload["review_payload_chars"] <= chat.WEB_SEARCH_REVIEW_CONTEXT_HARD_LIMIT
+        assert payload["review_context_compressed"] is True
+        assert payload["review_context_budget"] == 6000
+        assert payload["review_source_count"] <= 20
+        assert payload["review_keyword_count"] <= 20
+        assert "first planned keyword" in prompt
+        assert "round 8 searched" in prompt
+        assert "source_id" in prompt
+        assert "source0.example.com" in prompt
+        for url in long_urls:
+            assert url not in prompt
+
+    asyncio.run(run())
+
+
+def test_review_web_search_evidence_maps_source_ids_to_fetch_urls():
+    async def run():
+        source_url = "https://official.example.com/report?id=123"
+
+        class FakeProvider:
+            async def chat_stream(self, **kwargs):
+                prompt = "\n".join(str(message.get("content") or "") for message in kwargs["messages"])
+                assert source_url not in prompt
+                yield StreamEvent(
+                    "completed_text",
+                    {
+                        "text": (
+                            '{"needs_more": true, "new_queries": [], "source_ids_to_fetch": ["S1"], '
+                            '"urls_to_fetch": [], "evidence_gaps": ["need primary source body"], '
+                            '"reason_codes": ["need_primary"]}'
+                        )
+                    },
+                )
+
+        payload, _usage = await chat.review_web_search_evidence(
+            provider=FakeProvider(),
+            api_key="sk-test",
+            model="gpt-5.5",
+            user_query="policy update",
+            sources=[
+                WebSearchResult(
+                    title="Official report",
+                    url=source_url,
+                    snippet="Official summary.",
+                    source_tier="official",
+                    support_level="high",
+                )
+            ],
+            search_history={"searched_queries": ["policy update"]},
+            round_index=1,
+            max_rounds=3,
+            reasoning_effort=None,
+            config_timeout=5,
+        )
+
+        assert payload["needs_more"] is True
+        assert payload["source_ids_to_fetch"] == ["S1"]
+        assert payload["urls_to_fetch"] == [source_url]
+
+    asyncio.run(run())
+
+
+def test_review_web_search_evidence_timeout_retries_with_smaller_payloads(monkeypatch):
+    async def run():
+        payload_chars: list[int] = []
+
+        async def fake_review_stream_json(provider, *, api_key, model, messages):
+            payload_chars.append(sum(len(str(message.get("content") or "")) for message in messages))
+            if len(payload_chars) < 3:
+                raise asyncio.TimeoutError()
+            return (
+                {
+                    "needs_more": False,
+                    "new_queries": [],
+                    "urls_to_fetch": [],
+                    "evidence_gaps": [],
+                    "reason_codes": ["enough"],
+                },
+                {"prompt_tokens": 1, "completion_tokens": 1, "total_tokens": 2},
+            )
+
+        class FakeProvider:
+            pass
+
+        sources = [
+            WebSearchResult(
+                title=f"Source {i}",
+                url=f"https://source{i}.example.com/{'path-' * 20}{i}",
+                snippet="Evidence. " * 80,
+                source_tier="major_news",
+                support_level="high",
+            )
+            for i in range(25)
+        ]
+        monkeypatch.setattr(chat, "_review_stream_json", fake_review_stream_json)
+
+        payload, usage = await chat.review_web_search_evidence(
+            provider=FakeProvider(),
+            api_key="sk-test",
+            model="gpt-5.5",
+            user_query="deep topic",
+            sources=sources,
+            search_history={"searched_queries": [f"keyword {i}" for i in range(25)]},
+            trace={"events": [{"round": (i // 3) + 1, "type": "search", "query": f"keyword {i}"} for i in range(25)]},
+            round_index=8,
+            max_rounds=10,
+            reasoning_effort="high",
+            config_timeout=5,
+        )
+
+        assert payload["needs_more"] is False
+        assert payload["attempts"] == 3
+        assert payload["review_context_budget"] == 2500
+        assert payload["review_compaction_level"] == 2
+        assert usage["total_tokens"] == 2
+        assert len(payload_chars) == 3
+        assert payload_chars[0] > payload_chars[1] > payload_chars[2]
+        assert payload_chars[0] <= chat.WEB_SEARCH_REVIEW_CONTEXT_HARD_LIMIT
+        assert payload_chars[2] <= 2600
 
     asyncio.run(run())
 

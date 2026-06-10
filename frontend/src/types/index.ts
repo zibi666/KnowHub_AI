@@ -99,6 +99,9 @@ export interface WebSearchStatus {
 export interface WebSearchTraceSource {
   title?: string
   url?: string
+  domain?: string | null
+  summary?: string | null
+  snippet?: string | null
   provider?: string | null
   confidence?: number | null
   sourceTier?: string | null
@@ -130,6 +133,8 @@ export interface WebSearchTraceEvent {
   newQueries?: string[]
   urls_to_fetch?: string[]
   urlsToFetch?: string[]
+  source_ids_to_fetch?: string[]
+  sourceIdsToFetch?: string[]
   searched_queries?: string[]
   searchedQueries?: string[]
   read_urls?: string[]
@@ -151,6 +156,18 @@ export interface WebSearchTraceEvent {
   attempts?: number
   soft_max_rounds_reached?: boolean
   softMaxRoundsReached?: boolean
+  review_payload_chars?: number
+  reviewPayloadChars?: number
+  review_context_budget?: number
+  reviewContextBudget?: number
+  review_compaction_level?: number
+  reviewCompactionLevel?: number
+  review_context_compressed?: boolean
+  reviewContextCompressed?: boolean
+  review_source_count?: number
+  reviewSourceCount?: number
+  review_keyword_count?: number
+  reviewKeywordCount?: number
   stop_reason?: string
   stopReason?: string
   error?: string
@@ -174,6 +191,18 @@ export interface WebSearchTrace {
   plannerSummary?: string
   review_attempts?: number
   reviewAttempts?: number
+  review_payload_chars?: number
+  reviewPayloadChars?: number
+  review_context_budget?: number
+  reviewContextBudget?: number
+  review_compaction_level?: number
+  reviewCompactionLevel?: number
+  review_context_compressed?: boolean
+  reviewContextCompressed?: boolean
+  review_source_count?: number
+  reviewSourceCount?: number
+  review_keyword_count?: number
+  reviewKeywordCount?: number
   soft_max_rounds_reached?: boolean
   softMaxRoundsReached?: boolean
   stop_code?: string
