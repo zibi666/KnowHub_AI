@@ -1642,6 +1642,7 @@ def test_tool_loop_reuses_duplicate_searches_and_fetches_without_extra_count(mon
 
         class FakeProvider:
             async def tool_call_turn(self, **kwargs):
+                assert kwargs["reasoning_effort"] == "low"
                 tool_turn_count["value"] += 1
                 if tool_turn_count["value"] > 1:
                     return ToolCallTurnResult(tool_calls=[], usage={"prompt_tokens": 1, "completion_tokens": 0, "total_tokens": 1})
@@ -1718,6 +1719,7 @@ def test_tool_loop_reuses_duplicate_searches_and_fetches_without_extra_count(mon
             conversation_id="conv-1",
             assistant_message_id="msg-assistant",
             reasoning_effort=None,
+            search_mode="fast",
         )
 
         assert executed == [
@@ -1727,9 +1729,8 @@ def test_tool_loop_reuses_duplicate_searches_and_fetches_without_extra_count(mon
         assert len([item for item in context if item.get("role") == "tool"]) == 4
         assert len(sources) == 2
         assert usage["total_tokens"] == 2
-        assert trace["events"][0]["type"] == "planning"
-        assert trace["events"][0]["attempts"] == 3
-        assert trace["events"][1]["type"] == "search"
+        assert trace["events"][0]["type"] == "search"
+        assert trace["events"][0]["query"] == "latest ai news"
         assert any(event.get("cached") for event in trace["events"])
         assert any(event == "web_search_status" and data.get("query") == "latest ai news" for event, data in published_events)
         assert any(event == "web_search_status" and data.get("url") == "https://example.com/news" for event, data in published_events)
@@ -1924,7 +1925,7 @@ def test_auto_tool_loop_uses_effective_deep_strategy_for_iterative_search(monkey
         assert trace["mode"] == "auto"
         assert trace["effective_depth"] == "deep"
         assert trace["executed_rounds"] == 3
-        assert usage["total_tokens"] == 12
+        assert usage["total_tokens"] == 11
         assert len(sources) == 3
         assert trace["stop_code"] == "evidence_enough"
         assert any(event.get("type") == "review" for event in trace["events"])
@@ -1932,17 +1933,14 @@ def test_auto_tool_loop_uses_effective_deep_strategy_for_iterative_search(monkey
     asyncio.run(run())
 
 
-def test_auto_tool_loop_adds_effective_depth_to_model_search_call(monkeypatch):
+def test_auto_tool_loop_executes_planned_query_with_effective_depth(monkeypatch):
     async def run():
         executed = []
         context = [{"role": "user", "content": "你怎么看待中东爆发的各种冲突"}]
 
         class FakeProvider:
             async def tool_call_turn(self, **kwargs):
-                return ToolCallTurnResult(
-                    tool_calls=[ToolCall(id="call-1", name="search_web", arguments={"query": "中东冲突 局势"})],
-                    usage={"prompt_tokens": 1, "completion_tokens": 0, "total_tokens": 1},
-                )
+                raise AssertionError("auto planned queries should execute without an extra tool-call turn")
 
             async def chat_stream(self, **kwargs):
                 yield StreamEvent(
@@ -2016,7 +2014,7 @@ def test_auto_tool_loop_adds_effective_depth_to_model_search_call(monkeypatch):
         assert trace["effective_depth"] == "deep"
         assert trace["executed_rounds"] == 1
         assert trace["stop_code"] == "evidence_enough"
-        assert usage["total_tokens"] == 8
+        assert usage["total_tokens"] == 7
         assert len(sources) == 1
 
     asyncio.run(run())
@@ -2109,7 +2107,7 @@ def test_auto_deep_tool_loop_keeps_final_context_free_of_round_result_logs(monke
         assert "Web search was enabled and the model did not call tools" not in context_text
         assert len(sources) == 3
         assert trace["executed_rounds"] == 3
-        assert usage["total_tokens"] == 12
+        assert usage["total_tokens"] == 11
         assert trace["stop_code"] == "evidence_enough"
 
     asyncio.run(run())
@@ -2315,6 +2313,71 @@ def test_tool_loop_falls_back_to_user_query_when_initial_keyword_plan_is_empty(m
     asyncio.run(run())
 
 
+def test_tool_loop_falls_back_to_keyword_plan_when_tool_turn_disconnects(monkeypatch):
+    async def run():
+        executed = []
+        context = [{"role": "user", "content": "today AI news"}]
+
+        class FakeProvider:
+            async def tool_call_turn(self, **kwargs):
+                assert kwargs["model"] == "gpt-5.5"
+                assert kwargs["reasoning_effort"] == "low"
+                raise RuntimeError("Server disconnected without sending a response.")
+
+            async def chat_stream(self, **kwargs):
+                assert kwargs["model"] == "gpt-5.5"
+                assert kwargs["reasoning_effort"] == "low"
+                yield StreamEvent(
+                    "completed_text",
+                    {"text": '{"effective_depth":"fast","queries":["today AI news latest"],"reason_codes":["fallback_after_tool_turn_failed"]}'},
+                )
+                yield StreamEvent("usage", {"prompt_tokens": 3, "completion_tokens": 2, "total_tokens": 5})
+
+        def fake_config():
+            return WebSearchConfig(
+                enabled=True,
+                searxng_base_url="https://search.example.com/search",
+                result_count=3,
+                language="all",
+                safesearch="1",
+                timeout_seconds=5,
+                fetch_timeout_seconds=5,
+                max_tool_calls=3,
+                fetch_max_chars=4000,
+            )
+
+        async def fake_run_web_search_tool(name, arguments, config):
+            executed.append((name, dict(arguments)))
+            return {
+                "ok": True,
+                "results": [{"title": "AI News", "url": "https://example.com/ai", "snippet": "news"}],
+            }
+
+        monkeypatch.setattr(chat, "effective_web_search_config", fake_config)
+        monkeypatch.setattr(chat, "publish_conversation_event", lambda *args, **kwargs: asyncio.sleep(0))
+        monkeypatch.setattr(chat, "run_web_search_tool", fake_run_web_search_tool)
+
+        sources, usage, trace = await chat.run_web_search_tool_loop(
+            provider=FakeProvider(),
+            api_key="sk-test",
+            model="gpt-5.5",
+            context=context,
+            conversation_id="conv-1",
+            assistant_message_id="msg-assistant",
+            reasoning_effort="high",
+            search_mode="fast",
+            max_rounds=3,
+        )
+
+        assert executed == [("search_web", {"query": "today AI news latest", "search_depth": "fast"})]
+        assert usage["total_tokens"] == 5
+        assert len(sources) == 1
+        assert any(event.get("phase") == "tool_call_turn" and event.get("ok") is False for event in trace["events"])
+        assert any(event.get("phase") == "keyword_plan" for event in trace["events"])
+
+    asyncio.run(run())
+
+
 def test_auto_tool_loop_retries_failed_planner_then_fast_fallback(monkeypatch):
     async def run():
         executed = []
@@ -2368,7 +2431,7 @@ def test_auto_tool_loop_retries_failed_planner_then_fast_fallback(monkeypatch):
 
         assert planner_calls["value"] == 3
         assert executed == [("search_web", {"query": "今天 AI 新闻", "search_depth": "fast"})]
-        assert usage["total_tokens"] == 1
+        assert usage is None
         assert len(sources) == 1
         assert trace["effective_depth"] == "fast"
         assert trace["planning_attempts"] == 3
@@ -3192,6 +3255,7 @@ def test_tool_loop_stops_after_successful_search_results(monkeypatch):
             conversation_id="conv-1",
             assistant_message_id="msg-assistant",
             reasoning_effort=None,
+            search_mode="fast",
         )
 
         assert executed == [
@@ -3200,9 +3264,7 @@ def test_tool_loop_stops_after_successful_search_results(monkeypatch):
         assert tool_turn_count["value"] == 1
         assert len(sources) == 1
         assert usage["total_tokens"] == 2
-        assert trace["events"][0]["phase"] == "planning_queries"
-        assert trace["events"][0]["attempts"] == 3
-        assert trace["events"][1]["query"] == "latest ai news"
+        assert trace["events"][0]["query"] == "latest ai news"
 
     asyncio.run(run())
 

@@ -1545,6 +1545,7 @@ async def run_web_search_tool_loop(
     executed_calls = 0
     saw_tool_calls = False
     had_tool_error = False
+    tool_turn_failed = False
     should_stop_after_batch = False
     tool_cache: dict[tuple[str, str], dict] = {}
     search_mode = normalized_web_search_mode(search_mode)
@@ -1613,16 +1614,47 @@ async def run_web_search_tool_loop(
         if not planned_queries and base_user_query:
             planned_queries = [base_user_query]
     iterative_deep_search = effective_depth == "deep"
-    for _ in range(max(1, config.max_tool_calls)):
-        turn = await provider.tool_call_turn(
-            api_key=api_key,
-            model=model,
-            messages=context,
-            tools=tools,
-            max_completion_tokens=768,
-            reasoning_effort=reasoning_effort,
-            timeout_seconds=max(10, config.timeout_seconds + config.fetch_timeout_seconds),
-        )
+    should_try_tool_turn = not (search_mode == "auto" and planned_queries)
+    for _ in range(max(1, config.max_tool_calls)) if should_try_tool_turn else []:
+        try:
+            turn = await provider.tool_call_turn(
+                api_key=api_key,
+                model=model,
+                messages=context,
+                tools=tools,
+                max_completion_tokens=768,
+                reasoning_effort="low",
+                timeout_seconds=max(10, config.timeout_seconds + config.fetch_timeout_seconds),
+            )
+        except Exception as exc:
+            tool_turn_failed = True
+            trace["events"].append(
+                {
+                    "round": 1,
+                    "phase": "tool_call_turn",
+                    "type": "planning",
+                    "ok": False,
+                    "error": _compact_trace_text(str(exc), 300),
+                    "attempts": 1,
+                }
+            )
+            perf_logger.warning(
+                "web_search_tool_turn_failed model=%s reasoning_effort=low error=%s",
+                model,
+                str(exc)[:300],
+            )
+            await publish_conversation_event(
+                conversation_id,
+                "web_search_status",
+                web_search_status_payload(
+                    conversation_id=conversation_id,
+                    assistant_message_id=assistant_message_id,
+                    phase="planning_queries",
+                    detail="模型工具调用决策失败，已改用自动规划关键词继续搜索。",
+                    error=str(exc)[:300],
+                ),
+            )
+            break
         usage_total = add_usage_totals(usage_total, turn.usage)
         if not turn.tool_calls:
             break
@@ -1713,7 +1745,7 @@ async def run_web_search_tool_loop(
             )
         if should_stop_after_batch or executed_calls >= config.max_tool_calls:
             break
-    if not saw_tool_calls and should_force_search:
+    if (not saw_tool_calls or tool_turn_failed) and should_force_search:
         if not planned_queries and base_user_query:
             await publish_conversation_event(
                 conversation_id,
