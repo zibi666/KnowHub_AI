@@ -1092,8 +1092,8 @@ def test_web_search_mode_request_defaults_and_round_clamp():
 
 
 def test_auto_search_depth_prefers_deep_for_current_conflict_topics():
-    assert web_search.effective_search_depth("你怎么看待中东爆发的各种冲突", "auto") == "deep"
-    assert web_search.effective_search_depth("台海局势怎么看", "auto") == "deep"
+    assert web_search.effective_search_depth("你怎么看待中东爆发的各种冲突", "auto") == "fast"
+    assert web_search.effective_search_depth("台海局势怎么看", "auto") == "fast"
     assert web_search.effective_search_depth("Python list 怎么排序", "auto") == "fast"
     assert web_search.effective_search_depth("你怎么看待中东爆发的各种冲突", "fast") == "fast"
 
@@ -1721,13 +1721,15 @@ def test_tool_loop_reuses_duplicate_searches_and_fetches_without_extra_count(mon
         )
 
         assert executed == [
-            ("search_web", {"query": "latest ai news", "search_depth": "deep", "max_rounds": 10}),
+            ("search_web", {"query": "latest ai news", "search_depth": "fast"}),
             ("fetch_url", {"url": "https://example.com/news"}),
         ]
         assert len([item for item in context if item.get("role") == "tool"]) == 4
         assert len(sources) == 2
         assert usage["total_tokens"] == 2
-        assert trace["events"][0]["type"] == "search"
+        assert trace["events"][0]["type"] == "planning"
+        assert trace["events"][0]["attempts"] == 3
+        assert trace["events"][1]["type"] == "search"
         assert any(event.get("cached") for event in trace["events"])
         assert any(event == "web_search_status" and data.get("query") == "latest ai news" for event, data in published_events)
         assert any(event == "web_search_status" and data.get("url") == "https://example.com/news" for event, data in published_events)
@@ -1840,6 +1842,13 @@ def test_auto_tool_loop_uses_effective_deep_strategy_for_iterative_search(monkey
             async def tool_call_turn(self, **kwargs):
                 return ToolCallTurnResult(tool_calls=[], usage={"prompt_tokens": 1, "completion_tokens": 0, "total_tokens": 1})
 
+            async def chat_stream(self, **kwargs):
+                yield StreamEvent(
+                    "completed_text",
+                    {"text": '{"effective_depth":"deep","queries":["taiwan strait latest"],"reason_codes":["ai_planned_deep"],"decision_summary":"需要深搜"}'},
+                )
+                yield StreamEvent("usage", {"prompt_tokens": 3, "completion_tokens": 2, "total_tokens": 5})
+
         def fake_config():
             return WebSearchConfig(
                 enabled=True,
@@ -1896,7 +1905,6 @@ def test_auto_tool_loop_uses_effective_deep_strategy_for_iterative_search(monkey
         monkeypatch.setattr(chat, "publish_conversation_event", lambda *args, **kwargs: asyncio.sleep(0))
         monkeypatch.setattr(chat, "run_web_search_tool", fake_run_web_search_tool)
         monkeypatch.setattr(chat, "review_web_search_evidence", fake_review)
-        monkeypatch.setattr(chat, "effective_search_depth", lambda query, mode: "deep")
 
         sources, usage, trace = await chat.run_web_search_tool_loop(
             provider=FakeProvider(),
@@ -1916,7 +1924,7 @@ def test_auto_tool_loop_uses_effective_deep_strategy_for_iterative_search(monkey
         assert trace["mode"] == "auto"
         assert trace["effective_depth"] == "deep"
         assert trace["executed_rounds"] == 3
-        assert usage["total_tokens"] == 7
+        assert usage["total_tokens"] == 12
         assert len(sources) == 3
         assert trace["stop_code"] == "evidence_enough"
         assert any(event.get("type") == "review" for event in trace["events"])
@@ -1935,6 +1943,13 @@ def test_auto_tool_loop_adds_effective_depth_to_model_search_call(monkeypatch):
                     tool_calls=[ToolCall(id="call-1", name="search_web", arguments={"query": "中东冲突 局势"})],
                     usage={"prompt_tokens": 1, "completion_tokens": 0, "total_tokens": 1},
                 )
+
+            async def chat_stream(self, **kwargs):
+                yield StreamEvent(
+                    "completed_text",
+                    {"text": '{"effective_depth":"deep","queries":["中东冲突 局势"],"reason_codes":["ai_planned_deep"],"decision_summary":"需要深搜"}'},
+                )
+                yield StreamEvent("usage", {"prompt_tokens": 3, "completion_tokens": 2, "total_tokens": 5})
 
         def fake_config():
             return WebSearchConfig(
@@ -2001,7 +2016,7 @@ def test_auto_tool_loop_adds_effective_depth_to_model_search_call(monkeypatch):
         assert trace["effective_depth"] == "deep"
         assert trace["executed_rounds"] == 1
         assert trace["stop_code"] == "evidence_enough"
-        assert usage["total_tokens"] == 3
+        assert usage["total_tokens"] == 8
         assert len(sources) == 1
 
     asyncio.run(run())
@@ -2014,6 +2029,13 @@ def test_auto_deep_tool_loop_keeps_final_context_free_of_round_result_logs(monke
         class FakeProvider:
             async def tool_call_turn(self, **kwargs):
                 return ToolCallTurnResult(tool_calls=[], usage={"prompt_tokens": 1, "completion_tokens": 0, "total_tokens": 1})
+
+            async def chat_stream(self, **kwargs):
+                yield StreamEvent(
+                    "completed_text",
+                    {"text": '{"effective_depth":"deep","queries":["taiwan strait latest"],"reason_codes":["ai_planned_deep"],"decision_summary":"需要深搜"}'},
+                )
+                yield StreamEvent("usage", {"prompt_tokens": 3, "completion_tokens": 2, "total_tokens": 5})
 
         def fake_config():
             return WebSearchConfig(
@@ -2068,7 +2090,6 @@ def test_auto_deep_tool_loop_keeps_final_context_free_of_round_result_logs(monke
         monkeypatch.setattr(chat, "publish_conversation_event", lambda *args, **kwargs: asyncio.sleep(0))
         monkeypatch.setattr(chat, "run_web_search_tool", fake_run_web_search_tool)
         monkeypatch.setattr(chat, "review_web_search_evidence", fake_review)
-        monkeypatch.setattr(chat, "effective_search_depth", lambda query, mode: "deep")
 
         sources, usage, trace = await chat.run_web_search_tool_loop(
             provider=FakeProvider(),
@@ -2088,7 +2109,7 @@ def test_auto_deep_tool_loop_keeps_final_context_free_of_round_result_logs(monke
         assert "Web search was enabled and the model did not call tools" not in context_text
         assert len(sources) == 3
         assert trace["executed_rounds"] == 3
-        assert usage["total_tokens"] == 7
+        assert usage["total_tokens"] == 12
         assert trace["stop_code"] == "evidence_enough"
 
     asyncio.run(run())
@@ -2176,9 +2197,9 @@ def test_tool_loop_plans_initial_queries_when_model_skips_tool(monkeypatch):
                 assert kwargs["model"] == "gpt-5.5"
                 assert kwargs["reasoning_effort"] == "low"
                 prompt = "\n".join(str(message.get("content") or "") for message in kwargs["messages"])
-                assert "Generate first-round search keywords" in prompt
+                assert "Choose effective_depth and generate first-round search keywords" in prompt
                 assert "你怎么看待中东爆发的各种冲突" in prompt
-                yield StreamEvent("completed_text", {"text": '{"queries":["中东冲突 最新 局势","以色列 伊朗 冲突 最新"]}'})
+                yield StreamEvent("completed_text", {"text": '{"effective_depth":"fast","queries":["中东冲突 最新 局势","以色列 伊朗 冲突 最新"],"reason_codes":["explicit_fast"]}'})
                 yield StreamEvent("usage", {"prompt_tokens": 4, "completion_tokens": 2, "total_tokens": 6})
 
         def fake_config():
@@ -2245,7 +2266,7 @@ def test_tool_loop_falls_back_to_user_query_when_initial_keyword_plan_is_empty(m
                 return ToolCallTurnResult(tool_calls=[], usage={"prompt_tokens": 1, "completion_tokens": 0, "total_tokens": 1})
 
             async def chat_stream(self, **kwargs):
-                yield StreamEvent("completed_text", {"text": '{"queries":[]}'})
+                yield StreamEvent("completed_text", {"text": '{"effective_depth":"fast","queries":[]}'})
                 yield StreamEvent("usage", {"prompt_tokens": 2, "completion_tokens": 1, "total_tokens": 3})
 
         def fake_config():
@@ -2285,10 +2306,74 @@ def test_tool_loop_falls_back_to_user_query_when_initial_keyword_plan_is_empty(m
         )
 
         assert executed == [("search_web", {"query": "今天 AI 新闻", "search_depth": "fast"})]
-        assert usage["total_tokens"] == 4
+        assert usage["total_tokens"] == 10
         assert len(sources) == 1
         assert trace["events"][0]["phase"] == "planning_queries"
         assert trace["events"][0]["reason_codes"] == ["keyword_plan_empty"]
+        assert trace["events"][1]["phase"] == "auto_fallback"
+
+    asyncio.run(run())
+
+
+def test_auto_tool_loop_retries_failed_planner_then_fast_fallback(monkeypatch):
+    async def run():
+        executed = []
+        context = [{"role": "user", "content": "今天 AI 新闻"}]
+        planner_calls = {"value": 0}
+
+        class FakeProvider:
+            async def tool_call_turn(self, **kwargs):
+                return ToolCallTurnResult(tool_calls=[], usage={"prompt_tokens": 1, "completion_tokens": 0, "total_tokens": 1})
+
+            async def chat_stream(self, **kwargs):
+                planner_calls["value"] += 1
+                raise RuntimeError("planner unavailable")
+                yield
+
+        def fake_config():
+            return WebSearchConfig(
+                enabled=True,
+                searxng_base_url="https://search.example.com/search",
+                result_count=3,
+                language="all",
+                safesearch="1",
+                timeout_seconds=5,
+                fetch_timeout_seconds=5,
+                max_tool_calls=3,
+                fetch_max_chars=4000,
+            )
+
+        async def fake_run_web_search_tool(name, arguments, config):
+            executed.append((name, dict(arguments)))
+            return {
+                "ok": True,
+                "results": [{"title": "AI News", "url": "https://example.com/ai", "snippet": "news"}],
+            }
+
+        monkeypatch.setattr(chat, "effective_web_search_config", fake_config)
+        monkeypatch.setattr(chat, "publish_conversation_event", lambda *args, **kwargs: asyncio.sleep(0))
+        monkeypatch.setattr(chat, "run_web_search_tool", fake_run_web_search_tool)
+
+        sources, usage, trace = await chat.run_web_search_tool_loop(
+            provider=FakeProvider(),
+            api_key="sk-test",
+            model="gpt-5.5",
+            context=context,
+            conversation_id="conv-1",
+            assistant_message_id="msg-assistant",
+            reasoning_effort=None,
+            search_mode="auto",
+            max_rounds=3,
+        )
+
+        assert planner_calls["value"] == 3
+        assert executed == [("search_web", {"query": "今天 AI 新闻", "search_depth": "fast"})]
+        assert usage["total_tokens"] == 1
+        assert len(sources) == 1
+        assert trace["effective_depth"] == "fast"
+        assert trace["planning_attempts"] == 3
+        assert trace["events"][0]["reason_codes"] == ["keyword_plan_failed"]
+        assert trace["events"][0]["phase"] == "planning_queries"
         assert trace["events"][1]["phase"] == "auto_fallback"
 
     asyncio.run(run())
@@ -2489,6 +2574,40 @@ def test_review_web_search_evidence_timeout_stops_without_new_actions(monkeypatc
         return await original_wait_for(awaitable, timeout=0.001)
 
     monkeypatch.setattr(chat.asyncio, "wait_for", tiny_wait_for)
+    asyncio.run(run())
+
+
+def test_review_web_search_evidence_retries_unparseable_three_times(monkeypatch):
+    async def run():
+        calls = {"value": 0}
+
+        class FakeProvider:
+            async def chat_stream(self, **kwargs):
+                calls["value"] += 1
+                yield StreamEvent("completed_text", {"text": "not json"})
+                yield StreamEvent("usage", {"prompt_tokens": 1, "completion_tokens": 1, "total_tokens": 2})
+
+        payload, usage = await chat.review_web_search_evidence(
+            provider=FakeProvider(),
+            api_key="sk-test",
+            model="gpt-5.5",
+            user_query="today AI news",
+            sources=[],
+            round_index=3,
+            max_rounds=10,
+            reasoning_effort="high",
+            config_timeout=5,
+            soft_max_rounds=3,
+        )
+
+        assert calls["value"] == 3
+        assert usage["total_tokens"] == 6
+        assert payload["needs_more"] is False
+        assert payload["attempts"] == 3
+        assert payload["soft_max_rounds_reached"] is True
+        assert "review_unparseable" in payload["reason_codes"]
+        assert "已停止补充搜索" in payload["stop_reason"]
+
     asyncio.run(run())
 
 
@@ -2717,6 +2836,95 @@ def test_deep_tool_loop_continues_until_hard_limit_when_model_keeps_requesting_m
         assert trace["stop_reason"] == "已达到深搜硬上限 10 轮，使用现有证据回答。"
         assert len(sources) == 10
         assert usage["total_tokens"] == 19
+
+    asyncio.run(run())
+
+
+def test_deep_tool_loop_marks_soft_limit_when_review_continues(monkeypatch):
+    async def run():
+        executed = []
+        review_rounds = []
+        context = [{"role": "user", "content": "taiwan strait latest"}]
+
+        class FakeProvider:
+            async def tool_call_turn(self, **kwargs):
+                return ToolCallTurnResult(tool_calls=[], usage={"prompt_tokens": 1, "completion_tokens": 0, "total_tokens": 1})
+
+        def fake_config():
+            return WebSearchConfig(
+                enabled=True,
+                searxng_base_url="https://search.example.com/search",
+                result_count=3,
+                language="all",
+                safesearch="1",
+                timeout_seconds=5,
+                fetch_timeout_seconds=5,
+                max_tool_calls=4,
+                fetch_max_chars=4000,
+            )
+
+        async def fake_run_web_search_tool(name, arguments, config):
+            executed.append((name, dict(arguments)))
+            return {
+                "ok": True,
+                "results": [{"title": f"Source {len(executed)}", "url": f"https://example.com/{len(executed)}", "snippet": "evidence"}],
+            }
+
+        async def fake_review(**kwargs):
+            review_rounds.append((kwargs["round_index"], kwargs.get("soft_max_rounds")))
+            if kwargs["round_index"] >= 4:
+                return (
+                    {
+                        "needs_more": False,
+                        "new_queries": [],
+                        "urls_to_fetch": [],
+                        "evidence_gaps": [],
+                        "reason_codes": ["enough"],
+                        "stop_reason": "证据已足够",
+                        "attempts": 1,
+                        "soft_max_rounds_reached": True,
+                    },
+                    {"prompt_tokens": 1, "completion_tokens": 1, "total_tokens": 2},
+                )
+            return (
+                {
+                    "needs_more": True,
+                    "new_queries": [f"taiwan strait latest round {kwargs['round_index']}"],
+                    "urls_to_fetch": [],
+                    "evidence_gaps": ["needs more after soft limit"],
+                    "reason_codes": ["weak_sources"],
+                    "attempts": 1,
+                    "soft_max_rounds_reached": kwargs["round_index"] >= kwargs.get("soft_max_rounds"),
+                },
+                {"prompt_tokens": 1, "completion_tokens": 1, "total_tokens": 2},
+            )
+
+        monkeypatch.setattr(chat, "effective_web_search_config", fake_config)
+        monkeypatch.setattr(chat, "publish_conversation_event", lambda *args, **kwargs: asyncio.sleep(0))
+        monkeypatch.setattr(chat, "run_web_search_tool", fake_run_web_search_tool)
+        monkeypatch.setattr(chat, "review_web_search_evidence", fake_review)
+
+        sources, usage, trace = await chat.run_web_search_tool_loop(
+            provider=FakeProvider(),
+            api_key="sk-test",
+            model="gpt-5.5",
+            context=context,
+            conversation_id="conv-1",
+            assistant_message_id="msg-assistant",
+            reasoning_effort=None,
+            search_mode="deep",
+            max_rounds=3,
+        )
+
+        assert review_rounds == [(1, 3), (2, 3), (3, 3), (4, 3)]
+        assert len([item for item in executed if item[0] == "search_web"]) == 4
+        assert len(sources) == 4
+        assert usage["total_tokens"] == 9
+        assert trace["requested_max_rounds"] == 3
+        assert trace["soft_max_rounds_reached"] is True
+        assert trace["review_attempts"] == 1
+        assert trace["executed_rounds"] == 4
+        assert trace["stop_code"] == "evidence_enough"
 
     asyncio.run(run())
 
@@ -2987,12 +3195,14 @@ def test_tool_loop_stops_after_successful_search_results(monkeypatch):
         )
 
         assert executed == [
-            ("search_web", {"query": "latest ai news", "search_depth": "deep", "max_rounds": 10})
+            ("search_web", {"query": "latest ai news", "search_depth": "fast"})
         ]
         assert tool_turn_count["value"] == 1
         assert len(sources) == 1
         assert usage["total_tokens"] == 2
-        assert trace["events"][0]["query"] == "latest ai news"
+        assert trace["events"][0]["phase"] == "planning_queries"
+        assert trace["events"][0]["attempts"] == 3
+        assert trace["events"][1]["query"] == "latest ai news"
 
     asyncio.run(run())
 
@@ -3202,9 +3412,9 @@ def test_chat_job_fallback_searches_time_sensitive_prompt_when_model_skips_tool(
                 assert kwargs["model"] == "gpt-5.5"
                 assert kwargs["reasoning_effort"] == "low"
                 prompt = "\n".join(str(message.get("content") or "") for message in kwargs["messages"])
-                assert "Generate first-round search keywords" in prompt
+                assert "Choose effective_depth and generate first-round search keywords" in prompt
                 assert "今天 AI 新闻" in prompt
-                yield StreamEvent("completed_text", {"text": '{"queries":["今天 AI 新闻 最新"]}'})
+                yield StreamEvent("completed_text", {"text": '{"effective_depth":"fast","queries":["今天 AI 新闻 最新"],"reason_codes":["explicit_fast"]}'})
                 yield StreamEvent("usage", {"prompt_tokens": 3, "completion_tokens": 2, "total_tokens": 5})
                 return
             final_messages["messages"] = kwargs["messages"]

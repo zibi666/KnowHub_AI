@@ -54,7 +54,6 @@ from app.services.image_generation import (
 )
 from app.services.web_search import (
     effective_web_search_config,
-    effective_search_depth,
     format_search_results_for_context,
     json_tool_output,
     normalize_max_rounds,
@@ -119,17 +118,22 @@ WEB_SEARCH_DEEP_REVIEW_POLICY = (
     "contradictory, clearly unrelated, or missing primary/major-news support."
 )
 WEB_SEARCH_KEYWORD_PLAN_POLICY = (
-    "You are planning the first web-search queries for KnowHub. Return JSON only, with key: "
-    "queries (array of 1 to 3 strings). Convert the user's natural-language question into concise, searchable "
-    "keywords. Preserve important entities, time words, locations, and source-quality hints. For Chinese questions, "
-    "prefer Chinese keywords unless English source terms are clearly useful. Do not answer the question, do not "
-    "include hidden reasoning, and do not call tools."
+    "You are planning the first web-search pass for KnowHub. Return JSON only, with keys: "
+    "effective_depth (fast or deep), queries (array of 1 to 3 strings), reason_codes (array of short strings), "
+    "decision_summary (short public sentence). If the requested mode is auto, choose fast for stable/simple lookup "
+    "and deep for current, disputed, high-risk, fast-changing, legal, medical, financial, policy, death, or "
+    "multi-source evidence questions. If the requested mode is fast or deep, keep that exact effective_depth. "
+    "Convert the user's natural-language question into concise searchable keywords. Preserve important entities, "
+    "time words, locations, and source-quality hints. For Chinese questions, prefer Chinese keywords unless English "
+    "source terms are clearly useful. Do not answer the question, do not include hidden reasoning, and do not call tools."
 )
 WEB_SEARCH_REVIEW_MAX_QUERIES_PER_ROUND = 2
 WEB_SEARCH_REVIEW_MAX_URLS_PER_ROUND = 2
 WEB_SEARCH_REVIEW_MAX_ACTIONS_PER_ROUND = 3
 WEB_SEARCH_INITIAL_MAX_QUERIES = 3
 WEB_SEARCH_DEEP_HARD_MAX_ROUNDS = 10
+WEB_SEARCH_PLANNER_MAX_ATTEMPTS = 3
+WEB_SEARCH_REVIEW_MAX_ATTEMPTS = 3
 _STREAM_END = object()
 EMPTY_CHAT_RESPONSE_MESSAGE = (
     "模型返回了空回复：上游接口请求已完成，但没有返回任何可显示的文本。"
@@ -1099,6 +1103,10 @@ def _trace_review_event(round_index: int, review_payload: dict, search_history: 
         "reason_codes": _clean_review_notes(review_payload.get("reason_codes"), item_limit=80),
         "stop_reason": _compact_trace_text(review_payload.get("stop_reason"), 220),
     }
+    if review_payload.get("attempts") is not None:
+        event["attempts"] = int(review_payload.get("attempts") or 0)
+    if review_payload.get("soft_max_rounds_reached"):
+        event["soft_max_rounds_reached"] = True
     if search_history:
         event["searched_queries"] = [
             _compact_trace_text(query, 180)
@@ -1131,8 +1139,10 @@ def _trace_keyword_plan_event(
     effective_depth: str,
     queries: list[str],
     ok: bool,
-    reason: str | None = None,
+    reason: str | list[str] | None = None,
     error: str | None = None,
+    decision_summary: str | None = None,
+    attempts: int | None = None,
 ) -> dict:
     event: dict = {
         "round": round_index,
@@ -1145,9 +1155,13 @@ def _trace_keyword_plan_event(
         "new_queries": [_compact_trace_text(query, 180) for query in queries if _compact_trace_text(query, 180)],
     }
     if reason:
-        event["reason_codes"] = [_compact_trace_text(reason, 80)]
+        event["reason_codes"] = _clean_review_notes(reason if isinstance(reason, list) else [reason], item_limit=80)
     if error:
         event["error"] = _compact_trace_text(error, 300)
+    if decision_summary:
+        event["decision_summary"] = _compact_trace_text(decision_summary, 220)
+    if attempts is not None:
+        event["attempts"] = int(attempts)
     return {key: value for key, value in event.items() if value not in (None, "", [])}
 
 
@@ -1178,6 +1192,112 @@ async def _keyword_plan_stream_json(
     return _parse_search_review_json(content), usage
 
 
+def _normalize_planned_depth(value: object, search_mode: str) -> str:
+    requested = normalized_web_search_mode(search_mode)
+    if requested in {"fast", "deep"}:
+        return requested
+    candidate = normalize_search_depth(value, default="fast")
+    return candidate if candidate in {"fast", "deep"} else "fast"
+
+
+async def plan_initial_web_search(
+    *,
+    provider: OpenAICompatibleProvider,
+    api_key: str,
+    model: str,
+    user_query: str,
+    search_mode: str,
+    config_timeout: int,
+    max_attempts: int = WEB_SEARCH_PLANNER_MAX_ATTEMPTS,
+) -> tuple[dict, dict | None]:
+    search_mode = normalized_web_search_mode(search_mode)
+    messages = [
+        {"role": "system", "content": WEB_SEARCH_KEYWORD_PLAN_POLICY},
+        {
+            "role": "user",
+            "content": (
+                f"User question: {user_query}\n"
+                f"Search mode: {search_mode}\n"
+                "Choose effective_depth and generate first-round search keywords. If the question is broad or "
+                "conversational, make the queries specific enough for search engines. Include recency terms when the "
+                "user asks for latest/current facts."
+            ),
+        },
+    ]
+    timeout_seconds = float(min(10, max(6, int(config_timeout or 0))))
+    attempts = max(1, int(max_attempts or 1))
+    usage_total: dict | None = None
+    last_error = "keyword_plan_failed"
+    for attempt in range(1, attempts + 1):
+        started = time.perf_counter()
+        try:
+            payload, usage = await asyncio.wait_for(
+                _keyword_plan_stream_json(provider, api_key=api_key, model=model, messages=messages),
+                timeout=timeout_seconds,
+            )
+            usage_total = add_usage_totals(usage_total, usage)
+            elapsed_ms = int((time.perf_counter() - started) * 1000)
+            queries = _clean_search_queries(payload.get("queries"), limit=WEB_SEARCH_INITIAL_MAX_QUERIES)
+            effective_depth = _normalize_planned_depth(payload.get("effective_depth") or payload.get("effectiveDepth"), search_mode)
+            reason_codes = _clean_review_notes(payload.get("reason_codes") or payload.get("reasonCodes"), item_limit=80)
+            decision_summary = _compact_trace_text(payload.get("decision_summary") or payload.get("decisionSummary"), 220)
+            if not queries:
+                last_error = "keyword_plan_empty"
+                perf_logger.warning(
+                    "web_search_keyword_plan_empty model=%s attempt=%d/%d elapsed_ms=%d user_query_chars=%d",
+                    model,
+                    attempt,
+                    attempts,
+                    elapsed_ms,
+                    len(user_query),
+                )
+                continue
+            perf_logger.info(
+                "web_search_keyword_plan_done model=%s attempt=%d/%d elapsed_ms=%d depth=%s queries=%d",
+                model,
+                attempt,
+                attempts,
+                elapsed_ms,
+                effective_depth,
+                len(queries),
+            )
+            return {
+                "ok": True,
+                "effective_depth": effective_depth,
+                "queries": queries,
+                "reason_codes": reason_codes,
+                "decision_summary": decision_summary,
+                "attempts": attempt,
+            }, usage_total
+        except asyncio.TimeoutError:
+            elapsed_ms = int((time.perf_counter() - started) * 1000)
+            last_error = "keyword_plan_timeout"
+            perf_logger.warning("web_search_keyword_plan_timeout model=%s attempt=%d/%d elapsed_ms=%d", model, attempt, attempts, elapsed_ms)
+        except Exception as exc:
+            elapsed_ms = int((time.perf_counter() - started) * 1000)
+            last_error = "keyword_plan_failed"
+            perf_logger.warning(
+                "web_search_keyword_plan_failed model=%s attempt=%d/%d elapsed_ms=%d error=%s",
+                model,
+                attempt,
+                attempts,
+                elapsed_ms,
+                str(exc)[:300],
+            )
+    fallback_depth = normalized_web_search_mode(search_mode)
+    if fallback_depth == "auto":
+        fallback_depth = "fast"
+    return {
+        "ok": False,
+        "effective_depth": fallback_depth,
+        "queries": [user_query] if user_query else [],
+        "reason_codes": [last_error],
+        "decision_summary": "自动搜索规划失败，已回退为快速搜索。",
+        "attempts": attempts,
+        "error": last_error,
+    }, usage_total
+
+
 async def plan_initial_web_search_queries(
     *,
     provider: OpenAICompatibleProvider,
@@ -1188,51 +1308,17 @@ async def plan_initial_web_search_queries(
     effective_depth: str,
     config_timeout: int,
 ) -> tuple[list[str], dict | None, str | None]:
-    messages = [
-        {"role": "system", "content": WEB_SEARCH_KEYWORD_PLAN_POLICY},
-        {
-            "role": "user",
-            "content": (
-                f"User question: {user_query}\n"
-                f"Search mode: {search_mode}\n"
-                f"Effective depth: {effective_depth}\n"
-                "Generate first-round search keywords. If the question is broad or conversational, make the queries "
-                "specific enough for search engines. Include recency terms when the user asks for latest/current facts."
-            ),
-        },
-    ]
-    timeout_seconds = float(min(10, max(6, int(config_timeout or 0))))
-    started = time.perf_counter()
-    try:
-        payload, usage = await asyncio.wait_for(
-            _keyword_plan_stream_json(provider, api_key=api_key, model=model, messages=messages),
-            timeout=timeout_seconds,
-        )
-        elapsed_ms = int((time.perf_counter() - started) * 1000)
-        queries = _clean_search_queries(payload.get("queries"), limit=WEB_SEARCH_INITIAL_MAX_QUERIES)
-        if not queries:
-            perf_logger.warning(
-                "web_search_keyword_plan_empty model=%s elapsed_ms=%d user_query_chars=%d",
-                model,
-                elapsed_ms,
-                len(user_query),
-            )
-            return [], usage, "keyword_plan_empty"
-        perf_logger.info(
-            "web_search_keyword_plan_done model=%s elapsed_ms=%d queries=%d",
-            model,
-            elapsed_ms,
-            len(queries),
-        )
-        return queries, usage, None
-    except asyncio.TimeoutError:
-        elapsed_ms = int((time.perf_counter() - started) * 1000)
-        perf_logger.warning("web_search_keyword_plan_timeout model=%s elapsed_ms=%d", model, elapsed_ms)
-        return [], None, "keyword_plan_timeout"
-    except Exception as exc:
-        elapsed_ms = int((time.perf_counter() - started) * 1000)
-        perf_logger.warning("web_search_keyword_plan_failed model=%s elapsed_ms=%d error=%s", model, elapsed_ms, str(exc)[:300])
-        return [], None, "keyword_plan_failed"
+    payload, usage = await plan_initial_web_search(
+        provider=provider,
+        api_key=api_key,
+        model=model,
+        user_query=user_query,
+        search_mode=search_mode if search_mode != "auto" else effective_depth,
+        config_timeout=config_timeout,
+    )
+    reason_codes = payload.get("reason_codes") if isinstance(payload, dict) else []
+    reason = reason_codes[0] if isinstance(reason_codes, list) and reason_codes else None
+    return _clean_search_queries(payload.get("queries"), limit=WEB_SEARCH_INITIAL_MAX_QUERIES), usage, None if payload.get("ok") else reason
 
 
 async def _review_stream_json(
@@ -1275,8 +1361,11 @@ async def review_web_search_evidence(
     reasoning_effort: str | None,
     config_timeout: int,
     available_models: list[str] | None = None,
+    soft_max_rounds: int | None = None,
+    max_attempts: int = WEB_SEARCH_REVIEW_MAX_ATTEMPTS,
 ) -> tuple[dict, dict | None]:
     review_reasoning_effort = "low"
+    soft_limit_reached = bool(soft_max_rounds and round_index >= soft_max_rounds)
     evidence_lines = []
     for index, source in enumerate(sources[:8], start=1):
         evidence_lines.append(
@@ -1305,6 +1394,12 @@ async def review_web_search_evidence(
             "evidence; name that repeat-worthy gap in evidence_gaps or relevance_notes. Prefer clearly new angles "
             "and unread authoritative URLs when the previous keyword already returned precise useful evidence."
         )
+    if soft_limit_reached:
+        action_policy += (
+            " The user-selected deep-search round target has been reached. Continue past this soft limit only if "
+            "there is a concrete, high-value evidence gap that prevents a reliable answer; otherwise set needs_more "
+            "to false and explain that the evidence is sufficient or that remaining uncertainty should be stated."
+        )
     messages = [
         {"role": "system", "content": WEB_SEARCH_DEEP_REVIEW_POLICY},
         {
@@ -1312,6 +1407,8 @@ async def review_web_search_evidence(
             "content": (
                 f"User query: {user_query}\n"
                 f"Round: {round_index}/{max_rounds}\n"
+                f"User-selected soft max rounds: {soft_max_rounds or max_rounds}\n"
+                f"Soft max reached: {'yes' if soft_limit_reached else 'no'}\n"
                 f"Review reasoning effort: {review_reasoning_effort}\n"
                 "Search history so far:\n"
                 + ("\n".join(history_lines) if history_lines else "No search history was recorded yet.")
@@ -1326,81 +1423,101 @@ async def review_web_search_evidence(
     review_model = model
     timeout_seconds = float(min(18, max(10, int(config_timeout or 0))))
     payload_chars = sum(len(str(item)) for item in messages)
-    started = time.perf_counter()
-    perf_logger.info(
-        "web_search_review_start model=%s round=%d max_rounds=%d source_count=%d payload_chars=%d timeout_seconds=%.1f",
-        review_model,
-        round_index,
-        max_rounds,
-        len(sources),
-        payload_chars,
-        timeout_seconds,
-    )
-    try:
-        payload, usage = await asyncio.wait_for(
-            _review_stream_json(provider, api_key=api_key, model=review_model, messages=messages),
-            timeout=timeout_seconds,
-        )
-        elapsed_ms = int((time.perf_counter() - started) * 1000)
-        if not payload:
-            perf_logger.warning(
-                "web_search_review_failed model=%s round=%d elapsed_ms=%d reason=empty_or_unparseable",
-                review_model,
-                round_index,
-                elapsed_ms,
-            )
-            return {
-                "needs_more": False,
-                "new_queries": [],
-                "urls_to_fetch": [],
-                "evidence_gaps": ["review returned no parseable JSON"],
-                "reason_codes": ["review_unparseable"],
-                "stop_reason": "证据审查结果不可解析，已停止补充搜索并使用现有证据回答。",
-            }, usage
+    attempts = max(1, int(max_attempts or 1))
+    usage_total: dict | None = None
+    last_failure = "review_failed"
+    for attempt in range(1, attempts + 1):
+        started = time.perf_counter()
         perf_logger.info(
-            "web_search_review_done model=%s round=%d elapsed_ms=%d needs_more=%s new_queries=%d urls=%d",
+            "web_search_review_start model=%s round=%d max_rounds=%d attempt=%d/%d source_count=%d payload_chars=%d timeout_seconds=%.1f",
             review_model,
             round_index,
-            elapsed_ms,
-            bool(payload.get("needs_more", True)),
-            len(_clean_search_queries(payload.get("new_queries"), limit=WEB_SEARCH_REVIEW_MAX_QUERIES_PER_ROUND)),
-            len(_clean_fetch_urls(payload.get("urls_to_fetch"), limit=WEB_SEARCH_REVIEW_MAX_URLS_PER_ROUND)),
-        )
-        return payload, usage
-    except asyncio.TimeoutError:
-        elapsed_ms = int((time.perf_counter() - started) * 1000)
-        perf_logger.warning(
-            "web_search_review_timeout model=%s round=%d elapsed_ms=%d timeout_seconds=%.1f",
-            review_model,
-            round_index,
-            elapsed_ms,
+            max_rounds,
+            attempt,
+            attempts,
+            len(sources),
+            payload_chars,
             timeout_seconds,
         )
-        return {
-            "needs_more": False,
-            "new_queries": [],
-            "urls_to_fetch": [],
-            "evidence_gaps": ["review timed out"],
-            "reason_codes": ["review_timeout"],
-            "stop_reason": "证据审查超时，已停止补充搜索并使用现有证据回答。",
-        }, None
-    except Exception as exc:
-        elapsed_ms = int((time.perf_counter() - started) * 1000)
-        perf_logger.warning(
-            "web_search_review_failed model=%s round=%d elapsed_ms=%d error=%s",
-            review_model,
-            round_index,
-            elapsed_ms,
-            str(exc)[:300],
-        )
-        return {
-            "needs_more": False,
-            "new_queries": [],
-            "urls_to_fetch": [],
-            "evidence_gaps": ["review failed"],
-            "reason_codes": ["review_failed"],
-            "stop_reason": "证据审查失败，已停止补充搜索并使用现有证据回答。",
-        }, None
+        try:
+            payload, usage = await asyncio.wait_for(
+                _review_stream_json(provider, api_key=api_key, model=review_model, messages=messages),
+                timeout=timeout_seconds,
+            )
+            usage_total = add_usage_totals(usage_total, usage)
+            elapsed_ms = int((time.perf_counter() - started) * 1000)
+            if not payload:
+                last_failure = "review_unparseable"
+                perf_logger.warning(
+                    "web_search_review_failed model=%s round=%d attempt=%d/%d elapsed_ms=%d reason=empty_or_unparseable",
+                    review_model,
+                    round_index,
+                    attempt,
+                    attempts,
+                    elapsed_ms,
+                )
+                continue
+            payload["attempts"] = attempt
+            if soft_limit_reached:
+                payload["soft_max_rounds_reached"] = True
+            perf_logger.info(
+                "web_search_review_done model=%s round=%d attempt=%d/%d elapsed_ms=%d needs_more=%s new_queries=%d urls=%d",
+                review_model,
+                round_index,
+                attempt,
+                attempts,
+                elapsed_ms,
+                bool(payload.get("needs_more", True)),
+                len(_clean_search_queries(payload.get("new_queries"), limit=WEB_SEARCH_REVIEW_MAX_QUERIES_PER_ROUND)),
+                len(_clean_fetch_urls(payload.get("urls_to_fetch"), limit=WEB_SEARCH_REVIEW_MAX_URLS_PER_ROUND)),
+            )
+            return payload, usage_total
+        except asyncio.TimeoutError:
+            elapsed_ms = int((time.perf_counter() - started) * 1000)
+            last_failure = "review_timeout"
+            perf_logger.warning(
+                "web_search_review_timeout model=%s round=%d attempt=%d/%d elapsed_ms=%d timeout_seconds=%.1f",
+                review_model,
+                round_index,
+                attempt,
+                attempts,
+                elapsed_ms,
+                timeout_seconds,
+            )
+        except Exception as exc:
+            elapsed_ms = int((time.perf_counter() - started) * 1000)
+            last_failure = "review_failed"
+            perf_logger.warning(
+                "web_search_review_failed model=%s round=%d attempt=%d/%d elapsed_ms=%d error=%s",
+                review_model,
+                round_index,
+                attempt,
+                attempts,
+                elapsed_ms,
+                str(exc)[:300],
+            )
+    stop_reason_by_failure = {
+        "review_timeout": "证据审查连续超时，已停止补充搜索并使用现有证据回答。",
+        "review_unparseable": "证据审查结果连续不可解析，已停止补充搜索并使用现有证据回答。",
+        "review_failed": "证据审查连续失败，已停止补充搜索并使用现有证据回答。",
+    }
+    evidence_gap_by_failure = {
+        "review_timeout": "review timed out after retries",
+        "review_unparseable": "review returned no parseable JSON after retries",
+        "review_failed": "review failed after retries",
+    }
+    payload = {
+        "needs_more": False,
+        "new_queries": [],
+        "urls_to_fetch": [],
+        "evidence_gaps": [evidence_gap_by_failure.get(last_failure, "review failed after retries")],
+        "reason_codes": [last_failure],
+        "stop_reason": stop_reason_by_failure.get(last_failure, stop_reason_by_failure["review_failed"]),
+        "attempts": attempts,
+    }
+    if soft_limit_reached:
+        payload["soft_max_rounds_reached"] = True
+    return payload, usage_total
 
 
 async def run_web_search_tool_loop(
@@ -1434,18 +1551,68 @@ async def run_web_search_tool_loop(
     requested_max_rounds = normalized_web_search_rounds(max_rounds)
     hard_max_rounds = WEB_SEARCH_DEEP_HARD_MAX_ROUNDS
     base_user_query = web_search_fallback_query(context)
-    effective_depth = effective_search_depth(base_user_query, search_mode)
-    iterative_deep_search = effective_depth == "deep"
+    effective_depth = search_mode if search_mode in {"fast", "deep"} else "fast"
+    iterative_deep_search = False
     trace: dict = {
         "mode": search_mode,
         "effective_depth": effective_depth,
         "requested_max_rounds": requested_max_rounds,
         "max_rounds": hard_max_rounds,
+        "planning_attempts": 0,
         "review_reasoning_effort": "low",
         "events": [],
     }
     inject_web_search_policy(context)
-    should_force_search = should_force_web_search(context) or search_mode in {"fast", "deep"}
+    should_force_search = search_mode in {"auto", "fast", "deep"} or should_force_web_search(context)
+    planned_queries: list[str] = []
+    planner_failed = False
+    planner_payload: dict | None = None
+    if search_mode == "auto" and should_force_search and base_user_query:
+        await publish_conversation_event(
+            conversation_id,
+            "web_search_status",
+            web_search_status_payload(
+                conversation_id=conversation_id,
+                assistant_message_id=assistant_message_id,
+                phase="planning_queries",
+                detail="正在规划联网搜索策略和首轮关键词。",
+            ),
+        )
+        planner_payload, plan_usage = await plan_initial_web_search(
+            provider=provider,
+            api_key=api_key,
+            model=model,
+            user_query=base_user_query,
+            search_mode=search_mode,
+            config_timeout=config.timeout_seconds,
+        )
+        usage_total = add_usage_totals(usage_total, plan_usage)
+        planner_failed = not bool(planner_payload.get("ok"))
+        effective_depth = _normalize_planned_depth(planner_payload.get("effective_depth"), search_mode)
+        planned_queries = _clean_search_queries(planner_payload.get("queries"), limit=WEB_SEARCH_INITIAL_MAX_QUERIES)
+        trace["effective_depth"] = effective_depth
+        trace["planning_attempts"] = int(planner_payload.get("attempts") or 0)
+        trace["planner_reason_codes"] = _clean_review_notes(planner_payload.get("reason_codes"), item_limit=80)
+        trace["planner_summary"] = _compact_trace_text(planner_payload.get("decision_summary"), 220)
+        trace["events"].append(
+            _trace_keyword_plan_event(
+                round_index=1,
+                user_query=base_user_query,
+                search_mode=search_mode,
+                effective_depth=effective_depth,
+                queries=planned_queries,
+                ok=not planner_failed,
+                reason=trace["planner_reason_codes"],
+                error=planner_payload.get("error"),
+                decision_summary=trace["planner_summary"],
+                attempts=trace["planning_attempts"],
+            )
+        )
+        if planner_failed and not planned_queries:
+            planned_queries = [base_user_query]
+        if not planned_queries and base_user_query:
+            planned_queries = [base_user_query]
+    iterative_deep_search = effective_depth == "deep"
     for _ in range(max(1, config.max_tool_calls)):
         turn = await provider.tool_call_turn(
             api_key=api_key,
@@ -1547,9 +1714,7 @@ async def run_web_search_tool_loop(
         if should_stop_after_batch or executed_calls >= config.max_tool_calls:
             break
     if not saw_tool_calls and should_force_search:
-        query_plan: list[str] = []
-        fallback_reason: str | None = None
-        if base_user_query:
+        if not planned_queries and base_user_query:
             await publish_conversation_event(
                 conversation_id,
                 "web_search_status",
@@ -1557,33 +1722,45 @@ async def run_web_search_tool_loop(
                     conversation_id=conversation_id,
                     assistant_message_id=assistant_message_id,
                     phase="planning_queries",
-                    detail="正在生成首轮搜索关键词。",
+                    detail="正在规划联网搜索策略和首轮关键词。",
                 ),
             )
-            query_plan, plan_usage, fallback_reason = await plan_initial_web_search_queries(
+            planner_payload, plan_usage = await plan_initial_web_search(
                 provider=provider,
                 api_key=api_key,
                 model=model,
                 user_query=base_user_query,
                 search_mode=search_mode,
-                effective_depth=effective_depth,
                 config_timeout=config.timeout_seconds,
             )
             usage_total = add_usage_totals(usage_total, plan_usage)
+            planner_failed = not bool(planner_payload.get("ok"))
+            effective_depth = _normalize_planned_depth(planner_payload.get("effective_depth"), search_mode)
+            planned_queries = _clean_search_queries(planner_payload.get("queries"), limit=WEB_SEARCH_INITIAL_MAX_QUERIES)
+            trace["effective_depth"] = effective_depth
+            trace["planning_attempts"] = int(planner_payload.get("attempts") or 0)
+            trace["planner_reason_codes"] = _clean_review_notes(planner_payload.get("reason_codes"), item_limit=80)
+            trace["planner_summary"] = _compact_trace_text(planner_payload.get("decision_summary"), 220)
             trace["events"].append(
                 _trace_keyword_plan_event(
                     round_index=1,
                     user_query=base_user_query,
                     search_mode=search_mode,
                     effective_depth=effective_depth,
-                    queries=query_plan,
-                    ok=not fallback_reason,
-                    reason=fallback_reason,
+                    queries=planned_queries,
+                    ok=not planner_failed,
+                    reason=trace["planner_reason_codes"],
+                    error=planner_payload.get("error"),
+                    decision_summary=trace["planner_summary"],
+                    attempts=trace["planning_attempts"],
                 )
             )
-        if not query_plan and base_user_query:
-            query_plan = [base_user_query]
-        for query in query_plan:
+            if planner_failed and not planned_queries:
+                planned_queries = [base_user_query]
+            if not planned_queries and base_user_query:
+                planned_queries = [base_user_query]
+            iterative_deep_search = effective_depth == "deep"
+        for query in planned_queries:
             arguments = {"query": query}
             arguments["search_depth"] = effective_depth
             if effective_depth == "deep":
@@ -1604,7 +1781,7 @@ async def run_web_search_tool_loop(
             trace["events"].append(
                 _trace_tool_event(
                     round_index=1,
-                    phase="auto_fallback" if fallback_reason else "keyword_plan",
+                    phase="auto_fallback" if planner_failed else "keyword_plan",
                     tool="search_web",
                     arguments=arguments,
                     payload=payload,
@@ -1657,8 +1834,13 @@ async def run_web_search_tool_loop(
                 reasoning_effort=reasoning_effort,
                 config_timeout=config.timeout_seconds,
                 available_models=available_models,
+                soft_max_rounds=requested_max_rounds,
             )
             usage_total = add_usage_totals(usage_total, review_usage)
+            if review_payload.get("soft_max_rounds_reached"):
+                trace["soft_max_rounds_reached"] = True
+            if review_payload.get("attempts") is not None:
+                trace["review_attempts"] = max(int(trace.get("review_attempts") or 0), int(review_payload.get("attempts") or 0))
             needs_more = bool(review_payload.get("needs_more", True))
             new_queries = _clean_search_queries(
                 review_payload.get("new_queries"),

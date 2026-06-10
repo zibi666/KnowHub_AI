@@ -146,6 +146,11 @@ export interface WebSearchTraceEvent {
   accuracyNotes?: string[]
   reason_codes?: string[]
   reasonCodes?: string[]
+  decision_summary?: string
+  decisionSummary?: string
+  attempts?: number
+  soft_max_rounds_reached?: boolean
+  softMaxRoundsReached?: boolean
   stop_reason?: string
   stopReason?: string
   error?: string
@@ -157,8 +162,22 @@ export interface WebSearchTrace {
   effectiveDepth?: string
   max_rounds?: number
   maxRounds?: number
+  requested_max_rounds?: number
+  requestedMaxRounds?: number
   executed_rounds?: number
   executedRounds?: number
+  planning_attempts?: number
+  planningAttempts?: number
+  planner_reason_codes?: string[]
+  plannerReasonCodes?: string[]
+  planner_summary?: string
+  plannerSummary?: string
+  review_attempts?: number
+  reviewAttempts?: number
+  soft_max_rounds_reached?: boolean
+  softMaxRoundsReached?: boolean
+  stop_code?: string
+  stopCode?: string
   source_count?: number
   sourceCount?: number
   early_stop?: boolean

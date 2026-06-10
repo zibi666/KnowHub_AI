@@ -583,12 +583,20 @@ function webSearchTraceSummary(trace: WebSearchTrace | null) {
   const items = [`模式：${webSearchTraceModeLabel(trace)}`]
   const depth = webSearchTraceDepthLabel(trace)
   if (depth) items.push(`实际策略：${depth}`)
+  const planningAttempts = traceNumber(trace.planning_attempts ?? trace.planningAttempts)
+  if (planningAttempts !== null && planningAttempts > 0) items.push(`规划尝试：${planningAttempts}`)
   const executedRounds = traceNumber(trace.executed_rounds ?? trace.executedRounds)
   if (executedRounds !== null) items.push(`已执行轮次：${executedRounds}`)
+  const requestedRounds = traceNumber(trace.requested_max_rounds ?? trace.requestedMaxRounds)
+  if (depth === '深搜' && requestedRounds !== null) items.push(`用户轮数：${requestedRounds}`)
   const maxRounds = traceNumber(trace.max_rounds ?? trace.maxRounds)
   if (depth === '深搜' && maxRounds !== null) items.push(`硬上限：${maxRounds}`)
+  const reviewAttempts = traceNumber(trace.review_attempts ?? trace.reviewAttempts)
+  if (reviewAttempts !== null && reviewAttempts > 0) items.push(`审查尝试：${reviewAttempts}`)
   const sourceCount = traceNumber(trace.source_count ?? trace.sourceCount)
   if (sourceCount !== null) items.push(`来源：${sourceCount}`)
+  const softLimitReached = Boolean(trace.soft_max_rounds_reached ?? trace.softMaxRoundsReached)
+  if (softLimitReached) items.push('已越过用户轮数')
   const earlyStop = Boolean(trace.early_stop ?? trace.earlyStop)
   if (earlyStop) items.push('提前结束')
   return items
@@ -596,6 +604,10 @@ function webSearchTraceSummary(trace: WebSearchTrace | null) {
 
 function webSearchTraceStopReason(trace: WebSearchTrace | null) {
   return String(trace?.stop_reason || trace?.stopReason || '').trim()
+}
+
+function webSearchTracePlannerSummary(trace: WebSearchTrace | null) {
+  return String(trace?.planner_summary || trace?.plannerSummary || '').trim()
 }
 
 function traceEventTitle(event: WebSearchTraceEvent) {
@@ -632,6 +644,18 @@ function traceEventMainText(event: WebSearchTraceEvent) {
 
 function traceEventResultCount(event: WebSearchTraceEvent) {
   return traceNumber(event.result_count ?? event.resultCount)
+}
+
+function traceEventAttempts(event: WebSearchTraceEvent) {
+  return traceNumber(event.attempts)
+}
+
+function traceEventDecisionSummary(event: WebSearchTraceEvent) {
+  return String(event.decision_summary || event.decisionSummary || '').trim()
+}
+
+function traceEventSoftLimitReached(event: WebSearchTraceEvent) {
+  return Boolean(event.soft_max_rounds_reached ?? event.softMaxRoundsReached)
 }
 
 function traceEventSources(event: WebSearchTraceEvent) {
@@ -4205,6 +4229,7 @@ onUnmounted(() => {
                 <div class="search-trace-summary">
                   <span v-for="item in webSearchTraceSummary(activeSearchTrace)" :key="item" class="search-trace-chip">{{ item }}</span>
                 </div>
+                <p v-if="webSearchTracePlannerSummary(activeSearchTrace)" class="search-trace-stop">{{ webSearchTracePlannerSummary(activeSearchTrace) }}</p>
                 <p v-if="webSearchTraceStopReason(activeSearchTrace)" class="search-trace-stop">{{ webSearchTraceStopReason(activeSearchTrace) }}</p>
                 <div class="search-trace-list" role="list">
                   <article v-for="(event, index) in activeSearchTraceEvents" :key="`${event.round || 0}-${event.type || 'event'}-${index}`" class="search-trace-event">
@@ -4219,9 +4244,12 @@ onUnmounted(() => {
                       <div class="search-trace-event-meta">
                         <span v-if="event.tool">{{ event.tool }}</span>
                         <span v-if="event.phase">{{ event.phase }}</span>
+                        <span v-if="traceEventAttempts(event) !== null">尝试 {{ traceEventAttempts(event) }}</span>
+                        <span v-if="traceEventSoftLimitReached(event)">已到用户轮数</span>
                         <span v-if="traceEventResultCount(event) !== null">结果 {{ traceEventResultCount(event) }}</span>
                         <span v-if="event.error" class="search-trace-error">失败：{{ event.error }}</span>
                       </div>
+                      <p v-if="traceEventDecisionSummary(event)" class="search-trace-note">{{ traceEventDecisionSummary(event) }}</p>
                       <p v-if="traceEventStopReason(event)" class="search-trace-note">{{ traceEventStopReason(event) }}</p>
                     </div>
                     <div v-if="traceEventLists(event).length || traceEventSources(event).length" class="search-trace-event-detail">

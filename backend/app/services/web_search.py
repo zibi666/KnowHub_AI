@@ -867,7 +867,7 @@ def effective_search_depth(query: str, requested_depth: Any = None) -> str:
     requested = normalize_search_depth(requested_depth)
     if requested != "auto":
         return requested
-    return "deep" if query_prefers_deep_search(query) else "fast"
+    return "fast"
 
 
 def _config_for_search_depth(config: WebSearchConfig, depth: str) -> WebSearchConfig:
