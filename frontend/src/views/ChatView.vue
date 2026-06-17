@@ -1,6 +1,6 @@
 <script setup lang="ts">
 import { computed, nextTick, onMounted, onUnmounted, ref, watch, type CSSProperties } from 'vue'
-import { ArrowDown, Download, FileText, GitBranch, Globe, Image as ImageIcon, KeyRound, LogOut, Maximize2, MessageCircle, Minimize2, PanelLeftClose, PanelLeftOpen, Paperclip, Pencil, Pin, PinOff, Plus, RefreshCw, Search, Send, Settings, ShieldCheck, Trash2, X } from 'lucide-vue-next'
+import { ArrowDown, BookOpen, Code2, Download, FileText, GitBranch, Globe, Image as ImageIcon, KeyRound, Lightbulb, LogOut, Maximize2, MessageCircle, Minimize2, PanelLeftClose, PanelLeftOpen, Paperclip, Pencil, PenLine, Pin, PinOff, Plus, RefreshCw, Search, Send, Settings, ShieldCheck, Trash2, X } from 'lucide-vue-next'
 import { useRouter } from 'vue-router'
 import { ApiError, apiFetch, localizeApiMessage, readCookie } from '../api/client'
 import AppSelect from '../components/AppSelect.vue'
@@ -142,6 +142,22 @@ const messagesLoading = ref(false)
 const input = ref('')
 const composerInput = ref<HTMLTextAreaElement | null>(null)
 const composerExpanded = ref(false)
+
+// 空状态推荐提问卡片
+const emptyPrompts = [
+  { icon: PenLine, text: '帮我写一段代码' },
+  { icon: FileText, text: '总结这份文档的要点' },
+  { icon: Lightbulb, text: '解释一个复杂概念' },
+  { icon: Code2, text: '帮我调试一段报错' }
+]
+function applyEmptyPrompt(text: string) {
+  input.value = text
+  void nextTick(() => {
+    composerInput.value?.focus()
+    composerInput.value?.setSelectionRange(text.length, text.length)
+    resizeComposerInput()
+  })
+}
 const models = ref<string[]>([])
 const selectedModel = ref('')
 const reasoningEffort = ref<ReasoningEffort>('medium')
@@ -4486,8 +4502,21 @@ onUnmounted(() => {
 
       <footer ref="chatFooter" class="chat-footer p-4">
         <Transition name="welcome-rise">
-          <div v-if="isEmptyChat" class="empty-welcome">
-            {{ effectiveWelcomeMessage }}
+          <div v-if="isEmptyChat" class="empty-welcome-block">
+            <div class="empty-welcome">{{ effectiveWelcomeMessage }}</div>
+            <p class="empty-subtitle">问我任何问题，或拖入文件、图片开始对话</p>
+            <div class="empty-prompts">
+              <button
+                v-for="(prompt, index) in emptyPrompts"
+                :key="index"
+                class="empty-prompt"
+                type="button"
+                @click="applyEmptyPrompt(prompt.text)"
+              >
+                <span class="empty-prompt-icon"><component :is="prompt.icon" :size="17" /></span>
+                <span class="empty-prompt-text">{{ prompt.text }}</span>
+              </button>
+            </div>
           </div>
         </Transition>
         <button

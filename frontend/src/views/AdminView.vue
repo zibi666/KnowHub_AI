@@ -1,7 +1,7 @@
 <script setup lang="ts">
 import { computed, onBeforeUnmount, onMounted, ref } from 'vue'
+import { Database, HardDrive, KeyRound, ShieldCheck, UserPlus, Users, X } from 'lucide-vue-next'
 import { useRouter } from 'vue-router'
-import { X } from 'lucide-vue-next'
 import { apiFetch } from '../api/client'
 import AppSelect from '../components/AppSelect.vue'
 import { useAuthStore } from '../stores/auth'
@@ -38,6 +38,13 @@ const metricLabels: Record<string, string> = {
   messages: '消息数',
   attachments: '附件数',
   totalTokens: '总 Token'
+}
+const metricIcons: Record<string, any> = {
+  users: Users,
+  conversations: Database,
+  messages: Database,
+  attachments: HardDrive,
+  totalTokens: ShieldCheck
 }
 
 const cleanupKindLabels: Record<string, string> = {
@@ -357,15 +364,24 @@ onBeforeUnmount(() => {
     <Transition name="admin-toast">
       <div v-if="error" class="admin-toast error" role="alert" aria-live="assertive">{{ error }}</div>
     </Transition>
-    <section class="max-w-6xl mx-auto p-5 space-y-5">
-      <div class="grid grid-cols-5 gap-3">
-        <div v-for="(value, key) in visibleAnalytics" :key="key" class="app-card rounded-lg p-4">
-          <div class="app-muted text-xs">{{ metricLabels[String(key)] || key }}</div>
-          <div class="text-xl font-semibold">{{ value }}</div>
+    <div class="page-hero">
+      <span class="page-eyebrow">Admin</span>
+      <h2 class="page-title">管理后台</h2>
+      <p class="page-desc">监控平台运行状态，管理用户、密钥、存储与模型配置。</p>
+    </div>
+    <section class="page-shell wide space-y-5">
+      <div class="admin-stats-grid">
+        <div v-for="(value, key) in visibleAnalytics" :key="key" class="admin-stat-card">
+          <span class="admin-stat-icon"><component :is="metricIcons[String(key)] || ShieldCheck" :size="18" /></span>
+          <div class="admin-stat-value">{{ value }}</div>
+          <div class="admin-stat-label">{{ metricLabels[String(key)] || key }}</div>
         </div>
       </div>
       <div class="app-card rounded-lg p-4">
-        <h2 class="font-semibold mb-3">创建用户</h2>
+        <div class="page-section-head">
+          <span class="page-section-icon"><UserPlus :size="18" /></span>
+          <h2 class="page-section-title">创建用户</h2>
+        </div>
         <form class="flex gap-2" @submit.prevent="createUser">
           <input v-model="username" class="app-input rounded-md px-3 py-2" placeholder="用户名" />
           <input v-model="loginPassword" class="app-input rounded-md px-3 py-2" type="password" placeholder="登录密码" />
@@ -374,8 +390,11 @@ onBeforeUnmount(() => {
       </div>
       <div class="grid grid-cols-2 gap-4">
         <div class="app-card rounded-lg p-4">
-          <h2 class="font-semibold mb-3">存储清理</h2>
-          <div class="flex gap-2">
+          <div class="page-section-head">
+            <span class="page-section-icon"><HardDrive :size="18" /></span>
+            <h2 class="page-section-title">存储清理</h2>
+          </div>
+          <div class="flex gap-2 mt-1">
             <AppSelect
               v-model="cleanupKind"
               class="app-select-compact min-w-[180px]"
@@ -393,12 +412,19 @@ onBeforeUnmount(() => {
           </div>
         </div>
         <div class="app-card rounded-lg p-4">
-          <h2 class="font-semibold mb-3">Reasoning 模型</h2>
-          <textarea v-model="reasoningModels" class="app-input w-full rounded-md p-3 min-h-24 text-sm" placeholder="model-a, model-b" />
+          <div class="page-section-head">
+            <span class="page-section-icon"><ShieldCheck :size="18" /></span>
+            <h2 class="page-section-title">Reasoning 模型</h2>
+          </div>
+          <textarea v-model="reasoningModels" class="app-input w-full rounded-md p-3 min-h-24 text-sm mt-1" placeholder="model-a, model-b" />
           <button class="app-primary-button mt-2 rounded-md px-3 py-2 text-sm" @click="saveReasoningModels">保存</button>
         </div>
       </div>
       <div class="app-card rounded-lg overflow-visible">
+        <div class="p-4 page-section-head">
+          <span class="page-section-icon"><Users :size="18" /></span>
+          <h2 class="page-section-title">用户管理</h2>
+        </div>
         <table class="w-full text-sm">
           <thead class="app-table-head text-left">
             <tr><th class="p-3">用户名</th><th class="p-3">角色</th><th class="p-3">状态</th><th class="p-3">上传限流/小时</th><th class="p-3">需改密</th><th class="p-3">密钥</th><th class="p-3">操作</th></tr>

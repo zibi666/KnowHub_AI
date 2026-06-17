@@ -1,5 +1,6 @@
 <script setup lang="ts">
 import { computed, onMounted, ref } from 'vue'
+import { KeyRound, Plus } from 'lucide-vue-next'
 import { useRouter } from 'vue-router'
 import { apiFetch } from '../api/client'
 import AppSelect from '../components/AppSelect.vue'
@@ -134,12 +135,21 @@ onMounted(load)
       <span class="ml-auto app-muted text-sm">当前账号：{{ auth.user?.username }}</span>
     </header>
 
-    <section class="max-w-5xl mx-auto p-5 space-y-5">
+    <div class="page-hero">
+      <span class="page-eyebrow">API Keys</span>
+      <h2 class="page-title">管理你的 API 密钥</h2>
+      <p class="page-desc">为不同分组添加多个密钥，灵活切换当前使用密钥，保障服务稳定可用。</p>
+    </div>
+
+    <section class="page-shell wide space-y-5">
       <div v-if="notice" class="app-card rounded-lg p-3 text-sm text-green-700">{{ notice }}</div>
       <div v-if="error" class="app-card key-error rounded-lg p-3 text-sm text-red-600">{{ error }}</div>
 
       <form class="app-card rounded-lg p-5 space-y-3" @submit.prevent="createKey">
-        <h2 class="font-semibold">添加新密钥</h2>
+        <div class="page-section-head">
+          <span class="page-section-icon"><Plus :size="18" /></span>
+          <h2 class="page-section-title">添加新密钥</h2>
+        </div>
         <div class="grid gap-3 md:grid-cols-2">
           <input v-model="newKey.name" class="app-input rounded-md px-3 py-2" placeholder="密钥名称，例如：工作 / 备用" />
           <AppSelect
@@ -160,7 +170,10 @@ onMounted(load)
       </form>
 
       <div class="app-card rounded-lg overflow-visible">
-        <div class="p-4 font-semibold">我的密钥</div>
+        <div class="p-4 page-section-head">
+          <span class="page-section-icon"><KeyRound :size="18" /></span>
+          <h2 class="page-section-title">我的密钥</h2>
+        </div>
         <table class="w-full text-sm">
           <thead class="app-table-head text-left">
             <tr>
@@ -172,7 +185,14 @@ onMounted(load)
             </tr>
           </thead>
           <tbody>
-            <tr v-if="!keys.length"><td class="app-muted p-3" colspan="5">暂无密钥</td></tr>
+            <tr v-if="!keys.length">
+              <td class="p-6" colspan="5">
+                <div class="keys-empty">
+                  <span class="keys-empty-icon"><KeyRound :size="22" /></span>
+                  <span>暂无密钥，在上方添加你的第一个 API Key</span>
+                </div>
+              </td>
+            </tr>
             <tr v-for="key in keys" :key="key.id" class="app-table-row">
               <td class="p-3">
                 <input v-model="draftFor(key).name" class="app-input w-full rounded-md px-2 py-1" />

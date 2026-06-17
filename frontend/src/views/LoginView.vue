@@ -1,5 +1,6 @@
 <script setup lang="ts">
-import { ref } from 'vue'
+import { computed, ref } from 'vue'
+import { KeyRound, Lock, User } from 'lucide-vue-next'
 import { useRouter } from 'vue-router'
 import { ApiError } from '../api/client'
 import { useAuthStore } from '../stores/auth'
@@ -12,6 +13,12 @@ const apiKey = ref('')
 const newPassword = ref('')
 const mode = ref<'login' | 'first' | 'password'>('login')
 const error = ref('')
+
+const subtitle = computed(() => {
+  if (mode.value === 'first') return '绑定模型 API Key'
+  if (mode.value === 'password') return '修改临时密码'
+  return '登录你的账户'
+})
 
 async function submit() {
   error.value = ''
@@ -42,31 +49,32 @@ async function submit() {
 </script>
 
 <template>
-  <main class="app-page min-h-screen flex items-center justify-center px-4">
-    <section class="app-card w-full max-w-md rounded-lg p-6">
-      <h1 class="text-2xl font-semibold mb-1">私有 GPT</h1>
-      <p class="app-muted text-sm mb-6">
-        {{ mode === 'first' ? '绑定模型 API Key' : mode === 'password' ? '修改临时密码' : '登录' }}
-      </p>
-      <form class="space-y-4" @submit.prevent="submit">
-        <input v-model="username" class="app-input w-full rounded-md px-3 py-2" placeholder="用户名" />
-        <input v-model="password" class="app-input w-full rounded-md px-3 py-2" type="password" placeholder="密码" />
-        <input
-          v-if="mode === 'first'"
-          v-model="apiKey"
-          class="app-input w-full rounded-md px-3 py-2"
-          type="password"
-          placeholder="API Key"
-        />
-        <input
-          v-if="mode === 'password'"
-          v-model="newPassword"
-          class="app-input w-full rounded-md px-3 py-2"
-          type="password"
-          placeholder="新密码"
-        />
-        <p v-if="error" class="text-sm text-red-600">{{ error }}</p>
-        <button class="app-primary-button w-full rounded-md px-4 py-2" type="submit">
+  <main class="login-page">
+    <section class="login-card">
+      <div class="login-brand">
+        <img class="login-brand-icon" src="/brand/knowhub-icon.png" alt="KnowHub" />
+        <h1 class="login-brand-name">KnowHub</h1>
+      </div>
+      <p class="login-subtitle">{{ subtitle }}</p>
+      <form @submit.prevent="submit">
+        <div class="login-field">
+          <span class="login-field-icon"><User :size="18" /></span>
+          <input v-model="username" class="app-input" placeholder="用户名" autocomplete="username" />
+        </div>
+        <div class="login-field">
+          <span class="login-field-icon"><Lock :size="18" /></span>
+          <input v-model="password" class="app-input" type="password" placeholder="密码" autocomplete="current-password" />
+        </div>
+        <div v-if="mode === 'first'" class="login-field">
+          <span class="login-field-icon"><KeyRound :size="18" /></span>
+          <input v-model="apiKey" class="app-input" type="password" placeholder="API Key" autocomplete="off" />
+        </div>
+        <div v-if="mode === 'password'" class="login-field">
+          <span class="login-field-icon"><Lock :size="18" /></span>
+          <input v-model="newPassword" class="app-input" type="password" placeholder="新密码" autocomplete="new-password" />
+        </div>
+        <p v-if="error" class="login-error">{{ error }}</p>
+        <button class="login-submit" type="submit">
           {{ mode === 'first' ? '绑定并登录' : mode === 'password' ? '修改密码' : '登录' }}
         </button>
       </form>

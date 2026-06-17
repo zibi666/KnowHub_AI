@@ -1,5 +1,6 @@
 <script setup lang="ts">
 import { onMounted, ref } from 'vue'
+import { Image as ImageIcon, KeyRound, Lock, User as UserIcon } from 'lucide-vue-next'
 import { useRouter } from 'vue-router'
 import { apiFetch, readCookie } from '../api/client'
 import AppSelect from '../components/AppSelect.vue'
@@ -177,14 +178,23 @@ onMounted(loadImageSettings)
       <span class="ml-auto app-muted text-sm">{{ auth.user?.role === 'admin' ? '管理员' : '用户' }}</span>
     </header>
 
-    <section class="max-w-3xl mx-auto p-5 space-y-5">
+    <div class="page-hero">
+      <span class="page-eyebrow">Settings</span>
+      <h2 class="page-title">个性化你的体验</h2>
+      <p class="page-desc">管理图像生成参数、头像、账户安全与 API 密钥，打造属于你的专属工作台。</p>
+    </div>
+
+    <section class="page-shell space-y-5">
       <div v-if="notice" class="app-card rounded-lg p-3 text-sm text-green-700">{{ notice }}</div>
       <div v-if="error" class="app-card rounded-lg p-3 text-sm text-red-600">{{ error }}</div>
 
       <form class="app-card rounded-lg p-5 space-y-3" @submit.prevent="saveImageSettings">
-        <div>
-          <h2 class="font-semibold">图像生成</h2>
-          <p class="app-muted text-sm mt-1">配置 image-2、image-1.5、image-1 的默认生成参数。</p>
+        <div class="page-section-head">
+          <span class="page-section-icon"><ImageIcon :size="18" /></span>
+          <div>
+            <h2 class="page-section-title">图像生成</h2>
+            <p class="page-section-subtitle">配置 image-2、image-1.5、image-1 的默认生成参数。</p>
+          </div>
         </div>
         <div v-if="imageSettingsLoading" class="app-muted text-sm">正在加载图像设置...</div>
         <div v-else class="grid gap-3 md:grid-cols-2">
@@ -226,9 +236,12 @@ onMounted(loadImageSettings)
       </form>
 
       <div class="app-card rounded-lg p-5 space-y-3">
-        <div>
-          <h2 class="font-semibold">更换头像</h2>
-          <p class="app-muted text-sm mt-1">支持 PNG、JPG、WebP，最大 2MB，会自动裁切为方形头像。</p>
+        <div class="page-section-head">
+          <span class="page-section-icon"><UserIcon :size="18" /></span>
+          <div>
+            <h2 class="page-section-title">更换头像</h2>
+            <p class="page-section-subtitle">支持 PNG、JPG、WebP，最大 2MB，会自动裁切为方形头像。</p>
+          </div>
         </div>
         <div class="settings-avatar-editor">
           <div class="settings-avatar-preview" aria-hidden="true">
@@ -253,9 +266,12 @@ onMounted(loadImageSettings)
       </div>
 
       <form class="app-card rounded-lg p-5 space-y-3" @submit.prevent="saveProfile">
-        <div>
-          <h2 class="font-semibold">修改用户名</h2>
-          <p class="app-muted text-sm mt-1">不需要输入旧用户名，只需要用当前密码确认是本人操作。</p>
+        <div class="page-section-head">
+          <span class="page-section-icon"><UserIcon :size="18" /></span>
+          <div>
+            <h2 class="page-section-title">修改用户名</h2>
+            <p class="page-section-subtitle">不需要输入旧用户名，只需要用当前密码确认是本人操作。</p>
+          </div>
         </div>
         <input v-model="username" class="app-input w-full rounded-md px-3 py-2" placeholder="新用户名" />
         <input v-model="usernamePassword" class="app-input w-full rounded-md px-3 py-2" type="password" placeholder="当前密码" />
@@ -263,9 +279,12 @@ onMounted(loadImageSettings)
       </form>
 
       <form class="app-card rounded-lg p-5 space-y-3" @submit.prevent="savePassword">
-        <div>
-          <h2 class="font-semibold">修改密码</h2>
-          <p class="app-muted text-sm mt-1">修改后会保留当前登录，其它会话失效。</p>
+        <div class="page-section-head">
+          <span class="page-section-icon"><Lock :size="18" /></span>
+          <div>
+            <h2 class="page-section-title">修改密码</h2>
+            <p class="page-section-subtitle">修改后会保留当前登录，其它会话失效。</p>
+          </div>
         </div>
         <input v-model="oldPassword" class="app-input w-full rounded-md px-3 py-2" type="password" placeholder="当前密码" />
         <input v-model="newPassword" class="app-input w-full rounded-md px-3 py-2" type="password" placeholder="新密码" />
@@ -273,9 +292,12 @@ onMounted(loadImageSettings)
       </form>
 
       <div class="app-card rounded-lg p-5 space-y-3">
-        <div>
-          <h2 class="font-semibold">API Key 管理</h2>
-          <p class="app-muted text-sm mt-1">密钥已经拆到独立页面，可添加多个密钥、按分组切换当前使用密钥并选择分组。</p>
+        <div class="page-section-head">
+          <span class="page-section-icon"><KeyRound :size="18" /></span>
+          <div>
+            <h2 class="page-section-title">API Key 管理</h2>
+            <p class="page-section-subtitle">密钥已经拆到独立页面，可添加多个密钥、按分组切换当前使用密钥并选择分组。</p>
+          </div>
         </div>
         <button class="app-primary-button rounded-md px-4 py-2" type="button" @click="router.push('/keys')">进入密钥管理</button>
       </div>
