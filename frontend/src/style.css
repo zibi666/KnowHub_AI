@@ -207,6 +207,28 @@ body,
   box-shadow: 0 1px 0 var(--line);
 }
 
+/* 通用管理页页头：高度/内边距/标题统一，向 version-header 质感看齐 */
+.page-header {
+  display: flex;
+  align-items: center;
+  gap: 0.75rem;
+  height: 3.5rem;
+  padding: 0 1.25rem;
+}
+
+.page-header-title {
+  margin: 0;
+  font-size: 1rem;
+  font-weight: 650;
+  letter-spacing: 0.01em;
+}
+
+.page-header-meta {
+  margin-left: auto;
+  color: var(--muted);
+  font-size: 0.85rem;
+}
+
 /* 通用 hero 区 */
 .page-hero {
   max-width: 52rem;

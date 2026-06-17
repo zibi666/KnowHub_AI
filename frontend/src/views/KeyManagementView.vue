@@ -129,10 +129,10 @@ onMounted(load)
 
 <template>
   <main class="settings-page app-page">
-    <header class="app-header h-14 flex items-center px-5">
+    <header class="app-header page-header">
       <button class="app-secondary-button text-sm px-3 py-1" @click="router.push('/')">返回</button>
-      <h1 class="ml-4 font-semibold">密钥管理</h1>
-      <span class="ml-auto app-muted text-sm">当前账号：{{ auth.user?.username }}</span>
+      <h1 class="page-header-title">密钥管理</h1>
+      <span class="page-header-meta">当前账号：{{ auth.user?.username }}</span>
     </header>
 
     <div class="page-hero">

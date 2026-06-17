@@ -354,9 +354,9 @@ onBeforeUnmount(() => {
 
 <template>
   <main class="admin-page app-page">
-    <header class="app-header h-14 flex items-center px-5">
+    <header class="app-header page-header">
       <button class="app-secondary-button text-sm px-3 py-1" @click="router.push('/')">返回</button>
-      <h1 class="ml-4 font-semibold">管理后台</h1>
+      <h1 class="page-header-title">管理后台</h1>
     </header>
     <Transition name="admin-toast">
       <div v-if="notice" class="admin-toast" role="status" aria-live="polite">{{ notice }}</div>
