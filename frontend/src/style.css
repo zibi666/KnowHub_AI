@@ -37,6 +37,7 @@
   --bubble-bg: #075a9f;
   --bubble-hover: #0b65b8;
   --bubble-shadow: rgba(0, 78, 150, 0.25);
+  --bubble-text: #ffffff;
   --message-font-size: 16px;
   --user-message-font-size: 15.5px;
   --code-font-size: 12px;
@@ -166,6 +167,7 @@ body,
   --success: #15803d;
   --danger: #dc2626;
   --warning: #d97706;
+  --bubble-text: #ffffff;
 }
 
 .app-card {
