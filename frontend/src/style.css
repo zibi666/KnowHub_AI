@@ -561,24 +561,70 @@ body,
 }
 
 .app-primary-button {
+  border: none;
+  border-radius: var(--radius-sm);
   background: var(--bubble-bg);
   color: #ffffff;
-  transition: background 150ms ease, opacity 150ms ease;
+  box-shadow: var(--bubble-glow), var(--inset-highlight);
+  transition:
+    background var(--motion-fast) var(--ease-out-soft),
+    transform var(--motion-fast) var(--ease-out-soft),
+    box-shadow var(--motion-fast) var(--ease-out-soft),
+    opacity var(--motion-fast) ease;
 }
 
 .app-primary-button:hover:not(:disabled) {
   background: var(--bubble-hover);
+  transform: translateY(-1px);
+  box-shadow: var(--bubble-glow-strong), var(--inset-highlight);
+}
+
+.app-primary-button:active:not(:disabled) {
+  transform: translateY(0);
+}
+
+.app-primary-button:focus-visible {
+  outline: none;
+  box-shadow: var(--ring-focus), var(--inset-highlight);
+}
+
+.app-primary-button:disabled {
+  cursor: not-allowed;
+  opacity: 0.55;
 }
 
 .app-secondary-button {
   border: 1px solid var(--input-border);
+  border-radius: var(--radius-sm);
   background: var(--control-bg);
   color: var(--text);
-  transition: background 150ms ease;
+  box-shadow: var(--inset-highlight);
+  transition:
+    background var(--motion-fast) var(--ease-out-soft),
+    border-color var(--motion-fast) var(--ease-out-soft),
+    transform var(--motion-fast) var(--ease-out-soft),
+    box-shadow var(--motion-fast) var(--ease-out-soft);
 }
 
-.app-secondary-button:hover {
+.app-secondary-button:hover:not(:disabled) {
   background: var(--control-hover);
+  border-color: color-mix(in srgb, var(--bubble-bg) 45%, var(--input-border));
+  transform: translateY(-1px);
+}
+
+.app-secondary-button:active:not(:disabled) {
+  transform: translateY(0);
+}
+
+.app-secondary-button:focus-visible {
+  outline: none;
+  border-color: var(--ring-focus-border);
+  box-shadow: var(--ring-focus);
+}
+
+.app-secondary-button:disabled {
+  cursor: not-allowed;
+  opacity: 0.55;
 }
 
 .app-subtle-panel,
