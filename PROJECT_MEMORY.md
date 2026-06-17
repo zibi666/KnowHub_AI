@@ -1,6 +1,6 @@
 # 项目工作记忆
 
-最后更新：2026-06-10
+最后更新：2026-06-17
 
 这个文件用于记录用户在本项目中的长期要求、已踩过的问题、处理经验和后续工作习惯。每次在本项目开始新对话或新任务前，都需要先读取本文件，再结合当前用户的新要求继续更新。
 
@@ -110,6 +110,15 @@
 - 多轮深搜来源超过 10 个时，最终 prompt 只选全部轮次合并后的 Top 8-10 个高质量独立来源；完整来源和搜索过程保留在 UI trace/source panel。
 - 联网搜索最终回答如果上游模型输出 `<tool_call>`、`<tool_call code>` 或 JSON 工具参数，必须在后端清洗掉，不能让伪工具调用作为正文展示给用户。
 - 来源抽屉卡片不要展示 provider/confidence/tier/support/rerank 诊断串；这些诊断信息只能留在搜索过程 trace 或调试日志中，不能出现在正文摘要区域。
+- CSS `@font-face` 不能只加载 4 个静态字重（400/500/600/700）却在样式里用 650/720/750/780/800/830/850 等自定义字重；浏览器会就近取整，精心设计的字重层级会塌成"常规/加粗"两档。应使用 Inter 可变字体单文件（`font-weight: 100 900`，`format("woff2-variations")`）覆盖全字重。
+- CSS 变量被引用但未定义（如 `--bubble-text` 在 `:root` 和 `.theme-light` 都没定义却被 `color: var(--bubble-text)` 引用）会导致颜色失效回退到 `inherit`；新增颜色 token 时必须同时在 `:root` 和 `.theme-light` 定义。
+- 管理类页面（设置/密钥/后台）不能混用两套按钮系统：`.app-primary/secondary-button` 原本只有背景渐变、无上浮/聚焦环，而 `.settings-primary/secondary` 有 `translateY` 上浮+发光+聚焦环；应统一让 `.app-*` 按钮也带上浮/发光/聚焦环/自带 `--radius-sm` 圆角。
+- 不能在视图里用硬编码 Tailwind 颜色类（`text-green-700`/`text-red-600`/`text-green-500`）做成功/错误提示；这些不随暗/亮主题切换，暗色模式下会失真；应改用 `.settings-alert success/error` 或 `var(--success/--danger)` 语义 token。
+- 不能在按钮/输入框上用 Tailwind 的 `rounded-md`(6px)/`rounded`(4px)/`rounded-lg`(8px) 覆盖设计系统的圆角 token（`--radius-sm:8/-md:12/-lg:16`）；应让 `.app-*` 类自带 `border-radius: var(--radius-sm)` 并移除视图里的圆角覆盖，避免同一屏幕出现三种圆角。
+- 表格容器用 `overflow-visible` 会导致内部表格圆角溢出 `.app-card` 的 `--radius-lg`；应改 `overflow-hidden` 让表格被卡片圆角裁剪，并给 `.app-table-row` 加 `tr:hover` 柔和高亮。
+- 子代理并行编辑同一文件（如 `style.css`）时，后执行的 `replaceAll` 可能在已修改内容上找不到 `oldString`，还可能产生重复定义（如 `.key-active-badge` 被定义两次）；控制器必须做 spec 审查用 grep 验证新增类是否重复。
+- `.settings-alert.success/error` 不能用硬编码色（`#22c55e`/`#ef4444`/`#f87171`）；应改用 `var(--success/--danger/--success-soft/--danger-soft)` 语义 token，亮/暗主题才能自动切换。
+- `tailwind.config.js` 里的死色 token（`ink:#202123`/`panel:#f7f7f8`/`line:#e5e5e5`）与实际 CSS 变量设计系统脱节；应映射到 CSS 变量（`'var(--text)'` 等）让 Tailwind 工具类与主题对齐。
 
 ## 好的方法
 
@@ -126,3 +135,8 @@
 - 搜索过程摘要要区分配置模式、实际策略、已执行轮次和最大轮数；快速回答不显示最大轮数，只有实际深搜才显示最大轮数。
 - 做前端弹窗层级验证时，要看实际截图和 `scrollWidth/clientWidth`、父子层叠上下文、footer/sidebar 是否遮挡，不能只看组件内部没有横向溢出。
 - 每次完成后用编译、测试、前端 build、Docker 8090 可用性检查形成闭环。
+- 前端字体统一使用可变字体单文件（`InterVariable.woff2`，`font-weight: 100 900`），替代多个静态字重文件，避免自定义字重就近取整塌缩；`index.html` 的 preload 也同步指向可变字体文件。
+- 前端设计系统统一用 CSS 自定义属性管理颜色/圆角/阴影/动效 token，视图里不要用硬编码 Tailwind 颜色或圆角覆盖；新增 token 必须同时在 `:root` 和 `.theme-light` 定义。
+- 管理类页面的按钮、表格、页头、提示条应与聊天/登录页使用同一套设计 token：`.app-primary/secondary-button` 自带上浮/发光/聚焦环/圆角；表格行加悬停高亮 + 容器 `overflow-hidden` 裁剪圆角；页头用共享 `.page-header`；成功/错误提示用 `.settings-alert` + 语义 token。
+- 前端验证以 `npm run build`（vue-tsc + vite）为准，不做浏览器/截图/视觉走查；改完 `style.css` 或视图后必须跑一次 build 确认类型和构建通过。
+- 子代理并行编辑大文件时，控制器必须在 spec 审查阶段用 grep 验证新增类是否重复定义、硬编码颜色是否清除、圆角覆盖是否残留。
