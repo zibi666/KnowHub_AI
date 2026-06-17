@@ -637,6 +637,13 @@ body,
   border-top: 1px solid var(--line);
 }
 
+.skeleton-row {
+  border-radius: var(--radius-sm);
+  background: linear-gradient(90deg, var(--control-bg) 0%, var(--control-hover) 50%, var(--control-bg) 100%);
+  background-size: 200% 100%;
+  animation: skeleton-sweep 1.4s var(--ease-out-soft) infinite;
+}
+
 .admin-page,
 .settings-page {
   height: 100vh;
@@ -2673,6 +2680,16 @@ body,
 
 .key-error {
   white-space: pre-line;
+}
+
+.key-active-badge {
+  color: var(--success);
+  font-weight: 600;
+}
+
+.key-active-badge {
+  color: var(--success);
+  font-weight: 600;
 }
 
 .chat-search-backdrop,

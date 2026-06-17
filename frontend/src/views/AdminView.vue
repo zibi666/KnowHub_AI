@@ -355,7 +355,7 @@ onBeforeUnmount(() => {
 <template>
   <main class="admin-page app-page">
     <header class="app-header h-14 flex items-center px-5">
-      <button class="app-secondary-button text-sm rounded-md px-3 py-1" @click="router.push('/')">返回</button>
+      <button class="app-secondary-button text-sm px-3 py-1" @click="router.push('/')">返回</button>
       <h1 class="ml-4 font-semibold">管理后台</h1>
     </header>
     <Transition name="admin-toast">
@@ -383,9 +383,9 @@ onBeforeUnmount(() => {
           <h2 class="page-section-title">创建用户</h2>
         </div>
         <form class="flex gap-2" @submit.prevent="createUser">
-          <input v-model="username" class="app-input rounded-md px-3 py-2" placeholder="用户名" />
-          <input v-model="loginPassword" class="app-input rounded-md px-3 py-2" type="password" placeholder="登录密码" />
-          <button class="app-primary-button rounded-md px-4">创建</button>
+          <input v-model="username" class="app-input px-3 py-2" placeholder="用户名" />
+          <input v-model="loginPassword" class="app-input px-3 py-2" type="password" placeholder="登录密码" />
+          <button class="app-primary-button px-4">创建</button>
         </form>
       </div>
       <div class="grid grid-cols-2 gap-4">
@@ -401,12 +401,12 @@ onBeforeUnmount(() => {
               :options="cleanupKindOptions"
               @change="setCleanupKind"
             />
-            <button class="app-secondary-button rounded-md px-3 text-sm" @click="previewCleanup">预览</button>
+            <button class="app-secondary-button px-3 text-sm" @click="previewCleanup">预览</button>
           </div>
           <div v-if="cleanupPreview" class="app-subtle-panel mt-3 text-sm rounded-md p-3">
             <div>数量：{{ cleanupPreview.preview.count }}</div>
             <div>字节数：{{ cleanupPreview.preview.bytes }}</div>
-            <button class="app-primary-button mt-3 rounded-md px-3 py-2 disabled:opacity-50" :disabled="cleanupConfirming" @click="confirmCleanup">
+            <button class="app-primary-button mt-3 px-3 py-2 disabled:opacity-50" :disabled="cleanupConfirming" @click="confirmCleanup">
               确认清理
             </button>
           </div>
@@ -416,8 +416,8 @@ onBeforeUnmount(() => {
             <span class="page-section-icon"><ShieldCheck :size="18" /></span>
             <h2 class="page-section-title">Reasoning 模型</h2>
           </div>
-          <textarea v-model="reasoningModels" class="app-input w-full rounded-md p-3 min-h-24 text-sm mt-1" placeholder="model-a, model-b" />
-          <button class="app-primary-button mt-2 rounded-md px-3 py-2 text-sm" @click="saveReasoningModels">保存</button>
+          <textarea v-model="reasoningModels" class="app-input w-full p-3 min-h-24 text-sm mt-1" placeholder="model-a, model-b" />
+          <button class="app-primary-button mt-2 px-3 py-2 text-sm" @click="saveReasoningModels">保存</button>
         </div>
       </div>
       <div class="app-card rounded-lg overflow-visible">
@@ -432,7 +432,7 @@ onBeforeUnmount(() => {
           <tbody>
             <tr v-for="user in users" :key="user.id" class="app-table-row">
               <td class="p-3">
-                <input v-model="draftFor(user).username" class="app-input w-full rounded-md px-2 py-1" />
+                <input v-model="draftFor(user).username" class="app-input w-full px-2 py-1" />
               </td>
               <td class="p-3">
                 <AppSelect
@@ -453,7 +453,7 @@ onBeforeUnmount(() => {
               <td class="p-3">
                 <input
                   v-model.number="quotaDraftFor(user).uploadRateLimitPerHour"
-                  class="app-input w-28 rounded-md px-2 py-1"
+                  class="app-input w-28 px-2 py-1"
                   min="0"
                   type="number"
                   title="0 表示不限流"
@@ -462,16 +462,16 @@ onBeforeUnmount(() => {
               </td>
               <td class="p-3">{{ user.mustChangePassword ? '是' : '否' }}</td>
               <td class="p-3">
-                <button class="app-secondary-button rounded px-2 py-1" @click="loadSelectedUserKeys(user)">
+                <button class="app-secondary-button px-2 py-1" @click="loadSelectedUserKeys(user)">
                   {{ user.hasApiKey ? '管理密钥' : '添加密钥' }}
                 </button>
               </td>
               <td class="p-3 min-w-[300px]">
                 <div class="flex flex-wrap gap-2">
-                  <input v-model="draftFor(user).password" class="app-input rounded-md px-2 py-1 text-xs" type="password" placeholder="新登录密码" />
-                  <button class="app-primary-button rounded px-2 py-1" @click="saveUser(user)">保存</button>
+                  <input v-model="draftFor(user).password" class="app-input px-2 py-1 text-xs" type="password" placeholder="新登录密码" />
+                  <button class="app-primary-button px-2 py-1" @click="saveUser(user)">保存</button>
                   <button
-                    class="admin-danger-button rounded px-2 py-1"
+                    class="admin-danger-button px-2 py-1"
                     :disabled="user.id === auth.user?.id"
                     :title="user.id === auth.user?.id ? '不能删除当前登录账号' : '删除用户'"
                     @click="openDeleteUserConfirm(user)"
@@ -488,22 +488,22 @@ onBeforeUnmount(() => {
       <div v-if="selectedKeyUser" class="app-card rounded-lg p-4 space-y-4">
         <div class="flex items-center gap-3">
           <h2 class="font-semibold">{{ selectedKeyUser.username }} 的密钥</h2>
-          <button class="app-secondary-button ml-auto rounded-md px-3 py-1 text-sm" @click="selectedKeyUser = null">关闭</button>
+          <button class="app-secondary-button ml-auto px-3 py-1 text-sm" @click="selectedKeyUser = null">关闭</button>
         </div>
         <form class="grid gap-2 lg:grid-cols-[1fr_1fr_1fr_1fr_auto]" @submit.prevent="createAdminKey">
-          <input v-model="adminKeyDraft.name" class="app-input rounded-md px-3 py-2" placeholder="密钥名称" />
+          <input v-model="adminKeyDraft.name" class="app-input px-3 py-2" placeholder="密钥名称" />
           <AppSelect
             v-model="adminKeyDraft.groupId"
             class="app-select-compact"
             :options="groupOptions"
             @change="setAdminKeyGroup"
           />
-          <input v-model="adminKeyDraft.apiKey" class="app-input rounded-md px-3 py-2" type="password" placeholder="API Key" />
+          <input v-model="adminKeyDraft.apiKey" class="app-input px-3 py-2" type="password" placeholder="API Key" />
           <label class="inline-flex items-center gap-2 text-sm app-muted">
             <input v-model="adminKeyDraft.makeActive" type="checkbox" />
             设为该分组当前
           </label>
-          <button class="app-primary-button rounded-md px-4 py-2" type="submit">添加</button>
+          <button class="app-primary-button px-4 py-2" type="submit">添加</button>
         </form>
         <table class="w-full text-sm">
           <thead class="app-table-head text-left">
@@ -512,7 +512,7 @@ onBeforeUnmount(() => {
           <tbody>
             <tr v-if="!selectedUserKeys.length"><td class="app-muted p-3" colspan="5">暂无密钥</td></tr>
             <tr v-for="key in selectedUserKeys" :key="key.id" class="app-table-row">
-              <td class="p-3"><input v-model="keyDraftFor(key).name" class="app-input w-full rounded-md px-2 py-1" /></td>
+              <td class="p-3"><input v-model="keyDraftFor(key).name" class="app-input w-full px-2 py-1" /></td>
               <td class="p-3">
                 <AppSelect
                   :model-value="keyDraftFor(key).groupId"
@@ -527,10 +527,10 @@ onBeforeUnmount(() => {
               <td class="p-3">{{ key.isActive ? '当前分组使用' : '备用' }}</td>
               <td class="p-3">
                 <div class="flex flex-wrap gap-2">
-                  <button class="app-secondary-button rounded px-2 py-1" @click="saveAdminKey(key)">保存</button>
-                  <button class="app-secondary-button rounded px-2 py-1" @click="copyAdminKey(key)">复制</button>
-                  <button class="app-primary-button rounded px-2 py-1" :disabled="key.isActive" @click="activateAdminKey(key)">切换</button>
-                  <button class="app-secondary-button rounded px-2 py-1" @click="deleteAdminKey(key)">删除</button>
+                  <button class="app-secondary-button px-2 py-1" @click="saveAdminKey(key)">保存</button>
+                  <button class="app-secondary-button px-2 py-1" @click="copyAdminKey(key)">复制</button>
+                  <button class="app-primary-button px-2 py-1" :disabled="key.isActive" @click="activateAdminKey(key)">切换</button>
+                  <button class="app-secondary-button px-2 py-1" @click="deleteAdminKey(key)">删除</button>
                 </div>
               </td>
             </tr>

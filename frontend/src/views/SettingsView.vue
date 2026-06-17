@@ -173,7 +173,7 @@ onMounted(loadImageSettings)
 <template>
   <main class="settings-page app-page">
     <header class="app-header h-14 flex items-center px-5">
-      <button class="app-secondary-button text-sm rounded-md px-3 py-1" @click="router.push('/')">返回</button>
+      <button class="app-secondary-button text-sm px-3 py-1" @click="router.push('/')">返回</button>
       <h1 class="ml-4 font-semibold">账号设置</h1>
       <span class="ml-auto app-muted text-sm">{{ auth.user?.role === 'admin' ? '管理员' : '用户' }}</span>
     </header>
@@ -185,8 +185,8 @@ onMounted(loadImageSettings)
     </div>
 
     <section class="page-shell space-y-5">
-      <div v-if="notice" class="app-card rounded-lg p-3 text-sm text-green-700">{{ notice }}</div>
-      <div v-if="error" class="app-card rounded-lg p-3 text-sm text-red-600">{{ error }}</div>
+      <div v-if="notice" class="settings-alert success">{{ notice }}</div>
+      <div v-if="error" class="settings-alert error">{{ error }}</div>
 
       <form class="app-card rounded-lg p-5 space-y-3" @submit.prevent="saveImageSettings">
         <div class="page-section-head">
@@ -196,7 +196,9 @@ onMounted(loadImageSettings)
             <p class="page-section-subtitle">配置 image-2、image-1.5、image-1 的默认生成参数。</p>
           </div>
         </div>
-        <div v-if="imageSettingsLoading" class="app-muted text-sm">正在加载图像设置...</div>
+        <div v-if="imageSettingsLoading" class="grid gap-3 md:grid-cols-2" aria-busy="true">
+          <div v-for="n in 6" :key="n" class="skeleton-row" style="height:64px"></div>
+        </div>
         <div v-else class="grid gap-3 md:grid-cols-2">
           <label class="space-y-1">
             <span class="app-muted text-sm">尺寸</span>
@@ -218,7 +220,7 @@ onMounted(loadImageSettings)
             <span class="app-muted text-sm">压缩质量</span>
             <input
               v-model.number="imageSettings.outputCompression"
-              class="app-input w-full rounded-md px-3 py-2"
+              class="app-input w-full px-3 py-2"
               type="number"
               min="0"
               max="100"
@@ -230,7 +232,7 @@ onMounted(loadImageSettings)
             <AppSelect v-model="imageSettings.moderation" class="app-select-compact" :options="imageModerationOptions" />
           </label>
         </div>
-        <button class="app-primary-button rounded-md px-4 py-2" type="submit" :disabled="imageSettingsLoading || imageSettingsSaving">
+        <button class="app-primary-button px-4 py-2" type="submit" :disabled="imageSettingsLoading || imageSettingsSaving">
           {{ imageSettingsSaving ? '保存中...' : '保存图像设置' }}
         </button>
       </form>
@@ -249,12 +251,12 @@ onMounted(loadImageSettings)
             <span v-else>{{ auth.user?.username?.slice(0, 1).toUpperCase() || 'U' }}</span>
           </div>
           <div class="settings-avatar-actions">
-            <label class="app-primary-button rounded-md px-4 py-2">
+            <label class="app-primary-button px-4 py-2">
               {{ avatarUploading ? '上传中...' : '上传头像' }}
               <input class="hidden" type="file" accept="image/png,image/jpeg,image/webp" :disabled="avatarUploading" @change="uploadAvatar" />
             </label>
             <button
-              class="app-secondary-button rounded-md px-4 py-2"
+              class="app-secondary-button px-4 py-2"
               type="button"
               :disabled="avatarUploading || !auth.user?.avatarUrl"
               @click="deleteAvatar"
@@ -273,9 +275,9 @@ onMounted(loadImageSettings)
             <p class="page-section-subtitle">不需要输入旧用户名，只需要用当前密码确认是本人操作。</p>
           </div>
         </div>
-        <input v-model="username" class="app-input w-full rounded-md px-3 py-2" placeholder="新用户名" />
-        <input v-model="usernamePassword" class="app-input w-full rounded-md px-3 py-2" type="password" placeholder="当前密码" />
-        <button class="app-primary-button rounded-md px-4 py-2" type="submit">保存用户名</button>
+        <input v-model="username" class="app-input w-full px-3 py-2" placeholder="新用户名" />
+        <input v-model="usernamePassword" class="app-input w-full px-3 py-2" type="password" placeholder="当前密码" />
+        <button class="app-primary-button px-4 py-2" type="submit">保存用户名</button>
       </form>
 
       <form class="app-card rounded-lg p-5 space-y-3" @submit.prevent="savePassword">
@@ -286,9 +288,9 @@ onMounted(loadImageSettings)
             <p class="page-section-subtitle">修改后会保留当前登录，其它会话失效。</p>
           </div>
         </div>
-        <input v-model="oldPassword" class="app-input w-full rounded-md px-3 py-2" type="password" placeholder="当前密码" />
-        <input v-model="newPassword" class="app-input w-full rounded-md px-3 py-2" type="password" placeholder="新密码" />
-        <button class="app-primary-button rounded-md px-4 py-2" type="submit">保存密码</button>
+        <input v-model="oldPassword" class="app-input w-full px-3 py-2" type="password" placeholder="当前密码" />
+        <input v-model="newPassword" class="app-input w-full px-3 py-2" type="password" placeholder="新密码" />
+        <button class="app-primary-button px-4 py-2" type="submit">保存密码</button>
       </form>
 
       <div class="app-card rounded-lg p-5 space-y-3">
@@ -299,7 +301,7 @@ onMounted(loadImageSettings)
             <p class="page-section-subtitle">密钥已经拆到独立页面，可添加多个密钥、按分组切换当前使用密钥并选择分组。</p>
           </div>
         </div>
-        <button class="app-primary-button rounded-md px-4 py-2" type="button" @click="router.push('/keys')">进入密钥管理</button>
+        <button class="app-primary-button px-4 py-2" type="button" @click="router.push('/keys')">进入密钥管理</button>
       </div>
     </section>
   </main>

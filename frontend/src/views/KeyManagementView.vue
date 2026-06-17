@@ -130,7 +130,7 @@ onMounted(load)
 <template>
   <main class="settings-page app-page">
     <header class="app-header h-14 flex items-center px-5">
-      <button class="app-secondary-button text-sm rounded-md px-3 py-1" @click="router.push('/')">返回</button>
+      <button class="app-secondary-button text-sm px-3 py-1" @click="router.push('/')">返回</button>
       <h1 class="ml-4 font-semibold">密钥管理</h1>
       <span class="ml-auto app-muted text-sm">当前账号：{{ auth.user?.username }}</span>
     </header>
@@ -142,8 +142,8 @@ onMounted(load)
     </div>
 
     <section class="page-shell wide space-y-5">
-      <div v-if="notice" class="app-card rounded-lg p-3 text-sm text-green-700">{{ notice }}</div>
-      <div v-if="error" class="app-card key-error rounded-lg p-3 text-sm text-red-600">{{ error }}</div>
+      <div v-if="notice" class="settings-alert success">{{ notice }}</div>
+      <div v-if="error" class="settings-alert error key-error">{{ error }}</div>
 
       <form class="app-card rounded-lg p-5 space-y-3" @submit.prevent="createKey">
         <div class="page-section-head">
@@ -151,21 +151,21 @@ onMounted(load)
           <h2 class="page-section-title">添加新密钥</h2>
         </div>
         <div class="grid gap-3 md:grid-cols-2">
-          <input v-model="newKey.name" class="app-input rounded-md px-3 py-2" placeholder="密钥名称，例如：工作 / 备用" />
+          <input v-model="newKey.name" class="app-input px-3 py-2" placeholder="密钥名称，例如：工作 / 备用" />
           <AppSelect
             v-model="newKey.groupId"
             class="app-select-compact"
             :options="groupOptions"
             @change="setNewKeyGroup"
           />
-          <input v-model="newKey.apiKey" class="app-input rounded-md px-3 py-2" type="password" placeholder="API Key 明文只提交一次" />
+          <input v-model="newKey.apiKey" class="app-input px-3 py-2" type="password" placeholder="API Key 明文只提交一次" />
         </div>
         <label class="inline-flex items-center gap-2 text-sm app-muted">
           <input v-model="newKey.makeActive" type="checkbox" />
           添加后立即设为该分组当前使用密钥
         </label>
         <div>
-          <button class="app-primary-button rounded-md px-4 py-2" type="submit">添加密钥</button>
+          <button class="app-primary-button px-4 py-2" type="submit">添加密钥</button>
         </div>
       </form>
 
@@ -195,7 +195,7 @@ onMounted(load)
             </tr>
             <tr v-for="key in keys" :key="key.id" class="app-table-row">
               <td class="p-3">
-                <input v-model="draftFor(key).name" class="app-input w-full rounded-md px-2 py-1" />
+                <input v-model="draftFor(key).name" class="app-input w-full px-2 py-1" />
               </td>
               <td class="p-3">
                 <AppSelect
@@ -209,15 +209,15 @@ onMounted(load)
                 <div class="key-mask">{{ key.maskedKey }}</div>
               </td>
               <td class="p-3">
-                <span v-if="key.isActive" class="text-green-500 font-semibold">当前分组使用</span>
+                <span v-if="key.isActive" class="key-active-badge">当前分组使用</span>
                 <span v-else class="app-muted">备用</span>
               </td>
               <td class="p-3">
                 <div class="flex flex-wrap gap-2">
-                  <button class="app-secondary-button rounded px-2 py-1" @click="saveKey(key)">保存</button>
-                  <button class="app-secondary-button rounded px-2 py-1" @click="copyKey(key)">复制</button>
-                  <button class="app-primary-button rounded px-2 py-1" :disabled="key.isActive" @click="activateKey(key)">切换使用</button>
-                  <button class="app-secondary-button rounded px-2 py-1" @click="deleteKey(key)">删除</button>
+                  <button class="app-secondary-button px-2 py-1" @click="saveKey(key)">保存</button>
+                  <button class="app-secondary-button px-2 py-1" @click="copyKey(key)">复制</button>
+                  <button class="app-primary-button px-2 py-1" :disabled="key.isActive" @click="activateKey(key)">切换使用</button>
+                  <button class="app-secondary-button px-2 py-1" @click="deleteKey(key)">删除</button>
                 </div>
               </td>
             </tr>
