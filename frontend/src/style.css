@@ -2698,15 +2698,15 @@ body,
 }
 
 .settings-alert.success {
-  border: 1px solid color-mix(in srgb, #22c55e 35%, transparent);
-  background: color-mix(in srgb, #22c55e 12%, transparent);
-  color: #22c55e;
+  border: 1px solid color-mix(in srgb, var(--success) 35%, transparent);
+  background: var(--success-soft);
+  color: var(--success);
 }
 
 .settings-alert.error {
-  border: 1px solid color-mix(in srgb, #ef4444 35%, transparent);
-  background: color-mix(in srgb, #ef4444 12%, transparent);
-  color: #f87171;
+  border: 1px solid color-mix(in srgb, var(--danger) 35%, transparent);
+  background: var(--danger-soft);
+  color: var(--danger);
   white-space: pre-line;
 }
 
@@ -6121,11 +6121,27 @@ body,
 }
 
 .message-assistant {
+  position: relative;
   width: 100%;
   max-width: 100%;
+  padding-left: 0.85rem;
   color: var(--assistant);
   font-size: var(--message-font-size);
   line-height: 1.66;
+}
+
+.message-assistant::before {
+  content: "";
+  position: absolute;
+  left: 0;
+  top: 0.25rem;
+  bottom: 0.25rem;
+  width: 2px;
+  border-radius: var(--radius-full);
+  background: linear-gradient(180deg,
+    color-mix(in srgb, var(--bubble-bg) 55%, transparent),
+    color-mix(in srgb, var(--bubble-bg) 18%, transparent));
+  opacity: 0.7;
 }
 
 .typing-cursor {
