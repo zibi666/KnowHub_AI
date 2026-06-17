@@ -16,6 +16,10 @@ onMounted(() => {
 
 <template>
   <div class="app-root" :class="theme === 'dark' ? 'theme-dark' : 'theme-light'">
-    <RouterView />
+    <RouterView v-slot="{ Component }">
+      <Transition name="page-fade" mode="out-in">
+        <component :is="Component" />
+      </Transition>
+    </RouterView>
   </div>
 </template>

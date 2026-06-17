@@ -1,6 +1,6 @@
 # 项目工作记忆
 
-最后更新：2026-06-17
+最后更新：2026-06-17（前端顺滑动效与高级感提升）
 
 这个文件用于记录用户在本项目中的长期要求、已踩过的问题、处理经验和后续工作习惯。每次在本项目开始新对话或新任务前，都需要先读取本文件，再结合当前用户的新要求继续更新。
 
@@ -140,3 +140,7 @@
 - 管理类页面的按钮、表格、页头、提示条应与聊天/登录页使用同一套设计 token：`.app-primary/secondary-button` 自带上浮/发光/聚焦环/圆角；表格行加悬停高亮 + 容器 `overflow-hidden` 裁剪圆角；页头用共享 `.page-header`；成功/错误提示用 `.settings-alert` + 语义 token。
 - 前端验证以 `npm run build`（vue-tsc + vite）为准，不做浏览器/截图/视觉走查；改完 `style.css` 或视图后必须跑一次 build 确认类型和构建通过。
 - 子代理并行编辑大文件时，控制器必须在 spec 审查阶段用 grep 验证新增类是否重复定义、硬编码颜色是否清除、圆角覆盖是否残留。
+- 前端动效统一复用已有缓动/时长 token（`--ease-out-soft` 主入场、`--ease-in-soft` 离场、`--ease-menu` 弹层、`--motion-fast/medium/slow`），位移控制在 6-14px、缩放 0.96-1、模糊 4-8px，克制顺滑不抢戏；新过渡类集中写在 `style.css` 的过渡区块，命名沿用 `xxx-enter-active/leave-active/move/enter-from/leave-to` 约定，会被现有 `@media (prefers-reduced-motion: reduce)` 通配符自动压到 1ms，无需单独加兜底。
+- Vue `<TransitionGroup>` 的 `leave-active` 默认用 `position: absolute` 才能避免塌陷，但表格 `<tbody>` 行绝对定位会破坏 colspan 和列宽；表格场景必须用专门的 `table-rise` 过渡（leave 仅 opacity 淡出不脱离流），不要复用带绝对定位的 `list-rise`。
+- 列表/消息/时间轴入场动画用 `<TransitionGroup>` 包裹 `v-for`，`v-if/v-else` 的骨架屏分支与列表分支同处一个父容器时，TransitionGroup 带 `v-else` 即可；空态行作为 TransitionGroup 子项必须带稳定 `key`（如 `key="__empty__"`），否则切换空态/有数据时过渡错乱。
+- 时间轴/卡片类逐项 stagger 用 `:nth-child(n)` 的 `transition-delay` 实现，封顶 8 项避免长列表等太久；登录卡等首屏入场用 `<Transition appear>`。

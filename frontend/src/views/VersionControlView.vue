@@ -482,7 +482,7 @@ const versions: VersionEntry[] = [
         <p>按版本整理 KnowHub AI 的主要功能变化，方便回看每次设计、上下文、聊天体验和部署能力的迭代。</p>
       </div>
 
-      <div class="version-timeline">
+      <TransitionGroup name="timeline-rise" tag="div" class="version-timeline" appear>
         <article v-for="entry in versions" :key="entry.version" class="version-card">
           <div class="version-card-marker" aria-hidden="true" />
           <div class="version-card-main">
@@ -497,7 +497,7 @@ const versions: VersionEntry[] = [
             </ul>
           </div>
         </article>
-      </div>
+      </TransitionGroup>
     </section>
   </main>
 </template>

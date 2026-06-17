@@ -4091,39 +4091,40 @@ onUnmounted(() => {
             <span class="skeleton-line" :class="`w-${item % 3}`" />
           </div>
         </div>
-        <div
-          v-else
-          v-for="conversation in conversations"
-          :key="conversation.id"
-          class="conversation-row"
-          :class="{ active: conversation.id === currentId }"
-        >
-          <button class="conversation-item" type="button" @click="openConversation(conversation.id)">
-            {{ conversation.title }}
-          </button>
-          <div class="conversation-actions">
-            <button
-              class="conversation-action-button"
-              type="button"
-              title="修改名称"
-              aria-label="修改名称"
-              :disabled="conversation.id === currentId && currentConversationStreaming"
-              @click.stop="openRenameConversation(conversation)"
-            >
-              <Pencil :size="14" />
+        <TransitionGroup v-else name="list-rise" tag="div" class="conversation-list-items space-y-1">
+          <div
+            v-for="conversation in conversations"
+            :key="conversation.id"
+            class="conversation-row"
+            :class="{ active: conversation.id === currentId }"
+          >
+            <button class="conversation-item" type="button" @click="openConversation(conversation.id)">
+              {{ conversation.title }}
             </button>
-            <button
-              class="conversation-action-button"
-              type="button"
-              title="删除对话"
-              aria-label="删除对话"
-              :disabled="deletingConversationId === conversation.id || (conversation.id === currentId && currentConversationStreaming)"
-              @click.stop="requestDeleteConversation(conversation)"
-            >
-              <X :size="15" />
-            </button>
+            <div class="conversation-actions">
+              <button
+                class="conversation-action-button"
+                type="button"
+                title="修改名称"
+                aria-label="修改名称"
+                :disabled="conversation.id === currentId && currentConversationStreaming"
+                @click.stop="openRenameConversation(conversation)"
+              >
+                <Pencil :size="14" />
+              </button>
+              <button
+                class="conversation-action-button"
+                type="button"
+                title="删除对话"
+                aria-label="删除对话"
+                :disabled="deletingConversationId === conversation.id || (conversation.id === currentId && currentConversationStreaming)"
+                @click.stop="requestDeleteConversation(conversation)"
+              >
+                <X :size="15" />
+              </button>
+            </div>
           </div>
-        </div>
+        </TransitionGroup>
       </div>
 
       <div class="chat-sidebar-footer">
@@ -4238,15 +4239,16 @@ onUnmounted(() => {
                 </div>
               </div>
             </div>
-            <ChatMessage
-              v-else
-              v-for="message in messages"
-              :key="message.clientKey || message.id"
-              :message="message"
-              @preview-attachment="openAttachmentPreview"
-              @open-sources="openWebSearchSources"
-              @open-search-trace="openWebSearchTrace"
-            />
+            <TransitionGroup v-else name="msg-rise" tag="div" class="message-stream">
+              <ChatMessage
+                v-for="message in messages"
+                :key="message.clientKey || message.id"
+                :message="message"
+                @preview-attachment="openAttachmentPreview"
+                @open-sources="openWebSearchSources"
+                @open-search-trace="openWebSearchTrace"
+              />
+            </TransitionGroup>
           </div>
         </section>
 

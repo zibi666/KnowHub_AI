@@ -184,8 +184,8 @@ onMounted(load)
               <th class="p-3">操作</th>
             </tr>
           </thead>
-          <tbody>
-            <tr v-if="!keys.length">
+          <TransitionGroup name="table-rise" tag="tbody">
+            <tr v-if="!keys.length" key="__empty__">
               <td class="p-6" colspan="5">
                 <div class="keys-empty">
                   <span class="keys-empty-icon"><KeyRound :size="22" /></span>
@@ -221,7 +221,7 @@ onMounted(load)
                 </div>
               </td>
             </tr>
-          </tbody>
+          </TransitionGroup>
         </table>
       </div>
 

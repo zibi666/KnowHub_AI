@@ -429,7 +429,15 @@ onBeforeUnmount(() => {
           <thead class="app-table-head text-left">
             <tr><th class="p-3">用户名</th><th class="p-3">角色</th><th class="p-3">状态</th><th class="p-3">上传限流/小时</th><th class="p-3">需改密</th><th class="p-3">密钥</th><th class="p-3">操作</th></tr>
           </thead>
-          <tbody>
+          <TransitionGroup name="table-rise" tag="tbody">
+            <tr v-if="!users.length" key="__users_empty__">
+              <td class="p-6" colspan="7">
+                <div class="keys-empty">
+                  <span class="keys-empty-icon"><Users :size="22" /></span>
+                  <span>暂无用户，在上方添加第一个账号</span>
+                </div>
+              </td>
+            </tr>
             <tr v-for="user in users" :key="user.id" class="app-table-row">
               <td class="p-3">
                 <input v-model="draftFor(user).username" class="app-input w-full px-2 py-1" />
@@ -481,7 +489,7 @@ onBeforeUnmount(() => {
                 </div>
               </td>
             </tr>
-          </tbody>
+          </TransitionGroup>
         </table>
       </div>
 
@@ -509,8 +517,8 @@ onBeforeUnmount(() => {
           <thead class="app-table-head text-left">
             <tr><th class="p-3">名称</th><th class="p-3">分组</th><th class="p-3">标识</th><th class="p-3">状态</th><th class="p-3">操作</th></tr>
           </thead>
-          <tbody>
-            <tr v-if="!selectedUserKeys.length"><td class="app-muted p-3" colspan="5">暂无密钥</td></tr>
+          <TransitionGroup name="table-rise" tag="tbody">
+            <tr v-if="!selectedUserKeys.length" key="__admin_keys_empty__"><td class="app-muted p-3" colspan="5">暂无密钥</td></tr>
             <tr v-for="key in selectedUserKeys" :key="key.id" class="app-table-row">
               <td class="p-3"><input v-model="keyDraftFor(key).name" class="app-input w-full px-2 py-1" /></td>
               <td class="p-3">
@@ -534,7 +542,7 @@ onBeforeUnmount(() => {
                 </div>
               </td>
             </tr>
-          </tbody>
+          </TransitionGroup>
         </table>
       </div>
 
@@ -544,8 +552,8 @@ onBeforeUnmount(() => {
           <thead class="app-table-head text-left">
             <tr><th class="p-3">类型</th><th class="p-3">用户</th><th class="p-3">消息</th><th class="p-3">错误</th><th class="p-3">创建时间</th></tr>
           </thead>
-          <tbody>
-            <tr v-if="!deadLetters.length"><td class="app-muted p-3" colspan="5">暂无死信消息</td></tr>
+          <TransitionGroup name="table-rise" tag="tbody">
+            <tr v-if="!deadLetters.length" key="__dead_empty__"><td class="app-muted p-3" colspan="5">暂无死信消息</td></tr>
             <tr v-for="item in deadLetters" :key="item.id" class="app-table-row">
               <td class="p-3">{{ cleanupKindLabels[item.kind] || item.kind }}</td>
               <td class="p-3">{{ item.userId }}</td>
@@ -553,7 +561,7 @@ onBeforeUnmount(() => {
               <td class="p-3">{{ item.errorSummary }}</td>
               <td class="p-3">{{ item.createdAt }}</td>
             </tr>
-          </tbody>
+          </TransitionGroup>
         </table>
       </div>
     </section>
