@@ -635,6 +635,16 @@ body,
 
 .app-table-row {
   border-top: 1px solid var(--line);
+  transition: background var(--motion-fast) ease;
+}
+
+.app-table-row:hover {
+  background: color-mix(in srgb, var(--control-hover) 55%, transparent);
+}
+
+.app-table-row:has(input:focus-visible),
+.app-table-row:has([aria-expanded="true"]) {
+  background: color-mix(in srgb, var(--bubble-bg) 8%, transparent);
 }
 
 .skeleton-row {

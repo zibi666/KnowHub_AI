@@ -169,7 +169,7 @@ onMounted(load)
         </div>
       </form>
 
-      <div class="app-card rounded-lg overflow-visible">
+      <div class="app-card rounded-lg overflow-hidden">
         <div class="p-4 page-section-head">
           <span class="page-section-icon"><KeyRound :size="18" /></span>
           <h2 class="page-section-title">我的密钥</h2>

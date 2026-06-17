@@ -420,7 +420,7 @@ onBeforeUnmount(() => {
           <button class="app-primary-button mt-2 px-3 py-2 text-sm" @click="saveReasoningModels">保存</button>
         </div>
       </div>
-      <div class="app-card rounded-lg overflow-visible">
+      <div class="app-card rounded-lg overflow-hidden">
         <div class="p-4 page-section-head">
           <span class="page-section-icon"><Users :size="18" /></span>
           <h2 class="page-section-title">用户管理</h2>
@@ -538,7 +538,7 @@ onBeforeUnmount(() => {
         </table>
       </div>
 
-      <div class="app-card rounded-lg overflow-visible">
+      <div class="app-card rounded-lg overflow-hidden">
         <div class="p-4 font-semibold">死信消息</div>
         <table class="w-full text-sm">
           <thead class="app-table-head text-left">
