@@ -2687,11 +2687,6 @@ body,
   font-weight: 600;
 }
 
-.key-active-badge {
-  color: var(--success);
-  font-weight: 600;
-}
-
 .chat-search-backdrop,
 .rename-modal-backdrop,
 .confirm-modal-backdrop {
