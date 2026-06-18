@@ -30,6 +30,7 @@ from app.schemas.chat import (
     SendMessageResponse,
     SendMessageRequest,
     UpdateConversationRequest,
+    WEB_SEARCH_MAX_ROUNDS_LIMIT,
 )
 from app.services.chat import conversation_event_channel, create_queued_chat, message_progress_event_data, redis_settings, sse_line
 from app.services.compaction import compact_conversation
@@ -286,6 +287,8 @@ async def create_conversation(
         user_id=user.id,
         title=payload.title or "新对话",
         web_search_enabled=payload.web_search_enabled,
+        web_search_mode=payload.web_search_mode,
+        web_search_max_rounds=max(1, min(WEB_SEARCH_MAX_ROUNDS_LIMIT, int(payload.web_search_max_rounds or 3))),
     )
     db.add(conversation)
     await db.commit()
@@ -309,6 +312,10 @@ async def update_conversation(
         conversation.auto_compaction_enabled = payload.auto_compaction_enabled
     if payload.web_search_enabled is not None:
         conversation.web_search_enabled = payload.web_search_enabled
+    if payload.web_search_mode is not None:
+        conversation.web_search_mode = payload.web_search_mode
+    if payload.web_search_max_rounds is not None:
+        conversation.web_search_max_rounds = max(1, min(WEB_SEARCH_MAX_ROUNDS_LIMIT, int(payload.web_search_max_rounds or 3)))
     await db.commit()
     await db.refresh(conversation)
     return conversation
@@ -525,6 +532,8 @@ async def conversation_events(
             "model": message.model,
             "web_search_sources": message.web_search_sources_json or [],
             "webSearchSources": message.web_search_sources_json or [],
+            "web_search_trace": message.web_search_trace_json or None,
+            "webSearchTrace": message.web_search_trace_json or None,
             **message_progress_event_data(message),
         }
         for message in streaming_rows

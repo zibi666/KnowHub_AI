@@ -8,7 +8,11 @@ import { copyText } from '../utils/clipboard'
 import { messageWebSearchSources, sourceOpenUrl, stripLegacySourcesMarkdown } from '../utils/sources'
 
 const props = defineProps<{ message: Message }>()
-const emit = defineEmits<{ previewAttachment: [attachment: Attachment]; openSources: [message: Message, sources: WebSearchSource[]] }>()
+const emit = defineEmits<{
+  previewAttachment: [attachment: Attachment]
+  openSources: [message: Message, sources: WebSearchSource[]]
+  openSearchTrace: [message: Message]
+}>()
 
 const USER_COLLAPSE_VISIBLE_LINES = 3
 
@@ -53,6 +57,8 @@ const imageAttachments = computed(() => (props.message.attachments || []).filter
 const fileAttachments = computed(() => (props.message.attachments || []).filter((attachment) => !isImageAttachment(attachment)))
 const webSearchSources = computed(() => messageWebSearchSources(props.message))
 const hasWebSearchSources = computed(() => props.message.role === 'assistant' && webSearchSources.value.length > 0)
+const webSearchTrace = computed(() => props.message.webSearchTrace || props.message.web_search_trace || null)
+const hasWebSearchTrace = computed(() => props.message.role === 'assistant' && Boolean(webSearchTrace.value?.events?.length || hasWebSearchSources.value))
 const assistantMarkdownContent = computed(() =>
   hasWebSearchSources.value ? stripLegacySourcesMarkdown(props.message.content) : props.message.content
 )
@@ -247,6 +253,11 @@ function openSource(source: WebSearchSource) {
 function openSourcesPanel() {
   if (!hasWebSearchSources.value) return
   emit('openSources', props.message, webSearchSources.value)
+}
+
+function openSearchTracePanel() {
+  if (!hasWebSearchTrace.value) return
+  emit('openSearchTrace', props.message)
 }
 
 function handleCitationClick(index: number) {
@@ -481,6 +492,17 @@ onUnmounted(() => {
             <span class="source-favicon-stack" aria-hidden="true">
               <SourceIcon v-for="source in webSearchSources.slice(0, 4)" :key="source.url" :source="source" />
             </span>
+          </button>
+          <button
+            v-if="hasWebSearchTrace"
+            class="search-trace-strip"
+            type="button"
+            aria-label="查看联网搜索过程"
+            title="查看联网搜索过程"
+            @click="openSearchTracePanel"
+          >
+            <span class="source-read-icon"><Search :size="15" /></span>
+            <span class="source-read-text">搜索过程</span>
           </button>
           <div class="message-collapsible" :class="collapsibleClasses">
             <button

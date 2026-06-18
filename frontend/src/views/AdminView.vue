@@ -1,7 +1,7 @@
 <script setup lang="ts">
 import { computed, onBeforeUnmount, onMounted, ref } from 'vue'
+import { Database, HardDrive, KeyRound, ShieldCheck, UserPlus, Users, X } from 'lucide-vue-next'
 import { useRouter } from 'vue-router'
-import { X } from 'lucide-vue-next'
 import { apiFetch } from '../api/client'
 import AppSelect from '../components/AppSelect.vue'
 import { useAuthStore } from '../stores/auth'
@@ -38,6 +38,13 @@ const metricLabels: Record<string, string> = {
   messages: '消息数',
   attachments: '附件数',
   totalTokens: '总 Token'
+}
+const metricIcons: Record<string, any> = {
+  users: Users,
+  conversations: Database,
+  messages: Database,
+  attachments: HardDrive,
+  totalTokens: ShieldCheck
 }
 
 const cleanupKindLabels: Record<string, string> = {
@@ -347,9 +354,9 @@ onBeforeUnmount(() => {
 
 <template>
   <main class="admin-page app-page">
-    <header class="app-header h-14 flex items-center px-5">
-      <button class="app-secondary-button text-sm rounded-md px-3 py-1" @click="router.push('/')">返回</button>
-      <h1 class="ml-4 font-semibold">管理后台</h1>
+    <header class="app-header page-header">
+      <button class="app-secondary-button text-sm px-3 py-1" @click="router.push('/')">返回</button>
+      <h1 class="page-header-title">管理后台</h1>
     </header>
     <Transition name="admin-toast">
       <div v-if="notice" class="admin-toast" role="status" aria-live="polite">{{ notice }}</div>
@@ -357,56 +364,83 @@ onBeforeUnmount(() => {
     <Transition name="admin-toast">
       <div v-if="error" class="admin-toast error" role="alert" aria-live="assertive">{{ error }}</div>
     </Transition>
-    <section class="max-w-6xl mx-auto p-5 space-y-5">
-      <div class="grid grid-cols-5 gap-3">
-        <div v-for="(value, key) in visibleAnalytics" :key="key" class="app-card rounded-lg p-4">
-          <div class="app-muted text-xs">{{ metricLabels[String(key)] || key }}</div>
-          <div class="text-xl font-semibold">{{ value }}</div>
+    <div class="page-hero">
+      <span class="page-eyebrow">Admin</span>
+      <h2 class="page-title">管理后台</h2>
+      <p class="page-desc">监控平台运行状态，管理用户、密钥、存储与模型配置。</p>
+    </div>
+    <section class="page-shell wide space-y-5">
+      <div class="admin-stats-grid">
+        <div v-for="(value, key) in visibleAnalytics" :key="key" class="admin-stat-card">
+          <span class="admin-stat-icon"><component :is="metricIcons[String(key)] || ShieldCheck" :size="18" /></span>
+          <div class="admin-stat-value">{{ value }}</div>
+          <div class="admin-stat-label">{{ metricLabels[String(key)] || key }}</div>
         </div>
       </div>
       <div class="app-card rounded-lg p-4">
-        <h2 class="font-semibold mb-3">创建用户</h2>
+        <div class="page-section-head">
+          <span class="page-section-icon"><UserPlus :size="18" /></span>
+          <h2 class="page-section-title">创建用户</h2>
+        </div>
         <form class="flex gap-2" @submit.prevent="createUser">
-          <input v-model="username" class="app-input rounded-md px-3 py-2" placeholder="用户名" />
-          <input v-model="loginPassword" class="app-input rounded-md px-3 py-2" type="password" placeholder="登录密码" />
-          <button class="app-primary-button rounded-md px-4">创建</button>
+          <input v-model="username" class="app-input px-3 py-2" placeholder="用户名" />
+          <input v-model="loginPassword" class="app-input px-3 py-2" type="password" placeholder="登录密码" />
+          <button class="app-primary-button px-4">创建</button>
         </form>
       </div>
       <div class="grid grid-cols-2 gap-4">
         <div class="app-card rounded-lg p-4">
-          <h2 class="font-semibold mb-3">存储清理</h2>
-          <div class="flex gap-2">
+          <div class="page-section-head">
+            <span class="page-section-icon"><HardDrive :size="18" /></span>
+            <h2 class="page-section-title">存储清理</h2>
+          </div>
+          <div class="flex gap-2 mt-1">
             <AppSelect
               v-model="cleanupKind"
               class="app-select-compact min-w-[180px]"
               :options="cleanupKindOptions"
               @change="setCleanupKind"
             />
-            <button class="app-secondary-button rounded-md px-3 text-sm" @click="previewCleanup">预览</button>
+            <button class="app-secondary-button px-3 text-sm" @click="previewCleanup">预览</button>
           </div>
           <div v-if="cleanupPreview" class="app-subtle-panel mt-3 text-sm rounded-md p-3">
             <div>数量：{{ cleanupPreview.preview.count }}</div>
             <div>字节数：{{ cleanupPreview.preview.bytes }}</div>
-            <button class="app-primary-button mt-3 rounded-md px-3 py-2 disabled:opacity-50" :disabled="cleanupConfirming" @click="confirmCleanup">
+            <button class="app-primary-button mt-3 px-3 py-2 disabled:opacity-50" :disabled="cleanupConfirming" @click="confirmCleanup">
               确认清理
             </button>
           </div>
         </div>
         <div class="app-card rounded-lg p-4">
-          <h2 class="font-semibold mb-3">Reasoning 模型</h2>
-          <textarea v-model="reasoningModels" class="app-input w-full rounded-md p-3 min-h-24 text-sm" placeholder="model-a, model-b" />
-          <button class="app-primary-button mt-2 rounded-md px-3 py-2 text-sm" @click="saveReasoningModels">保存</button>
+          <div class="page-section-head">
+            <span class="page-section-icon"><ShieldCheck :size="18" /></span>
+            <h2 class="page-section-title">Reasoning 模型</h2>
+          </div>
+          <textarea v-model="reasoningModels" class="app-input w-full p-3 min-h-24 text-sm mt-1" placeholder="model-a, model-b" />
+          <button class="app-primary-button mt-2 px-3 py-2 text-sm" @click="saveReasoningModels">保存</button>
         </div>
       </div>
-      <div class="app-card rounded-lg overflow-visible">
+      <div class="app-card rounded-lg overflow-hidden">
+        <div class="p-4 page-section-head">
+          <span class="page-section-icon"><Users :size="18" /></span>
+          <h2 class="page-section-title">用户管理</h2>
+        </div>
         <table class="w-full text-sm">
           <thead class="app-table-head text-left">
             <tr><th class="p-3">用户名</th><th class="p-3">角色</th><th class="p-3">状态</th><th class="p-3">上传限流/小时</th><th class="p-3">需改密</th><th class="p-3">密钥</th><th class="p-3">操作</th></tr>
           </thead>
-          <tbody>
+          <TransitionGroup name="table-rise" tag="tbody">
+            <tr v-if="!users.length" key="__users_empty__">
+              <td class="p-6" colspan="7">
+                <div class="keys-empty">
+                  <span class="keys-empty-icon"><Users :size="22" /></span>
+                  <span>暂无用户，在上方添加第一个账号</span>
+                </div>
+              </td>
+            </tr>
             <tr v-for="user in users" :key="user.id" class="app-table-row">
               <td class="p-3">
-                <input v-model="draftFor(user).username" class="app-input w-full rounded-md px-2 py-1" />
+                <input v-model="draftFor(user).username" class="app-input w-full px-2 py-1" />
               </td>
               <td class="p-3">
                 <AppSelect
@@ -427,7 +461,7 @@ onBeforeUnmount(() => {
               <td class="p-3">
                 <input
                   v-model.number="quotaDraftFor(user).uploadRateLimitPerHour"
-                  class="app-input w-28 rounded-md px-2 py-1"
+                  class="app-input w-28 px-2 py-1"
                   min="0"
                   type="number"
                   title="0 表示不限流"
@@ -436,16 +470,16 @@ onBeforeUnmount(() => {
               </td>
               <td class="p-3">{{ user.mustChangePassword ? '是' : '否' }}</td>
               <td class="p-3">
-                <button class="app-secondary-button rounded px-2 py-1" @click="loadSelectedUserKeys(user)">
+                <button class="app-secondary-button px-2 py-1" @click="loadSelectedUserKeys(user)">
                   {{ user.hasApiKey ? '管理密钥' : '添加密钥' }}
                 </button>
               </td>
               <td class="p-3 min-w-[300px]">
                 <div class="flex flex-wrap gap-2">
-                  <input v-model="draftFor(user).password" class="app-input rounded-md px-2 py-1 text-xs" type="password" placeholder="新登录密码" />
-                  <button class="app-primary-button rounded px-2 py-1" @click="saveUser(user)">保存</button>
+                  <input v-model="draftFor(user).password" class="app-input px-2 py-1 text-xs" type="password" placeholder="新登录密码" />
+                  <button class="app-primary-button px-2 py-1" @click="saveUser(user)">保存</button>
                   <button
-                    class="admin-danger-button rounded px-2 py-1"
+                    class="admin-danger-button px-2 py-1"
                     :disabled="user.id === auth.user?.id"
                     :title="user.id === auth.user?.id ? '不能删除当前登录账号' : '删除用户'"
                     @click="openDeleteUserConfirm(user)"
@@ -455,38 +489,38 @@ onBeforeUnmount(() => {
                 </div>
               </td>
             </tr>
-          </tbody>
+          </TransitionGroup>
         </table>
       </div>
 
       <div v-if="selectedKeyUser" class="app-card rounded-lg p-4 space-y-4">
         <div class="flex items-center gap-3">
           <h2 class="font-semibold">{{ selectedKeyUser.username }} 的密钥</h2>
-          <button class="app-secondary-button ml-auto rounded-md px-3 py-1 text-sm" @click="selectedKeyUser = null">关闭</button>
+          <button class="app-secondary-button ml-auto px-3 py-1 text-sm" @click="selectedKeyUser = null">关闭</button>
         </div>
         <form class="grid gap-2 lg:grid-cols-[1fr_1fr_1fr_1fr_auto]" @submit.prevent="createAdminKey">
-          <input v-model="adminKeyDraft.name" class="app-input rounded-md px-3 py-2" placeholder="密钥名称" />
+          <input v-model="adminKeyDraft.name" class="app-input px-3 py-2" placeholder="密钥名称" />
           <AppSelect
             v-model="adminKeyDraft.groupId"
             class="app-select-compact"
             :options="groupOptions"
             @change="setAdminKeyGroup"
           />
-          <input v-model="adminKeyDraft.apiKey" class="app-input rounded-md px-3 py-2" type="password" placeholder="API Key" />
+          <input v-model="adminKeyDraft.apiKey" class="app-input px-3 py-2" type="password" placeholder="API Key" />
           <label class="inline-flex items-center gap-2 text-sm app-muted">
             <input v-model="adminKeyDraft.makeActive" type="checkbox" />
             设为该分组当前
           </label>
-          <button class="app-primary-button rounded-md px-4 py-2" type="submit">添加</button>
+          <button class="app-primary-button px-4 py-2" type="submit">添加</button>
         </form>
         <table class="w-full text-sm">
           <thead class="app-table-head text-left">
             <tr><th class="p-3">名称</th><th class="p-3">分组</th><th class="p-3">标识</th><th class="p-3">状态</th><th class="p-3">操作</th></tr>
           </thead>
-          <tbody>
-            <tr v-if="!selectedUserKeys.length"><td class="app-muted p-3" colspan="5">暂无密钥</td></tr>
+          <TransitionGroup name="table-rise" tag="tbody">
+            <tr v-if="!selectedUserKeys.length" key="__admin_keys_empty__"><td class="app-muted p-3" colspan="5">暂无密钥</td></tr>
             <tr v-for="key in selectedUserKeys" :key="key.id" class="app-table-row">
-              <td class="p-3"><input v-model="keyDraftFor(key).name" class="app-input w-full rounded-md px-2 py-1" /></td>
+              <td class="p-3"><input v-model="keyDraftFor(key).name" class="app-input w-full px-2 py-1" /></td>
               <td class="p-3">
                 <AppSelect
                   :model-value="keyDraftFor(key).groupId"
@@ -501,25 +535,25 @@ onBeforeUnmount(() => {
               <td class="p-3">{{ key.isActive ? '当前分组使用' : '备用' }}</td>
               <td class="p-3">
                 <div class="flex flex-wrap gap-2">
-                  <button class="app-secondary-button rounded px-2 py-1" @click="saveAdminKey(key)">保存</button>
-                  <button class="app-secondary-button rounded px-2 py-1" @click="copyAdminKey(key)">复制</button>
-                  <button class="app-primary-button rounded px-2 py-1" :disabled="key.isActive" @click="activateAdminKey(key)">切换</button>
-                  <button class="app-secondary-button rounded px-2 py-1" @click="deleteAdminKey(key)">删除</button>
+                  <button class="app-secondary-button px-2 py-1" @click="saveAdminKey(key)">保存</button>
+                  <button class="app-secondary-button px-2 py-1" @click="copyAdminKey(key)">复制</button>
+                  <button class="app-primary-button px-2 py-1" :disabled="key.isActive" @click="activateAdminKey(key)">切换</button>
+                  <button class="app-secondary-button px-2 py-1" @click="deleteAdminKey(key)">删除</button>
                 </div>
               </td>
             </tr>
-          </tbody>
+          </TransitionGroup>
         </table>
       </div>
 
-      <div class="app-card rounded-lg overflow-visible">
+      <div class="app-card rounded-lg overflow-hidden">
         <div class="p-4 font-semibold">死信消息</div>
         <table class="w-full text-sm">
           <thead class="app-table-head text-left">
             <tr><th class="p-3">类型</th><th class="p-3">用户</th><th class="p-3">消息</th><th class="p-3">错误</th><th class="p-3">创建时间</th></tr>
           </thead>
-          <tbody>
-            <tr v-if="!deadLetters.length"><td class="app-muted p-3" colspan="5">暂无死信消息</td></tr>
+          <TransitionGroup name="table-rise" tag="tbody">
+            <tr v-if="!deadLetters.length" key="__dead_empty__"><td class="app-muted p-3" colspan="5">暂无死信消息</td></tr>
             <tr v-for="item in deadLetters" :key="item.id" class="app-table-row">
               <td class="p-3">{{ cleanupKindLabels[item.kind] || item.kind }}</td>
               <td class="p-3">{{ item.userId }}</td>
@@ -527,7 +561,7 @@ onBeforeUnmount(() => {
               <td class="p-3">{{ item.errorSummary }}</td>
               <td class="p-3">{{ item.createdAt }}</td>
             </tr>
-          </tbody>
+          </TransitionGroup>
         </table>
       </div>
     </section>

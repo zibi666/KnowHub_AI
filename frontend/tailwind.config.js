@@ -4,9 +4,9 @@ export default {
   theme: {
     extend: {
       colors: {
-        ink: '#202123',
-        panel: '#f7f7f8',
-        line: '#e5e5e5'
+        ink: 'var(--text)',
+        panel: 'var(--panel-bg)',
+        line: 'var(--line)'
       }
     }
   },

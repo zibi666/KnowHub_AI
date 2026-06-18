@@ -11,15 +11,6 @@ services:
       timeout: 3s
       retries: 5
 
-  searxng:
-    image: docker.io/searxng/searxng:latest
-    restart: unless-stopped
-    volumes:
-      - ./data/searxng/config:/etc/searxng
-      - ./data/searxng/cache:/var/cache/searxng
-    ports:
-      - "8888:8080"
-
   backend:
     build: ./backend
     restart: unless-stopped

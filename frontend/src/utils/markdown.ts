@@ -77,6 +77,17 @@ md.renderer.rules.fence = (tokens, idx) => {
 
 md.renderer.rules.image = () => ''
 
+function normalizeMarkdownBeforeRender(source: string) {
+  const fences: string[] = []
+  const withoutFences = source.replace(/```[\s\S]*?```|~~~[\s\S]*?~~~/g, (block) => {
+    const marker = `\u0000FENCE_${fences.length}\u0000`
+    fences.push(block)
+    return marker
+  })
+  const normalized = withoutFences.replace(/\*\*([^*\n]{1,80}?[：:])\s+\*\*/g, '**$1**')
+  return normalized.replace(/\u0000FENCE_(\d+)\u0000/g, (_, index: string) => fences[Number(index)] || '')
+}
+
 md.renderer.rules.link_open = (tokens, idx, options, env, self) => {
   const href = tokens[idx].attrGet('href') || ''
   if (/^https?:\/\//i.test(href)) {
@@ -87,7 +98,7 @@ md.renderer.rules.link_open = (tokens, idx, options, env, self) => {
 }
 
 export function renderMarkdown(source: string): string {
-  const html = md.render(source)
+  const html = md.render(normalizeMarkdownBeforeRender(source))
   return DOMPurify.sanitize(html, {
     USE_PROFILES: { html: true, mathMl: true },
     ADD_TAGS: [

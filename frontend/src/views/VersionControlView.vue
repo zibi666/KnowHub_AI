@@ -14,6 +14,20 @@ const router = useRouter()
 
 const versions: VersionEntry[] = [
   {
+    version: 'V6.0',
+    title: '联网搜索自动规划大版本',
+    date: '2026-06-10',
+    summary: '把联网搜索升级为 AI 自动规划、证据审查和压缩审计链路，用户只需要在自动与快速回答之间选择。',
+    changes: [
+      '自动模式不再依赖后端关键词表判断深搜，由当前聊天模型用 low 思考强度规划实际策略、首轮关键词、原因码和公开摘要。',
+      '取消用户可选的“深度优先”和轮数输入，旧会话或旧客户端传入 deep 会兼容归一为自动，自动模式内部仍可按证据缺口触发多轮补证。',
+      '自动补证按最多 10 轮硬上限执行，每轮由审查模型决定是否继续、补搜什么关键词或读取哪些来源，快速回答仍保持单轮低延迟路径。',
+      '证据审查改为预算驱动的搜索审计 brief，压缩已查关键词、来源域名、标题、短摘、证据覆盖和失败原因，避免把完整长 URL 和重复网页内容反复发送给模型。',
+      '规划和审查最多重试 3 次；连续 timeout、异常或 JSON 不可解析时停止补充搜索，用已有证据回答，并在搜索过程里记录失败原因、尝试次数和停止理由。',
+      '搜索过程弹窗补充展示自动规划摘要、实际策略、审查尝试、压缩等级、停止原因、后续动作和来源短摘，让联网搜索的执行过程更容易核对。'
+    ]
+  },
+  {
     version: 'V5.3.1',
     title: '附件预览与浅色模式体验修复',
     date: '2026-06-07',
@@ -63,7 +77,7 @@ const versions: VersionEntry[] = [
       '新增联网搜索工具策略，要求强时效、新闻和外部事实优先搜索，snippet 不足时再读取网页。',
       '强时效问题如果模型没有主动调用工具，后端自动执行一次 search_web，并把格式化结果注入上下文。',
       '同一轮内重复搜索 query 或重复读取 URL 会复用缓存结果，不重复消耗工具调用次数。',
-      'SearXNG 搜索链路按国内服务器环境优化，优先尝试 Bing，再尝试百度和 Google，并对不可用引擎做短期冷却。',
+      '联网搜索链路按国内服务器环境优化，直连 Bing、搜狗、360 搜索和头条搜索，去除旧聚合搜索源依赖。',
       'web_search_status 事件增加 query、url、result_count、source_count，让前端进度文案更具体。'
     ]
   },
@@ -468,7 +482,7 @@ const versions: VersionEntry[] = [
         <p>按版本整理 KnowHub AI 的主要功能变化，方便回看每次设计、上下文、聊天体验和部署能力的迭代。</p>
       </div>
 
-      <div class="version-timeline">
+      <TransitionGroup name="timeline-rise" tag="div" class="version-timeline" appear>
         <article v-for="entry in versions" :key="entry.version" class="version-card">
           <div class="version-card-marker" aria-hidden="true" />
           <div class="version-card-main">
@@ -483,7 +497,7 @@ const versions: VersionEntry[] = [
             </ul>
           </div>
         </article>
-      </div>
+      </TransitionGroup>
     </section>
   </main>
 </template>
